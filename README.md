@@ -504,13 +504,21 @@ venv 建的时候带 `--system-site-packages`：**apt 装在系统里的 Python 
 
 | 段 | 关键项 |
 |---|---|
-| `[app]` | `name`、`timezone`（提醒与展示用） |
+| `[app]` | `name`、`timezone`（展示用）、`utc_offset`（定时任务，`+08:00`） |
 | `[telegram]` | `allowed_users`、`token_file`、`stale_after_s` |
-| `[engine]` | `provider`、`model`、`base_url`（可选）、`api_key_file`、`proxy`（可选）、`system_prompt_file`、`max_retries`、`retry_backoff_ms` |
+| `[engine]` | `provider`、`model`、`base_url`、`api_key_file`、`proxy`（模型专用，默认直连）、`system_prompt_file`、`max_retries`、`retry_backoff_ms` |
 | `[actor]` | `max_turns`、`wall_clock_ms`（0=不限）、`workspace`、`workspace_keep_days`、`workspace_max_mb`、`inbox`、`context_budget_tokens` |
+| **`[proxy]`** | `url`（留空沿用 `https_proxy`）、`sandbox`、`web_fetch`、`services` |
+| **`[vision]`** | `enabled`（图片走多模态，会上传 provider） |
 | `[policy]` | `sandbox`/`self_modify`/`outbound`/`lan`/`install`/`host_exec`（`allow`/`ask`/`deny`）、`require_approval`（额外加严） |
+| **`[sandbox]`** | `mounts`（把宿主服务只读挂进沙盒，如 `/run/cups`） |
+| **`[services.<name>]`** | `kind`（`http`/`mcp`）、`base`、`token_file`、`header`、`tools`、`catalog` |
 | `[runtime]` | `dir`、`pip_index`、`npm_registry` |
-| `[skills]` | `dir`、`playbooks_dir`（SOP 目录）、`distill_prompt_file`（可选，覆盖沉淀 SOP） |
+| `[skills]` | `dir`、`playbooks_dir`、`distill_prompt_file` |
+| **`[media]`** | `dir`、`keep_days` |
+| **`[library]`** | `dir`（文件库，永久） |
+| **`[net]`** | `log`（出网审计 JSONL） |
+| **`[identity]`** | `default_user` + `[[identity.user]]`（user ↔ 多通道） |
 | `[storage]` | `db`、`lock` |
 | `[backup]` | `dir`、`keep_days`、`keep_min`、`max_total_mb` |
 
