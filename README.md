@@ -1,8 +1,9 @@
-# chuan · 家庭智能管家 Harness
+# chuan（川）· 家庭智能管家 Harness
 
 跑在单板机（RISC-V SBC / riscv64 / 8GB）上的个人助理。Telegram 交互，能执行命令、读写工作区、定时提醒，并支持把调试成功的脚本沉淀为技能。
 
 - **设计文档**：`docs/README.md`（架构 / 契约 / 决策 / 路线）
+- **许可证**：MIT
 - **运维手册**：`docs/OPS.md`（配置 / 密钥 / systemd / 备份 / 降级）
 - **实测基线**：`docs/PLATFORM.md`
 
