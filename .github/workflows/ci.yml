@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # 手动触发：Actions 页面点 "Run workflow"，不用为构建而提交
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
