@@ -93,6 +93,8 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
     ) -> Result<RunOutcome, RunnerError> {
         let conv = req.conv.clone();
         let run = req.run.clone();
+        // 工具执行阶段还要发事件（审批通过后重新起算耗时），先留一份
+        let tool_sink = sink.clone();
         // 0 = 不限：只靠 max_turns 与手工 /cancel 收口（长任务优先）
         let mut deadline = if req.wall_clock_ms == 0 {
             None
@@ -258,6 +260,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                             &cancel,
                             &mut deadline,
                             &req.actor,
+                            &tool_sink,
                         )
                         .await?;
                         if cancel.is_cancelled() {
@@ -333,6 +336,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         run_cancel: &tokio_util::sync::CancellationToken,
         deadline: &mut Option<Instant>,
         actor: &str,
+        sink: &crate::driver::EventSink,
     ) -> Result<(), RunnerError> {
         let tool = self.tools.get(&call.name).ok_or_else(|| RunnerError::ToolNotFound(call.name.clone()))?;
 
@@ -346,6 +350,15 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             // 不是主人回消息的速度（否则走开一会儿回来就超时）。
             if let Some(d) = deadline.as_mut() {
                 *d += Instant::now().saturating_duration_since(asked_at);
+            }
+            // 审批通过：告诉渲染层"现在才真正开跑"，把等人确认的时间从耗时里扣掉。
+            // 拒绝的分支不需要（它会立刻 finish 成 denied）。
+            if allowed {
+                sink.emit(crate::driver::StreamEvent::ToolStarted {
+                    call: call.call.clone(),
+                    name: call.name.clone(),
+                    preview: String::new(),
+                });
             }
             if !allowed {
                 let mut tx = self.store.begin_write().await?;

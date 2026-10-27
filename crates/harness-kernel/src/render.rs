@@ -162,15 +162,27 @@ impl Renderer for TurnRenderer {
                 }
                 crate::driver::StreamEvent::ToolStarted { call, name, preview } => {
                     self.status = Some(format!("第 {} 轮 · 执行 {name}", self.turn));
-                    self.tools.push(ToolEntry {
-                        call,
-                        name,
-                        state: ToolState::Running,
-                        args_preview: preview,
-                        result_preview: String::new(),
-                        started_at: now_ms(),
-                        duration_ms: None,
-                    });
+                    // 同一个 call 第二次出现 = 审批通过、真正开始执行。
+                    // 从这一刻重新计时：否则"耗时"会把主人点确认的时间也算进去
+                    // （板上实测：耗时 2s 的命令显示 61.9s，就是等人点按钮的时间）。
+                    if let Some(t) = self.tools.iter_mut().find(|t| t.call == call) {
+                        t.state = ToolState::Running;
+                        t.started_at = now_ms();
+                        t.duration_ms = None;
+                        if !preview.is_empty() {
+                            t.args_preview = preview;
+                        }
+                    } else {
+                        self.tools.push(ToolEntry {
+                            call,
+                            name,
+                            state: ToolState::Running,
+                            args_preview: preview,
+                            result_preview: String::new(),
+                            started_at: now_ms(),
+                            duration_ms: None,
+                        });
+                    }
                 }
                 crate::driver::StreamEvent::ToolFinished { call, ok, preview } => {
                     if let Some(t) = self.tools.iter_mut().find(|t| t.call == call) {
@@ -427,6 +439,44 @@ mod tests {
             }
             let _ = i;
         }
+    }
+
+    /// 审批通过后 runner 会再发一次 ToolStarted：不能变成两行，且耗时从这一刻起算。
+    #[test]
+    fn repeated_tool_started_resets_timer_without_duplicating() {
+        let mut r = TurnRenderer::new(caps());
+        let call = CallId("c1".into());
+        r.push(RenderEvent::Stream(StreamEvent::ToolStarted {
+            call: call.clone(),
+            name: "lan_exec".into(),
+            preview: "getent hosts x.local".into(),
+        }));
+        // 模拟"等人点确认"很久之后才真正开跑
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        r.push(RenderEvent::Stream(StreamEvent::ToolStarted {
+            call: call.clone(),
+            name: "lan_exec".into(),
+            preview: String::new(),
+        }));
+        r.push(RenderEvent::Stream(StreamEvent::ToolFinished {
+            call: call.clone(),
+            ok: true,
+            preview: "10.0.0.1".into(),
+        }));
+        let text = format!("{:?}", r.flush(0));
+        assert_eq!(
+            text.matches("lan_exec").count(),
+            1,
+            "同一个 call 不应出现两行: {text}"
+        );
+        assert!(
+            text.contains("0ms"),
+            "耗时应从审批通过那一刻起算，不该包含等人确认的时间: {text}"
+        );
+        assert!(
+            text.contains("getent hosts x.local"),
+            "第二次 ToolStarted 的空 preview 不该覆盖已有参数预览: {text}"
+        );
     }
 
     #[test]
