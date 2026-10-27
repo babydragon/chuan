@@ -26,6 +26,21 @@ cargo zigbuild --release --target riscv64gc-unknown-linux-gnu   # 需要 zig
 sudo deploy/install.sh
 ```
 
+### 版本与发布
+
+| 你想做的 | 做法 | 结果 |
+|---|---|---|
+| 试一下、不发布 | push 到分支 / 开 PR / 手动 Run workflow | 只有 Actions artifact（14 天），**不产生 Release** |
+| 预发布（RC、beta、调试版） | 打 tag `v0.2.0-rc.1` | Release 标记为 **pre-release**；**不会**成为 `latest` |
+| 正式发布 | 打 tag `v0.1.0` | Release 成为 `latest`，`/releases/latest/download/` 指向它 |
+
+装预发布版要显式指定版本：
+
+```bash
+CHUAN_VERSION=v0.2.0-rc.1 \
+  curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/install.sh | sudo bash
+```
+
 ---
 
 ## 1. 它能做什么

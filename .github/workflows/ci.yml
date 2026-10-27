@@ -120,6 +120,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: chuan ${{ github.ref_name }}
+          # 版本号带 `-` 即视为预发布（v0.2.0-rc.1 / v0.2.0-beta.1）
+          # 预发布不会成为 "latest"，所以 /releases/latest/download/ 永远指向最近的稳定版
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           generate_release_notes: true
           files: |
             out/*.tar.gz
@@ -134,3 +138,10 @@ jobs:
 
             或手动下载对应架构的 tar 包，解开后 `sudo ./install.sh`。
             需要 systemd 与 root；安装脚本不会自动启动服务，步骤见脚本末尾提示。
+
+            安装**预发布**版本（不会随 `latest` 更新）：
+
+            ```bash
+            CHUAN_VERSION=${{ github.ref_name }} \
+              curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sudo bash
+            ```
