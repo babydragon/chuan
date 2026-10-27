@@ -123,7 +123,11 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    let api = Arc::new(HttpApi::new(cfg.token.clone())?);
+    // Telegram：CHUAN_PROXY 优先（兼容旧用法），否则用 [proxy] url
+    let tg_proxy = std::env::var("CHUAN_PROXY")
+        .ok()
+        .or_else(|| cfg.proxy.url.clone());
+    let api = Arc::new(HttpApi::with_proxy(cfg.token.clone(), tg_proxy.as_deref())?);
     let offsets = Arc::new(StoreOffsets::new(Arc::clone(&store), "tg.offset"));
     let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(
         api,

@@ -140,6 +140,14 @@ jobs:
             或手动下载对应架构的 tar 包，解开后 `sudo ./install.sh`。
             需要 systemd 与 root；安装脚本不会自动启动服务，步骤见脚本末尾提示。
 
+            下载需要代理时（外层取脚本、内层下包是两次请求，都要给）：
+
+            ```bash
+            P=http://127.0.0.1:7890
+            curl -fsSL -x "$P" https://github.com/${{ github.repository }}/releases/latest/download/install.sh \
+              | sudo https_proxy="$P" bash
+            ```
+
             安装**预发布**版本（不会随 `latest` 更新）：
 
             ```bash

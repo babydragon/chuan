@@ -17,10 +17,19 @@ pub struct HttpApi {
 
 impl HttpApi {
     pub fn new(token: impl Into<String>) -> Result<Self, ApiError> {
+        let from_env = std::env::var("CHUAN_PROXY").ok();
+        Self::with_proxy(token, from_env.as_deref())
+    }
+
+    /// `[proxy] url` 优先，其次 `CHUAN_PROXY`；都没有则按 reqwest 默认（读 http_proxy/https_proxy）。
+    pub fn with_proxy(
+        token: impl Into<String>,
+        proxy: Option<&str>,
+    ) -> Result<Self, ApiError> {
         let mut b = reqwest::Client::builder().timeout(Duration::from_secs(60));
-        if let Ok(proxy) = std::env::var("CHUAN_PROXY") {
+        if let Some(url) = proxy.filter(|u| !u.trim().is_empty()) {
             b = b.proxy(
-                reqwest::Proxy::all(&proxy)
+                reqwest::Proxy::all(url)
                     .map_err(|e| ApiError::Transport(format!("bad proxy: {e}")))?,
             );
         }

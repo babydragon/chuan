@@ -19,6 +19,21 @@ curl -fsSL https://github.com/babydragon/chuan/releases/latest/download/install.
 或手动下载 `chuan-<tag>-<arch>-linux-gnu.tar.gz` 解开后 `sudo ./install.sh`。
 脚本只装文件、**不自动启动**；放密钥与启用步骤会打印在末尾。
 
+**下载需要代理时**（GitHub 慢或被墙）：外层 `curl` 取脚本、内层 `curl` 下 tar 包是两次独立请求，都要给代理：
+
+```bash
+P=http://127.0.0.1:7890
+curl -fsSL -x "$P" https://github.com/babydragon/chuan/releases/latest/download/install.sh \
+  | sudo https_proxy="$P" bash
+```
+
+- 外层 `-x "$P"`：取 install.sh 本身；
+- `sudo https_proxy=...`：sudo 会清空环境变量，所以要**显式写在 sudo 后面**，最终由内层 `curl` 继承；
+- 也可以先下 tar 包再本地装：`curl -x "$P" -LO <tar.gz> && tar xzf <tar.gz> && sudo ./install.sh --proxy "$P"`；
+- `install.sh` 认 `--proxy URL` / `CHUAN_PROXY` / `https_proxy` / `http_proxy`，任一个即可；`CHUAN_BASE_URL` 可换镜像源。
+
+> 运行阶段（Telegram、web_fetch、沙盒脚本、装包）用配置里的 `[proxy] url`，**不需要**在 systemd unit 里加 `Environment=`，见 [代理（proxy）](#代理proxy)。
+
 从源码构建：
 
 ```bash
