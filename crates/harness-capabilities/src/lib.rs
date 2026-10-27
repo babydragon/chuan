@@ -12,6 +12,7 @@ pub mod payload;
 pub mod playbook;
 pub mod services;
 pub mod spill;
+pub mod proxy;
 pub mod sandbox;
 pub mod skills;
 pub mod tools;
@@ -25,6 +26,7 @@ pub use tools::remind::RemindTool;
 pub use tools::send::SendFileTool;
 pub use playbook::PlaybookTool;
 pub use services::{HttpServiceTool, Service};
+pub use proxy::{Mode as ProxyMode, ProxyConfig};
 pub use sandbox::{BwrapEnv, Mount, validate_mount};
 pub use skills::{PublishSkillTool, RollbackSkillTool, RunSkillTool, SkillCatalog};
 pub use tools::{ExecTool, ReadTool, RememberTool, WriteTool};
@@ -42,4 +44,10 @@ impl ExecutionEnv for NullEnv {
     ) -> Result<ExecOutput, EnvError> {
         Err(EnvError::Unavailable("sandbox not wired".into()))
     }
+}
+
+/// 给外部调用方（如 apps/home 构造 MCP 服务）用的代理构造器，
+/// 避免把 reqwest 泄漏给应用层的类型签名。
+pub fn proxy_for(url: &str) -> Option<reqwest::Proxy> {
+    reqwest::Proxy::all(url).ok()
 }

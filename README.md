@@ -289,6 +289,23 @@ MCP 服务 `dida`（用 mcp(server="dida", tool=…, args=…) 调用）：
 落盘在 `/ws/.tool-results/<call_id>.<ext>`，模型能用 `exec` 直接处理（python/grep），图片可用 `send_file` 转给你看。
 清理跟 workspace 一起走（默认 7 天）。
 
+### 代理（proxy）
+
+目标板上的代理写在配置里（或沿用标准环境变量）：
+
+```toml
+[proxy]
+url = "http://127.0.0.1:7890"   # 留空则用 https_proxy / http_proxy
+sandbox   = "auto"   # auto = 只在 exec(proxy=true) 时注入；always / never
+web_fetch = "auto"   # auto = 直连失败再试代理；always / never
+services  = "never"  # http/mcp 默认直连；国内服务绕代理更慢
+```
+
+- 注入的是 `http_proxy` / `https_proxy` / `all_proxy` / `no_proxy`（`no_proxy` 覆盖 localhost 与私网）；
+- **联网 lane 不隔离 netns**，所以沙盒里的 `127.0.0.1` 就是宿主，能直接连本地代理；离线 lane 没有网络，代理无意义；
+- 模型侧也给了选择权：`exec(proxy=true)` 与 `web_fetch(proxy=true|false)`，不传则按上面的默认策略；
+- 代理地址会注入 system prompt（固定内容），所以脚本里不用猜，也不该把地址写死进技能或记忆。
+
 ### 第三方 HTTP 服务（http）
 
 带鉴权的 API 用命名服务调用，**token 由宿主注入，模型看不到也写不进 URL**：

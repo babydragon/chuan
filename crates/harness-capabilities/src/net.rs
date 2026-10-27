@@ -138,21 +138,49 @@ pub(crate) fn append_log(path: &Path, line: &str) {
 }
 
 pub struct WebFetchTool {
+    /// 直连客户端
     client: reqwest::Client,
+    /// 经代理的客户端（没配代理时为 None）
+    proxied: Option<reqwest::Client>,
+    /// 默认策略：Auto = 直连失败再试代理
+    mode: crate::proxy::Mode,
     log: PathBuf,
     max_bytes: usize,
 }
 
 impl WebFetchTool {
     pub fn new(log: impl Into<PathBuf>) -> Result<Arc<Self>, String> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent("chuan/0.1 (+home assistant)")
-            .build()
-            .map_err(|e| format!("HTTP 客户端初始化失败：{e}"))?;
-        Ok(Arc::new(Self { client, log: log.into(), max_bytes: DEFAULT_MAX_BYTES }))
+        Self::with_proxy(log, &crate::proxy::ProxyConfig::default())
+    }
+
+    pub fn with_proxy(
+        log: impl Into<PathBuf>,
+        proxy: &crate::proxy::ProxyConfig,
+    ) -> Result<Arc<Self>, String> {
+        let build = |p: Option<reqwest::Proxy>| {
+            let mut b = reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent("chuan/0.1 (+home assistant)");
+            b = match p {
+                Some(p) => b.proxy(p),
+                None => b.no_proxy(),
+            };
+            b.build().map_err(|e| format!("HTTP 客户端初始化失败：{e}"))
+        };
+        let client = build(None)?;
+        let proxied = match proxy.reqwest() {
+            Some(p) => Some(build(Some(p))?),
+            None => None,
+        };
+        Ok(Arc::new(Self {
+            client,
+            proxied,
+            mode: proxy.web_fetch,
+            log: log.into(),
+            max_bytes: DEFAULT_MAX_BYTES,
+        }))
     }
 
     fn log_line(&self, url: &str, host: &str, status: Option<u16>, bytes: usize, ms: i64, note: &str) {
@@ -183,7 +211,11 @@ impl Tool for WebFetchTool {
                 "type": "object",
                 "properties": {
                     "url": { "type": "string" },
-                    "max_chars": { "type": "integer", "description": "回给模型的正文上限，默认 20000" }
+                    "max_chars": { "type": "integer", "description": "回给模型的正文上限，默认 20000" },
+                    "proxy": {
+                        "type": "boolean",
+                        "description": "true = 走宿主代理；false = 直连；不传用默认策略（直连失败再试代理）"
+                    }
                 },
                 "required": ["url"]
             }),
@@ -227,13 +259,38 @@ impl Tool for WebFetchTool {
                 return Err(ToolError::new(ErrorCode::NotPermitted, e, false));
             }
 
-            let resp = match self.client.get(&url).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    let note = format!("请求失败：{e}");
-                    self.log_line(&url, &parts.host, None, 0, started.elapsed().as_millis() as i64, &note);
-                    return Err(ToolError::new(ErrorCode::Unavailable, note, false));
+            // 代理策略：显式 true/false 覆盖；Auto 时先直连，失败再走代理
+            let want = match self.mode {
+                crate::proxy::Mode::Always => Some(true),
+                crate::proxy::Mode::Never => Some(false),
+                crate::proxy::Mode::Auto => args.get("proxy").and_then(|v| v.as_bool()),
+            };
+            let mut attempts: Vec<Option<reqwest::Client>> = match (want, &self.proxied) {
+                (Some(true), Some(p)) => vec![Some(p.clone())],
+                (Some(false), _) => vec![None],
+                (None, Some(p)) if self.mode == crate::proxy::Mode::Auto => {
+                    vec![None, Some(p.clone())]
                 }
+                _ => vec![None],
+            };
+            let mut resp = None;
+            let mut last_err = String::new();
+            while let Some(client) = attempts.pop() {
+                let c = client.unwrap_or_else(|| self.client.clone());
+                match c.get(&url).send().await {
+                    Ok(r) => {
+                        resp = Some(r);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                    }
+                }
+            }
+            let Some(resp) = resp else {
+                let note = format!("请求失败：{last_err}");
+                self.log_line(&url, &parts.host, None, 0, started.elapsed().as_millis() as i64, &note);
+                return Err(ToolError::new(ErrorCode::Unavailable, note, false));
             };
             let status = resp.status();
             let ctype = resp

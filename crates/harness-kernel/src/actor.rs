@@ -52,6 +52,8 @@ pub struct ActorConfig {
     pub host_paths: Option<String>,
     /// 是否把图片作为多模态内容发给模型（会把图上传给模型厂商，默认关）
     pub vision: bool,
+    /// 代理说明（有代理时注入；固定内容，避免模型把地址写死进技能）
+    pub proxy_hint: Option<String>,
     /// 身份表：channel+addr → user。单用户时只有一条绑定。
     pub identity: Arc<Directory>,
 }
@@ -405,6 +407,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         } else {
             "\n\n你看不到图片内容（只会收到 `/media` 里的文件路径），需要时用 exec 处理，处理不了就直说。"
         });
+        if let Some(hint) = &self.cfg.proxy_hint {
+            if !hint.trim().is_empty() {
+                system.push_str("\n\n");
+                system.push_str(hint);
+            }
+        }
         if let Some(block) = &self.cfg.host_paths {
             if !block.trim().is_empty() {
                 system.push_str("\n\n");

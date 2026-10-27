@@ -79,6 +79,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub media: MediaFile,
     #[serde(default)]
+    pub proxy: ProxyFile,
+    #[serde(default)]
     pub vision: VisionFile,
     #[serde(default)]
     pub sandbox: SandboxFile,
@@ -120,6 +122,18 @@ fn default_auth_header() -> String {
 pub struct LibraryFile {
     /// 文件库（永久保存的产物）
     pub dir: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct ProxyFile {
+    /// 宿主上的 HTTP 代理，如 http://127.0.0.1:7890
+    pub url: Option<String>,
+    /// 沙盒脚本默认是否带代理：auto（按需）/ always / never
+    pub sandbox: Option<String>,
+    /// web_fetch 默认：auto（直连失败再试代理）/ always / never
+    pub web_fetch: Option<String>,
+    /// http/mcp 服务默认是否走代理：never / always
+    pub services: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -428,6 +442,7 @@ pub struct Config {
     pub media_keep_days: u64,
     pub sandbox_mounts: Vec<harness_capabilities::Mount>,
     pub vision: bool,
+    pub proxy: harness_capabilities::ProxyConfig,
     pub library_dir: String,
     pub services: Vec<harness_capabilities::Service>,
     pub mcp_servers: Vec<std::sync::Arc<harness_capabilities::McpServer>>,
@@ -698,6 +713,17 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
                     s.extra_headers.clone(),
                     s.tools.clone(),
                     s.catalog.clone().unwrap_or_else(|| "names".into()),
+                    match (
+                        harness_capabilities::ProxyMode::parse(
+                            file.proxy.services.as_deref().unwrap_or("never"),
+                        ),
+                        file.proxy.url.as_ref(),
+                    ) {
+                        (harness_capabilities::ProxyMode::Always, Some(url)) => {
+                            harness_capabilities::proxy_for(url)
+                        }
+                        _ => None,
+                    },
                 )
                 .map_err(|e| tracing::warn!(service = %name, error = %e, "mcp 初始化失败"))
                 .ok()
@@ -720,6 +746,25 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .dir
             .unwrap_or_else(|| format!("{home}/.local/share/chuan/files")),
         vision: file.vision.enabled,
+        proxy: harness_capabilities::ProxyConfig {
+            // 没写配置就沿用标准环境变量（守护进程通常从 systemd 环境继承）
+            url: file
+                .proxy
+                .url
+                .clone()
+                .or_else(|| std::env::var("https_proxy").ok())
+                .or_else(|| std::env::var("http_proxy").ok())
+                .filter(|u| !u.trim().is_empty()),
+            sandbox: harness_capabilities::ProxyMode::parse(
+                file.proxy.sandbox.as_deref().unwrap_or("auto"),
+            ),
+            web_fetch: harness_capabilities::ProxyMode::parse(
+                file.proxy.web_fetch.as_deref().unwrap_or("auto"),
+            ),
+            services: harness_capabilities::ProxyMode::parse(
+                file.proxy.services.as_deref().unwrap_or("never"),
+            ),
+        },
         sandbox_mounts: file
             .sandbox
             .mounts

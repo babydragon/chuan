@@ -20,6 +20,7 @@ pub struct ServiceTool {
     secrets_root: PathBuf,
     hub: Arc<McpHub>,
     http: Arc<HttpServiceTool>,
+    proxy: crate::proxy::ProxyConfig,
 }
 
 impl ServiceTool {
@@ -34,6 +35,19 @@ impl ServiceTool {
             secrets_root: secrets_root.into(),
             hub,
             http,
+            proxy: Default::default(),
+        })
+    }
+
+    pub fn with_proxy(mut self: Arc<Self>, proxy: crate::proxy::ProxyConfig) -> Arc<Self> {
+        // 先解包再重建，避免 Arc::get_mut 失败
+        let _ = &self;
+        Arc::new(Self {
+            dir: self.dir.clone(),
+            secrets_root: self.secrets_root.clone(),
+            hub: Arc::clone(&self.hub),
+            http: Arc::clone(&self.http),
+            proxy,
         })
     }
 
@@ -261,6 +275,10 @@ impl Tool for ServiceTool {
                             vec![],
                             tools.clone(),
                             catalog.clone().unwrap_or_else(|| "names".into()),
+                            match (self.proxy.services, self.proxy.reqwest()) {
+                                (crate::proxy::Mode::Always, Some(p)) => Some(p),
+                                _ => None,
+                            },
                         )
                         .map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
                         // 先连一次：连不上就不写配置，避免把坏配置留在磁盘上

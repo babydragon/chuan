@@ -21,6 +21,7 @@ pub struct InstallTool {
     env: Arc<BwrapEnv>,
     pip_index: Option<String>,
     npm_registry: Option<String>,
+    proxy: crate::proxy::ProxyConfig,
 }
 
 impl InstallTool {
@@ -47,7 +48,13 @@ impl InstallTool {
         pip_index: Option<String>,
         npm_registry: Option<String>,
     ) -> Self {
-        Self { env, pip_index, npm_registry }
+        Self { env, pip_index, npm_registry, proxy: Default::default() }
+    }
+
+    /// 装包 lane 一般需要代理（pip/npm 常访问境外源）。
+    pub fn with_proxy(mut self, proxy: crate::proxy::ProxyConfig) -> Self {
+        self.proxy = proxy;
+        self
     }
 }
 
@@ -244,6 +251,8 @@ pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/no
             }
         };
 
+        // 装包几乎一定要出网：有代理就带上，否则 pip/npm 可能在墙外卡死
+        env.extend(self.proxy.env());
         let opts = ExecOpts {
             timeout_ms: INSTALL_TIMEOUT_MS,
             cwd: None,

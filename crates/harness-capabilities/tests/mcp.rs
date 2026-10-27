@@ -113,6 +113,7 @@ async fn initialize_list_and_call_with_token() {
         vec![],
         vec![],
         "names".into(),
+        None,
     )
     .unwrap();
     let tools: Vec<McpToolInfo> = server.connect().await.unwrap();
@@ -145,7 +146,8 @@ async fn initialize_list_and_call_with_token() {
 #[tokio::test]
 async fn catalog_lists_tools_and_params() {
     let (base, _seen) = mock_mcp(3).await;
-    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "names".into()).unwrap();
+    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "names".into(), None)
+        .unwrap();
     s.connect().await.unwrap();
     let hub = McpHub::new(vec![s]);
     let text = hub.catalog();
@@ -158,7 +160,8 @@ async fn catalog_lists_tools_and_params() {
 #[tokio::test]
 async fn unknown_tool_is_rejected() {
     let (base, _seen) = mock_mcp(3).await;
-    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "names".into()).unwrap();
+    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "names".into(), None)
+        .unwrap();
     s.connect().await.unwrap();
     let err = s.call("nope", serde_json::json!({})).await.unwrap_err();
     assert!(err.contains("没有工具"), "{err}");
@@ -167,7 +170,7 @@ async fn unknown_tool_is_rejected() {
 #[tokio::test]
 async fn catalog_summary_mode_is_one_line() {
     let (base, _seen) = mock_mcp(3).await;
-    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "summary".into())
+    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "summary".into(), None)
         .unwrap();
     s.connect().await.unwrap();
     let hub = McpHub::new(vec![s]);
@@ -180,7 +183,7 @@ async fn catalog_summary_mode_is_one_line() {
 #[tokio::test]
 async fn catalog_full_mode_shows_description() {
     let (base, _seen) = mock_mcp(3).await;
-    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "full".into())
+    let s = McpServer::new("dida", base, None, String::new(), vec![], vec![], "full".into(), None)
         .unwrap();
     s.connect().await.unwrap();
     let hub = McpHub::new(vec![s]);

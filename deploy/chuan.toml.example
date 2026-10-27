@@ -80,6 +80,13 @@ require_approval = []
 # token_file = "/etc/chuan/secrets/dida_token"
 # tools = ["create_task", "list_undone_tasks_by_time_query"]   # 可选：只暴露这些
 
+[proxy]
+# 宿主上的 HTTP 代理；留空则沿用 https_proxy / http_proxy
+url = "http://127.0.0.1:7890"
+sandbox = "auto"      # auto = 只在 exec(proxy=true) 时注入
+web_fetch = "auto"    # auto = 直连失败再试代理
+services = "never"    # http/mcp 默认直连
+
 [vision]
 # 开启后图片会作为多模态内容发给模型厂商（会外传，自行决定）
 enabled = false

@@ -209,13 +209,14 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
-    tools.register(Arc::new(ExecTool::sandboxed()));
+    tools.register(Arc::new(ExecTool::sandboxed().with_proxy(cfg.proxy.clone())));
     // 内网调试 lane：有网卡，逐条审批；看不到宿主文件
     tools.register(Arc::new(ExecTool::lan(Arc::new(
         BwrapEnv::new(&cfg.workspace)
             .with_network(true)
             .with_mounts(cfg.sandbox_mounts.clone()),
-    ))));
+    ))
+    .with_proxy(cfg.proxy.clone())));
     // 装包 lane：有网络，只把运行时目录挂成可写（/rt）
     tools.register(Arc::new(InstallTool::new(
         Arc::new(
@@ -225,7 +226,8 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         ),
         cfg.pip_index.clone(),
         cfg.npm_registry.clone(),
-    )));
+    )
+    .with_proxy(cfg.proxy.clone())));
     tools.register(Arc::new(RememberTool));
     tools.register(Arc::new(SendFileTool));
     tools.register(KeepTool::new(&cfg.library_dir));
@@ -235,7 +237,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             .with_skills(Arc::clone(&skills))
             .with_identity(Arc::clone(&cfg.identity)),
     ));
-    tools.register(WebFetchTool::new(&cfg.net_log)?);
+    tools.register(WebFetchTool::with_proxy(&cfg.net_log, &cfg.proxy)?);
     // http / mcp / service 三个工具常驻：agent 才能在运行时自己接新服务
     let mcp = McpHub::new(cfg.mcp_servers.clone());
     if !mcp.is_empty() {
@@ -248,14 +250,17 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         let names: Vec<&str> = cfg.services.iter().map(|s| s.name.as_str()).collect();
         println!("http services: {}", names.join(", "));
     }
-    let http_svc = HttpServiceTool::new(cfg.services.clone(), &cfg.net_log)?;
+    let http_svc = HttpServiceTool::with_proxy(cfg.services.clone(), &cfg.net_log, &cfg.proxy)?;
     tools.register(Arc::clone(&http_svc) as Arc<dyn harness_kernel::Tool>);
-    tools.register(ServiceTool::new(
-        cfg.config_dir.join("services.d"),
-        cfg.config_dir.join("secrets"),
-        Arc::clone(&mcp),
-        http_svc,
-    ));
+    tools.register(
+        ServiceTool::new(
+            cfg.config_dir.join("services.d"),
+            cfg.config_dir.join("secrets"),
+            Arc::clone(&mcp),
+            http_svc,
+        )
+        .with_proxy(cfg.proxy.clone()),
+    );
     tools.register(NetLogTool::new(&cfg.net_log));
     tools.register(PlaybookTool::new(
         &cfg.playbooks_dir,
@@ -310,6 +315,12 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         "sandbox: /ws(可写) /inbox(只读) /skills(只读) /media(只读) ← {} · skills={} · media={}",
         cfg.inbox, cfg.skills_dir, cfg.media_dir
     );
+    if let Some(url) = &cfg.proxy.url {
+        println!(
+            "proxy: {}（沙盒={:?} web_fetch={:?} 服务={:?}）",
+            url, cfg.proxy.sandbox, cfg.proxy.web_fetch, cfg.proxy.services
+        );
+    }
     println!(
         "vision: {}",
         if cfg.vision {
@@ -351,6 +362,13 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             tz_offset_min: cfg.tz_offset_min,
             identity: Arc::clone(&cfg.identity),
             vision: cfg.vision,
+            proxy_hint: cfg.proxy.url.as_ref().map(|url| {
+                format!(
+                    "宿主机代理：{url}（联网 lane 里 127.0.0.1 就是宿主）。访问境外站点时用 `exec(proxy=true)` 或脚本里 `export https_proxy={url}`；\n\
+                     国内站点直连更快，不要默认开代理；`web_fetch` 有 `proxy` 参数，不传则直连失败后自动重试代理。\n\
+                     代理地址不要写进技能或记忆，以本段为准。"
+                )
+            }),
             host_paths: Some(format!(
                 "宿主路径（你在沙盒里看不到，只用于回答“该放哪/在哪改”；不要试图读取，也永远不要索取凭据内容）：\n\
                  - 凭据目录：{secrets}/（每个服务一个文件，权限 0600，由主人创建）\n\

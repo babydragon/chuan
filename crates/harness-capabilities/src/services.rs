@@ -84,14 +84,26 @@ impl HttpServiceTool {
         services: Vec<Service>,
         log: impl Into<PathBuf>,
     ) -> Result<Arc<Self>, String> {
-        let client = reqwest::Client::builder()
+        Self::with_proxy(services, log, &crate::proxy::ProxyConfig::default())
+    }
+
+    /// `services = always` 时才走代理；默认直连（国内服务绕代理反而慢）。
+    pub fn with_proxy(
+        services: Vec<Service>,
+        log: impl Into<PathBuf>,
+        proxy: &crate::proxy::ProxyConfig,
+    ) -> Result<Arc<Self>, String> {
+        let mut b = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             // 不跟重定向：避免被跳到别的域名（token 只该发给配置的那个 host）
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("chuan/0.1")
-            .build()
-            .map_err(|e| format!("HTTP 客户端初始化失败：{e}"))?;
+            .user_agent("chuan/0.1");
+        b = match (proxy.services, proxy.reqwest()) {
+            (crate::proxy::Mode::Always, Some(p)) => b.proxy(p),
+            _ => b.no_proxy(),
+        };
+        let client = b.build().map_err(|e| format!("HTTP 客户端初始化失败：{e}"))?;
         Ok(Arc::new(Self {
             services: std::sync::RwLock::new(
                 services.into_iter().map(|s| (s.name.clone(), s)).collect(),

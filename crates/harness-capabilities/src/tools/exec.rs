@@ -7,22 +7,31 @@ use harness_kernel::{
     Block, EffectClass, ExecOpts, ExecutionEnv, Tool, ToolCtx, ToolError, ToolOutput, ToolSpec,
 };
 
+use crate::proxy::ProxyConfig;
+
 /// 两条执行 lane 共用一份实现：
 /// - `exec`：无网络（默认），沙盒内任意代码；
 /// - `lan_exec`：有网卡，专门调试内网设备（打印机/网关/HA），自带联网环境。
 pub struct ExecTool {
     lan: bool,
+    proxy: ProxyConfig,
     /// 联网 lane 自带环境；普通 lane 用 `ctx.env`
     env: Option<Arc<dyn ExecutionEnv>>,
 }
 
 impl ExecTool {
     pub fn sandboxed() -> Self {
-        Self { lan: false, env: None }
+        Self { lan: false, proxy: ProxyConfig::default(), env: None }
     }
 
     pub fn lan(env: Arc<dyn ExecutionEnv>) -> Self {
-        Self { lan: true, env: Some(env) }
+        Self { lan: true, proxy: ProxyConfig::default(), env: Some(env) }
+    }
+
+    /// 代理策略：`proxy=true`（或 mode=always）时把 http_proxy/https_proxy/no_proxy 注入沙盒。
+    pub fn with_proxy(mut self, proxy: ProxyConfig) -> Self {
+        self.proxy = proxy;
+        self
     }
 }
 
@@ -54,7 +63,11 @@ impl Tool for ExecTool {
                 "properties": {
                     "argv": { "type": "array", "items": { "type": "string" } },
                     "script": { "type": "string", "description": "shell 脚本，等价于 sh -lc" },
-                    "timeout_ms": { "type": "integer" }
+                    "timeout_ms": { "type": "integer" },
+                    "proxy": {
+                        "type": "boolean",
+                        "description": "需要访问境外站点时传 true，会注入 http_proxy/https_proxy；国内站点直连更快"
+                    }
                 },
                 "oneOf": [{ "required": ["argv"] }, { "required": ["script"] }]
             }),
@@ -100,10 +113,11 @@ impl Tool for ExecTool {
             ));
         }
 
+        let want_proxy = args.get("proxy").and_then(|v| v.as_bool()).unwrap_or(false);
         let opts = ExecOpts {
             timeout_ms: args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(15_000),
             cwd: None,
-            env: Vec::new(),
+            env: self.proxy.sandbox_env(want_proxy),
             stdin: None,
         };
 

@@ -59,12 +59,15 @@ impl McpServer {
         extra_headers: Vec<(String, String)>,
         allow: Vec<String>,
         catalog_mode: String,
+        proxy: Option<reqwest::Proxy>,
     ) -> Result<Arc<Self>, String> {
-        // 与模型调用一致：**不继承** https_proxy。MCP 端点通常是固定域名，
-        // 需要代理时在部署层用 systemd 环境单独控制（未来加 per-service proxy）。
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(30))
+        // 默认不继承环境代理；显式配置 `[proxy] services = "always"` 时走代理。
+        let mut b = reqwest::Client::builder().timeout(Duration::from_secs(30));
+        b = match proxy {
+            Some(p) => b.proxy(p),
+            None => b.no_proxy(),
+        };
+        let client = b
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("chuan/0.1")

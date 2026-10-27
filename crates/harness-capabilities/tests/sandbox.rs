@@ -561,3 +561,51 @@ async fn send_file_respects_workspace_and_mime() {
     assert!(err.message.contains("越界"), "{}", err.message);
     assert_eq!(rec.0.lock().unwrap().len(), 1, "拒绝时不应调用 outbox");
 }
+
+/// 代理只在 `proxy=true`（或 always）时注入沙盒环境，默认不带。
+#[tokio::test]
+async fn exec_injects_proxy_env_only_on_demand() {
+    if !has_bwrap() {
+        eprintln!("skip: no bwrap");
+        return;
+    }
+    use harness_capabilities::{ExecTool, ProxyConfig, ProxyMode};
+
+    let ws = tempfile::tempdir().unwrap();
+    let env = BwrapEnv::new(ws.path());
+    let proxy = ProxyConfig {
+        url: Some("http://127.0.0.1:7890".into()),
+        sandbox: ProxyMode::Auto,
+        ..Default::default()
+    };
+    let tool = ExecTool::sandboxed().with_proxy(proxy);
+    let wsx = Workspace { run: harness_kernel::RunId("r".into()), root: ws.path().to_string_lossy().into() };
+    let ctx = ToolCtx {
+        conv: harness_kernel::ConversationId("c".into()),
+        actor: "42",
+        outbox: &harness_kernel::NullOutbox,
+        docs: &harness_kernel::NullDocReader,
+        run: harness_kernel::RunId("r".into()),
+        call: harness_kernel::CallId("c".into()),
+        workspace: &wsx,
+        env: &env,
+        cancel: CancellationToken::new(),
+    };
+
+    let off = tool
+        .execute(serde_json::json!({"script":"echo \"[${https_proxy:-none}]\"","timeout_ms":5000}), &ctx)
+        .await
+        .unwrap();
+    let off_text = format!("{:?}", off.content);
+    assert!(off_text.contains("[none]"), "默认不该带代理: {off_text}");
+
+    let on = tool
+        .execute(
+            serde_json::json!({"script":"echo \"[$https_proxy]\"","timeout_ms":5000,"proxy":true}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let on_text = format!("{:?}", on.content);
+    assert!(on_text.contains("[http://127.0.0.1:7890]"), "{}", on_text);
+}
