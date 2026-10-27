@@ -15,7 +15,9 @@ use crate::channel::{Channel, ChannelError, Inbound, InboundKind};
 use crate::driver::{EventSink, TurnDriver};
 use crate::env::ExecutionEnv;
 use crate::ids::{ApprovalId, CallId, ConversationId, MsgRef, RunId, now_ms};
-use crate::record::NewApproval;
+use crate::effect::EffectClass;
+use crate::event::{EventKind, NewEvent};
+use crate::record::{NewApproval, ToolCallRecord};
 use crate::identity::Directory;
 use crate::render::{TurnRenderer, apply_action};
 use crate::runner::{ApprovalGate, RunRequest, Runner};
@@ -854,6 +856,87 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     }
 
     /// 跑钉住的脚本：不调模型，时延与格式都由脚本决定。
+    /// 定时任务开跑前记账：`run.started` + 预登记工具调用。
+    /// 写失败只告警，不阻断投递——记账不能比送达更脆。
+    async fn record_job_start(
+        self: &Arc<Self>,
+        conv: &ConversationId,
+        run: &RunId,
+        call: &CallId,
+        skill: &str,
+        args: &serde_json::Value,
+        title: &str,
+        channel: &str,
+    ) {
+        let Ok(mut tx) = self.store.begin_write().await else {
+            tracing::warn!("job ledger: 写事务打不开，跳过记账");
+            return;
+        };
+        let _ = tx
+            .append(NewEvent {
+                conv: conv.clone(),
+                run: run.clone(),
+                turn: None,
+                kind: EventKind::RunStarted,
+                payload: serde_json::json!({
+                    "kind": "scheduled",
+                    "skill": skill,
+                    "args": args,
+                    "title": title,
+                    "channel": channel,
+                }),
+                dedupe_key: Some(format!("job-started-{}", run.0)),
+            })
+            .await;
+        let _ = tx
+            .open_tool_calls(
+                conv.clone(),
+                run.clone(),
+                None,
+                vec![ToolCallRecord {
+                    call: call.clone(),
+                    name: "run_skill".into(),
+                    args: serde_json::json!({ "name": skill, "args": args }),
+                    effect: EffectClass::Pure,
+                    idem_key: format!("job-{}", run.0),
+                }],
+            )
+            .await;
+        if let Err(e) = tx.commit().await {
+            tracing::warn!(error = %e, "job ledger: run.started 提交失败");
+        }
+    }
+
+    /// 定时任务收尾：关闭工具调用 + `run.finished`。
+    async fn record_job_end(
+        self: &Arc<Self>,
+        conv: &ConversationId,
+        run: &RunId,
+        call: &CallId,
+        status: &str,
+        preview: String,
+        started_ms: i64,
+    ) {
+        let Ok(mut tx) = self.store.begin_write().await else { return };
+        let _ = tx.close_tool_call(call.clone(), status, preview).await;
+        let _ = tx
+            .append(NewEvent {
+                conv: conv.clone(),
+                run: run.clone(),
+                turn: None,
+                kind: EventKind::RunFinished,
+                payload: serde_json::json!({
+                    "status": status,
+                    "ms": now_ms().saturating_sub(started_ms),
+                }),
+                dedupe_key: Some(format!("job-finished-{}", run.0)),
+            })
+            .await;
+        if let Err(e) = tx.commit().await {
+            tracing::warn!(error = %e, "job ledger: run.finished 提交失败");
+        }
+    }
+
     async fn run_pinned(
         self: &Arc<Self>,
         channel: &str,
@@ -874,14 +957,21 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             return;
         };
         let run = RunId(format!("job-{now}"));
+        let conv = ConversationId(format!("job:{chat}"));
+        let call = CallId(format!("job-{now}"));
+        let started_ms = now_ms();
+        // 账本：pinned 任务没有模型参与，但**必须留痕**（不变量 1）。
+        // 否则崩溃后无法判断"跑过没跑过"，只能按 next_at 重排，可能重复或漏投。
+        self.record_job_start(&conv, &run, &call, &name, &args, title, channel)
+            .await;
         let ws = Workspace { run: run.clone(), root: self.cfg.workspace_root.clone() };
         let ctx = crate::tool::ToolCtx {
-            conv: ConversationId(format!("job:{chat}")),
+            conv: conv.clone(),
             actor: "job",
             outbox: &crate::tool::NullOutbox,
             docs: &crate::tool::NullDocReader,
-            run,
-            call: CallId(format!("job-{now}")),
+            run: run.clone(),
+            call: call.clone(),
             workspace: &ws,
             env: &*self.env,
             cancel: CancellationToken::new(),
@@ -892,12 +982,17 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         {
             Ok(out) => blocks_text(&out.content),
             Err(e) => {
-                let _ = self
-                    .reply(chat, &format!("{header}\n\n❌ 技能执行失败：{}", e.message))
+                let msg = e.message.clone();
+                self.record_job_end(&conv, &run, &call, "error", msg.clone(), started_ms)
                     .await;
+                let _ = self.reply(chat, &format!("{header}\n\n❌ 技能执行失败：{msg}")).await;
                 return;
             }
         };
+
+        let preview: String = body.chars().take(200).collect();
+        self.record_job_end(&conv, &run, &call, "ok", preview, started_ms)
+            .await;
 
         // 脚本只负责取数；分类/翻译/排版交给一次普通 run
         if let Some(instruction) = polish {

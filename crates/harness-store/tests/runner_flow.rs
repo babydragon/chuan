@@ -1391,6 +1391,22 @@ async fn pinned_reminder_runs_skill_without_model() {
     assert!(all.contains("PYOUT:hn-top"), "应直接投递脚本输出: {all}");
     assert!(all.contains("定时任务"), "应带时间头: {all}");
     assert!(driver.seen.lock().unwrap().is_empty(), "不该调用模型");
+
+    // 账本要留痕：pinned 任务不经过模型，但也必须能审计/恢复
+    let mut rd = store.begin_read().await.unwrap();
+    let calls = rd
+        .tool_calls(ConversationId::from("job:1000"))
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1, "应记录一次技能调用: {calls:?}");
+    assert_eq!(calls[0].name, "run_skill");
+    assert_eq!(calls[0].status, "finished", "调用应已收尾");
+    let usage = rd.usage_total(0).await.unwrap();
+    assert_eq!(
+        usage.prompt_tokens + usage.completion_tokens,
+        0,
+        "pinned 任务不该产生任何 token 用量"
+    );
 }
 
 /// 静态提醒：到点只发文本，不调模型、不跑技能。
