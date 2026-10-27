@@ -94,6 +94,35 @@ enabled = true     # 默认 false
 - 隐私：**开这个等于把图片发给模型提供商**。家里有小孩照片，想清楚再开；
 - 关闭时模型只拿到文件路径，会明确说"看不到图片内容"。
 
+## 代理（proxy）
+
+板子在国内、GitHub/Telegram/境外 API 都要过代理时，**一处配置全用它**：
+
+```toml
+[proxy]
+url = "http://127.0.0.1:7890"   # 留空则读 https_proxy / http_proxy
+sandbox   = "auto"    # auto = 只在 exec(proxy=true) 时注入 / always / never
+web_fetch = "auto"    # auto = 直连失败再试代理 / always / never
+services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
+```
+
+用到它的地方：
+
+| 位置 | 行为 |
+|---|---|
+| Telegram | `CHUAN_PROXY` 优先，其次 `[proxy].url`，都没有则 reqwest 读环境变量 |
+| 模型（LLM） | 只看 `[engine] proxy` / `CHUAN_LLM_PROXY`，与 `[proxy]` 无关 |
+| 沙盒脚本 | `exec(proxy=true)` 或 `sandbox="always"` 时注入 `http_proxy/https_proxy/all_proxy` + `no_proxy` |
+| `web_fetch` | 双客户端；`auto` 先直连、失败再走代理；`proxy=true/false` 可显式覆盖 |
+| `install_deps` | **总是**带代理（pip/npm 几乎一定要出网） |
+| `http` / `mcp` | 仅 `services="always"` 时走代理 |
+
+**不需要**在 systemd unit 里加 `Environment=https_proxy=...`——配置里写了就够了（除非你只是想让 `[proxy].url` 留空、靠环境变量兜底）。
+
+注意：联网 lane（`lan_exec`、`network: true` 技能）**不隔离 netns**，所以沙盒里的 `127.0.0.1` 就是宿主 loopback，能直接连本地代理；离线 lane 没有网络，代理无意义。
+
+**安装阶段**的代理是另一回事（下载 GitHub 资产）：见 README 第 0 节，用 `curl -x "$P" ... | sudo https_proxy="$P" bash`，或 `sudo ./install.sh --proxy "$P"`。
+
 ## 凭据与路径
 
 | 东西 | 位置 | 谁创建 |
