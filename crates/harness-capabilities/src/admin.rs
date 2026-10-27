@@ -65,9 +65,17 @@ impl ServiceTool {
                 "凭据必须用宿主机绝对路径或 ~/ 开头：{raw}（例如 ~/.config/chuan/secrets/xxx_token）"
             ));
         }
-        let canon = expanded
-            .canonicalize()
-            .map_err(|e| format!("凭据文件不可用：{raw}（{e}）"))?;
+        let canon = expanded.canonicalize().map_err(|e| {
+            let hint = match e.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    "：运行用户读不到。secrets 目录需要可进入（0750 root:chuan），\
+                     文件需要可读（0440 root:chuan）"
+                }
+                std::io::ErrorKind::NotFound => "：文件不存在，检查路径与文件名",
+                _ => "",
+            };
+            format!("凭据文件不可用：{raw}（{e}）{hint}")
+        })?;
         let root = self
             .secrets_root
             .canonicalize()

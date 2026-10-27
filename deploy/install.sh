@@ -133,7 +133,10 @@ run install -Dm755 "$BIN_SRC" /usr/local/bin/chuan
 # /etc/chuan 必须与 unit 的 ConfigurationDirectoryMode 一致（0750），
 # 且组为 chuan：否则 daemon 读不到 0640 的配置，systemd 每次启动还会告警。
 run install -d -m 0750 -o root -g chuan /etc/chuan
-run install -d -m 0700 -o root -g root /etc/chuan/secrets
+# secrets 目录必须让服务用户能"进入"（x 位）：systemd 读 LoadCredential 用的是 root，
+# 但 service 的 token_file 是 daemon 自己读的，0700 root:root 会让它 EACCES。
+# 文件本身仍按用途分权限：LoadCredential 用的 0400 root:root，服务 token 用 0440 root:chuan。
+run install -d -m 0750 -o root -g chuan /etc/chuan/secrets
 # 示例配置默认引用 /etc/chuan/playbooks；daemon 无权在 root 目录下创建，先建好
 run install -d -m 0750 -o root -g chuan /etc/chuan/playbooks
 # 调教用的追加 prompt / 自定义 SOP 都放这里

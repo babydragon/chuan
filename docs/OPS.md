@@ -128,7 +128,7 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 
 | 东西 | 位置 | 谁创建 |
 |---|---|---|
-| 凭据（token/key） | `<config>/secrets/<name>`，权限 `0600` | **主人**（agent 只使用，永不读取内容） |
+| 凭据（token/key） | `<config>/secrets/<name>`，目录 `0750 root:chuan`，文件见下 | **主人**（agent 只使用，永不读取内容） |
 | 主配置 | `<config>/chuan.toml` | 主人 |
 | 运行期新增服务 | `<config>/services.d/<name>.toml` | agent 通过 `service` 工具写 |
 | playbook（SOP/API 说明） | `<config>/playbooks/<topic>.md` | agent 或主人 |
@@ -141,6 +141,10 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 
 - agent 传给 `service` 的 `token_file` 必须是**宿主机绝对路径**（允许 `~/`），
   且 `canonicalize` 后必须落在 `<config>/secrets/` 内——防止把任意宿主文件当 token 发出去；
+- **权限分两种**，别一律 `0400 root:root`：
+  - `LoadCredential` 注入的（`telegram_token`、模型 key）：`0400 root:root`——systemd 以 root 读，进程拿 fd；
+  - `service` 的 `token_file`（dida365、weread…）：`0440 root:chuan`——**daemon 自己以 chuan 身份读**。
+    目录本身也必须 `0750 root:chuan`，否则光是 `x` 位缺失就会 `Permission denied`（不是文件权限问题）；
 - 凭据内容只由宿主在发请求时读取，**不进上下文、不进日志、不进技能**；
 - 这些路径会按实际配置注入 system prompt，所以可以直接问 agent「key 该放哪」。
 
