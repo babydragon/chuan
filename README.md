@@ -526,13 +526,36 @@ venv 建的时候带 `--system-site-packages`：**apt 装在系统里的 Python 
 
 ---
 
+### 调教（追加 prompt，不用重新编译）
+
+内置的行为规则（准确性、先用手上信息、`/ws` 与 `/tmp` 的区别等）是编译进去的。要加自己的规矩，
+写一个追加文件，不要覆盖：
+
+```toml
+[engine]
+system_prompt_extra_file = "/etc/chuan/prompts/extra.md"
+```
+
+```bash
+sudo install -d -m 0750 -o root -g chuan /etc/chuan/prompts   # 安装脚本已建好
+sudo tee /etc/chuan/prompts/extra.md >/dev/null <<'EOF'
+- 查设备状态时先看已有输出里是否已经有地址，不要扫网段。
+- 家里打印机队列名：B7520DW（默认）、T435W。
+EOF
+sudo systemctl restart chuan
+```
+
+- **追加**语义：内置规则保留，你的内容接在后面；改完重启即生效；
+- 配了但文件不存在会**明确报错**，不会静默忽略（否则你以为改生效了）；
+- 设备/服务这类**事实**更适合 `remember`，这里放的是“怎么干活”的规矩。
+
 ## 3. 配置参考
 
 | 段 | 关键项 |
 |---|---|
 | `[app]` | `name`、`timezone`（展示用）、`utc_offset`（定时任务，`+08:00`） |
 | `[telegram]` | `allowed_users`、`token_file`、`stale_after_s` |
-| `[engine]` | `provider`、`model`、`base_url`、`api_key_file`、`proxy`（模型专用，默认直连）、`system_prompt_file`、`max_retries`、`retry_backoff_ms` |
+| `[engine]` | `provider`、`model`、`base_url`、`api_key_file`、`proxy`（模型专用，默认直连）、`system_prompt_file`（整体替换）、`system_prompt_extra_file`（追加，调教用）、`max_retries`、`retry_backoff_ms` |
 | `[actor]` | `max_turns`、`wall_clock_ms`（0=不限）、`workspace`、`workspace_keep_days`、`workspace_max_mb`、`inbox`、`context_budget_tokens` |
 | **`[proxy]`** | `url`（留空沿用 `https_proxy`）、`sandbox`、`web_fetch`、`services` |
 | **`[vision]`** | `enabled`（图片走多模态，会上传 provider） |

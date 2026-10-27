@@ -190,7 +190,8 @@ max_total_mb = 256
 | `CHUAN_TELEGRAM_TOKEN` / `_FILE` | Telegram token |
 | `CHUAN_ALLOWED_USERS` | 逗号分隔 |
 | `CHUAN_DB` / `CHUAN_LOCK` / `CHUAN_WORKSPACE` | 路径 |
-| `CHUAN_SYSTEM_PROMPT_FILE` | system prompt |
+| `CHUAN_SYSTEM_PROMPT_FILE` | system prompt（整体替换） |
+| `CHUAN_SYSTEM_PROMPT_EXTRA_FILE` | 追加到内置 system prompt 末尾（推荐） |
 
 **命令行**：
 

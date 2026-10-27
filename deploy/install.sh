@@ -136,6 +136,8 @@ run install -d -m 0750 -o root -g chuan /etc/chuan
 run install -d -m 0700 -o root -g root /etc/chuan/secrets
 # 示例配置默认引用 /etc/chuan/playbooks；daemon 无权在 root 目录下创建，先建好
 run install -d -m 0750 -o root -g chuan /etc/chuan/playbooks
+# 调教用的追加 prompt / 自定义 SOP 都放这里
+run install -d -m 0750 -o root -g chuan /etc/chuan/prompts
 run install -d -m 0750 -o chuan -g chuan /var/lib/chuan
 run install -d -m 0750 -o chuan -g chuan /var/lib/chuan/backups
 

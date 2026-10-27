@@ -303,6 +303,8 @@ pub struct EngineFile {
     /// 模型调用走代理；不设则直连
     pub proxy: Option<String>,
     pub system_prompt_file: Option<String>,
+    /// 追加到 system prompt 末尾（不替换内置规则）；调教用，改完重启即生效
+    pub system_prompt_extra_file: Option<String>,
     #[serde(default = "default_retries")]
     pub max_retries: u32,
     #[serde(default = "default_backoff")]
@@ -318,6 +320,7 @@ impl Default for EngineFile {
             api_key: None,
             proxy: None,
             system_prompt_file: None,
+            system_prompt_extra_file: None,
             max_retries: default_retries(),
             retry_backoff_ms: default_backoff(),
         }
@@ -562,6 +565,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     let mut api_key_inline = file.engine.api_key.clone();
     let mut llm_proxy = file.engine.proxy.clone();
     let mut prompt_file = file.engine.system_prompt_file.clone();
+    let mut prompt_extra_file = file.engine.system_prompt_extra_file.clone();
     let mut token = file.telegram.token.clone();
     let mut token_file = file.telegram.token_file.clone();
     let mut allowed = file.telegram.allowed_users.clone();
@@ -577,6 +581,9 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     if let Ok(v) = std::env::var("CHUAN_API_KEY") { api_key_inline = Some(v); }
     if let Ok(v) = std::env::var("CHUAN_LLM_PROXY") { llm_proxy = Some(v); }
     if let Ok(v) = std::env::var("CHUAN_SYSTEM_PROMPT_FILE") { prompt_file = Some(v); }
+    if let Ok(v) = std::env::var("CHUAN_SYSTEM_PROMPT_EXTRA_FILE") {
+        prompt_extra_file = Some(v);
+    }
     if let Ok(v) = std::env::var("CHUAN_TELEGRAM_TOKEN") { token = Some(v); }
     if let Ok(v) = std::env::var("CHUAN_TELEGRAM_TOKEN_FILE") { token_file = Some(v); }
     if let Ok(v) = std::env::var("CHUAN_ALLOWED_USERS") {
@@ -610,6 +617,16 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .map_err(|e| format!("读取 prompt {f}: {e}"))?,
         None => crate::system_prompt::DEFAULT.to_owned(),
     };
+    // 追加段：内置规则不动，只往后接。调教时改这个文件，不必重新编译。
+    // 显式配置但文件不存在 → 报错，不静默跳过（否则你以为改生效了，其实没有）。
+    let extra = match prompt_extra_file {
+        Some(f) => Some(
+            std::fs::read_to_string(expand_tilde(&f))
+                .map_err(|e| format!("读取追加 prompt {f}: {e}"))?,
+        ),
+        None => None,
+    };
+    let system_prompt = append_prompt(system_prompt, extra);
 
     let home = std::env::var("HOME").unwrap_or_default();
     Ok(Config {
@@ -845,5 +862,31 @@ impl std::fmt::Debug for Config {
             .field("db", &self.db)
             .field("mcp_servers", &self.mcp_servers.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// 把追加 prompt 接到基础 prompt 末尾（不替换内置规则）。空白内容视为没有。
+fn append_prompt(base: String, extra: Option<String>) -> String {
+    match extra {
+        Some(e) if !e.trim().is_empty() => {
+            format!("{}\n\n{}", base.trim_end(), e.trim())
+        }
+        _ => base,
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::append_prompt;
+
+    #[test]
+    fn extra_is_appended_not_replacing() {
+        let base = "内置规则".to_owned();
+        assert_eq!(append_prompt(base.clone(), None), "内置规则");
+        assert_eq!(append_prompt(base.clone(), Some("  \n ".into())), "内置规则");
+        assert_eq!(
+            append_prompt(base, Some("追加一句".into())),
+            "内置规则\n\n追加一句"
+        );
     }
 }

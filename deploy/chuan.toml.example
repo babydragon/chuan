@@ -21,7 +21,10 @@ model = "glm-5.3-flash"
 api_key_file = "~/.config/chuan/secrets/zai_key"
 # base_url = "..."                 # 覆盖预设；以 /chat/completions 结尾则原样用
 # proxy = "http://127.0.0.1:7890"  # 模型走代理；不写=直连
+# 整体替换内置 system 指令（一般不要用：内置的准确性/行为规则会全部消失）
 # system_prompt_file = "/etc/chuan/system.md"
+# 追加到内置指令末尾（推荐）：调教用，改完 systemctl restart chuan 即生效
+# system_prompt_extra_file = "/etc/chuan/prompts/extra.md"
 
 [actor]
 max_turns = 8
