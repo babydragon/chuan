@@ -317,8 +317,9 @@ services  = "never"  # http/mcp 默认直连；国内服务绕代理更慢
 ```
 
 - 注入的是 `http_proxy` / `https_proxy` / `all_proxy` / `no_proxy`（`no_proxy` 覆盖 localhost 与私网）；
-- **联网 lane 不隔离 netns**，所以沙盒里的 `127.0.0.1` 就是宿主，能直接连本地代理；离线 lane 没有网络，代理无意义；
-- 模型侧也给了选择权：`exec(proxy=true)` 与 `web_fetch(proxy=true|false)`，不传则按上面的默认策略；
+- **只有联网 lane 能用代理**：`lan_exec` 保留网卡，里面的 `127.0.0.1` 就是宿主，能直连本地代理；
+- **离线 `exec` 没有网络**（自己的 netns，只有 `lo`），因此它**没有 `proxy` 参数**——注入了也连不上；
+- 模型侧的选择权：`lan_exec(proxy=true)`、`web_fetch(proxy=true|false)`，不传则按上面的默认策略；
 - 代理地址会注入 system prompt（固定内容），所以脚本里不用猜，也不该把地址写死进技能或记忆。
 
 ### 第三方 HTTP 服务（http）

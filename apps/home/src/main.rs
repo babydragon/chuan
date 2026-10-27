@@ -373,9 +373,11 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             vision: cfg.vision,
             proxy_hint: cfg.proxy.url.as_ref().map(|url| {
                 format!(
-                    "宿主机代理：{url}（联网 lane 里 127.0.0.1 就是宿主）。访问境外站点时用 `exec(proxy=true)` 或脚本里 `export https_proxy={url}`；\n\
-                     国内站点直连更快，不要默认开代理；`web_fetch` 有 `proxy` 参数，不传则直连失败后自动重试代理。\n\
-                     代理地址不要写进技能或记忆，以本段为准。"
+                    "宿主代理：{url}。只有这两条路能用到它：\n\
+                     - `lan_exec(proxy=true)`：注入 http_proxy/https_proxy；该 lane 里 127.0.0.1 就是宿主。\n\
+                     - `web_fetch`：有 `proxy` 参数；不传则先直连，失败自动重试代理。\n\
+                     离线 `exec` 没有网络（也没有 proxy 参数），不要在它里面调外网。\n\
+                     国内站点直连更快，不要默认开代理；代理地址不要写进技能或记忆，以本段为准。"
                 )
             }),
             host_paths: Some(format!(

@@ -564,7 +564,7 @@ async fn send_file_respects_workspace_and_mime() {
 
 /// 代理只在 `proxy=true`（或 always）时注入沙盒环境，默认不带。
 #[tokio::test]
-async fn exec_injects_proxy_env_only_on_demand() {
+async fn proxy_env_only_exists_in_network_lane() {
     if !has_bwrap() {
         eprintln!("skip: no bwrap");
         return;
@@ -572,14 +572,16 @@ async fn exec_injects_proxy_env_only_on_demand() {
     use harness_capabilities::{ExecTool, ProxyConfig, ProxyMode};
 
     let ws = tempfile::tempdir().unwrap();
-    let env = BwrapEnv::new(ws.path());
     let proxy = ProxyConfig {
         url: Some("http://127.0.0.1:7890".into()),
         sandbox: ProxyMode::Auto,
         ..Default::default()
     };
-    let tool = ExecTool::sandboxed().with_proxy(proxy);
     let wsx = Workspace { run: harness_kernel::RunId("r".into()), root: ws.path().to_string_lossy().into() };
+
+    // 离线 lane：没有网卡，注入了也连不上，所以**永远不注入**（exec 也不提供 proxy 参数）
+    let offline_env = BwrapEnv::new(ws.path());
+    let offline = ExecTool::sandboxed().with_proxy(proxy.clone());
     let ctx = ToolCtx {
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
@@ -588,24 +590,43 @@ async fn exec_injects_proxy_env_only_on_demand() {
         run: harness_kernel::RunId("r".into()),
         call: harness_kernel::CallId("c".into()),
         workspace: &wsx,
-        env: &env,
+        env: &offline_env,
         cancel: CancellationToken::new(),
     };
 
-    let off = tool
-        .execute(serde_json::json!({"script":"echo \"[${https_proxy:-none}]\"","timeout_ms":5000}), &ctx)
-        .await
-        .unwrap();
-    let off_text = format!("{:?}", off.content);
-    assert!(off_text.contains("[none]"), "默认不该带代理: {off_text}");
-
-    let on = tool
+    // 模型就算照旧习惯传了 proxy=true，也必须一个变量都不注入
+    let out = offline
         .execute(
-            serde_json::json!({"script":"echo \"[$https_proxy]\"","timeout_ms":5000,"proxy":true}),
+            serde_json::json!({"script":"echo \"[${https_proxy:-none}]\"","timeout_ms":5000,"proxy":true}),
             &ctx,
         )
         .await
         .unwrap();
-    let on_text = format!("{:?}", on.content);
-    assert!(on_text.contains("[http://127.0.0.1:7890]"), "{}", on_text);
+    let text = format!("{:?}", out.content);
+    assert!(text.contains("[none]"), "离线 lane 不该带代理: {text}");
+
+    // 离线 lane 的 spec 里不该出现 proxy 参数（不给模型这个选项）
+    assert!(
+        offline.spec().parameters["properties"].get("proxy").is_none(),
+        "离线 exec 不应暴露 proxy 参数: {}",
+        offline.spec().parameters
+    );
+
+    // 联网 lane：127.0.0.1 即宿主，proxy=true 时注入
+    let lan_env = std::sync::Arc::new(BwrapEnv::new(ws.path()).with_network(true));
+    let lan = ExecTool::lan(lan_env.clone()).with_proxy(proxy);
+    assert!(
+        lan.spec().parameters["properties"].get("proxy").is_some(),
+        "lan_exec 应提供 proxy 参数"
+    );
+    let ctx_lan = ToolCtx { env: &*lan_env, ..ctx };
+    let out = lan
+        .execute(
+            serde_json::json!({"script":"echo \"[$https_proxy]\"","timeout_ms":5000,"proxy":true}),
+            &ctx_lan,
+        )
+        .await
+        .unwrap();
+    let text = format!("{:?}", out.content);
+    assert!(text.contains("[http://127.0.0.1:7890]"), "{text}");
 }

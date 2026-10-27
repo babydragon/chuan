@@ -12,18 +12,18 @@
 ## 0. 编译与依赖
 
 - [ ] `cargo zigbuild --target riscv64gc-unknown-linux-gnu --release` 通过（含 rusqlite bundled / rustls）
-- [ ] `bwrap --version` ≥ 0.11，且两组参数都被接受：
+- [x] `bwrap --version` ≥ 0.11，且两组参数都被接受（**2026-10-27 实测**：离线 `exec` 与联网 `lan_exec` 均可执行，两组参数都被接受）：
       离线：`--unshare-all`
       联网：`--unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try`
       （⚠️ 0.11 若没有 `--unshare-cgroup-try`，联网 lane 要换写法）
 - [ ] cgroup v2 unified，`memory` / `pids` 控制器可写（systemd `Delegate=yes`）
-- [ ] `python3 -m venv` 可用（Debian 系需要单独装 `python3-venv`）
-- [ ] 沙盒冷启动耗时（开发机约 30ms；板上记录实测值）
+- [x] `python3 -m venv` 可用（**2026-10-27 实测**：默认未装，`apt install python3-venv` 后可用）
+- [x] 沙盒冷启动耗时（**2026-10-27 实测**：`exec ls /home` 工具侧 39ms，含 `ls` 本身；开发机约 30ms）
 - [ ] （可选）`node` / `npm` 在 `/usr/bin` 下；否则 `install_deps(npm)` 会明确报"找不到"
 
 ## 1. Python 运行时
 
-- [ ] 首次启动创建 venv（`--system-site-packages`）成功，记录耗时
+- [x] 首次启动创建 venv（`--system-site-packages`）成功（**2026-10-27 实测**：装好 `python3-venv` 后 21s，riscv64 上 ensurepip 解包慢属正常）
 - [ ] **Debian 的 `/usr/lib/python3/dist-packages` 在 venv 的 `sys.path` 里**
       （与开发机路径不同，必须实测）
 - [ ] `apt install python3-numpy` 后 `/py/bin/python3 -c "import numpy"` 直接可用
@@ -33,12 +33,15 @@
 ## 2. 沙盒与隔离
 
 - [ ] `/ws` 可写；`/inbox` `/skills` `/media` 只读；`/home` `/root` `/var` 不可见
+      （**部分实测 2026-10-27**：`ls /home` → `No such file or directory`；其余待验）
 - [ ] `/py` `/node` 只读挂载；`PATH` 含 `/py/bin`
 - [ ] `/tmp` 是 tmpfs：写入大文件的 OOM 边界（记录触发点）
 - [ ] 超时 `killpg`：`sleep 300` 到点被杀，无残留进程
 - [ ] 离线 lane 的 netns 里**只有 `lo`**
-- [ ] 联网 lane（`lan_exec` / `network: true` 技能）能看到网卡，且 **DNS 可用**
-      （`/etc/resolv.conf` 指向 `/run`，已只挂该子目录）
+      （**间接 2026-10-27**：`curl` 直连 exit=6 DNS 解析失败、走代理 exit=7 连不上——符合"无网卡"；
+      未用 `ip a` 直接确认只有 lo）
+- [x] 联网 lane（`lan_exec` / `network: true` 技能）能看到网卡，且 **DNS 可用**
+      （**2026-10-27 实测**：`getent hosts github.com` → `20.205.243.166`，2.5s）
 - [ ] `[sandbox] mounts` 挂 `/run/cups` 后，沙盒内 `lpstat -e` 可见打印机（只读）
 - [ ] `http://192.168.x.x` 被 `web_fetch` 拒绝并留痕
 
@@ -108,3 +111,29 @@
 | 视觉 | ✅ 红/蓝图能正确识别 | 模型 provider 是否支持 |
 | 定时任务 | ✅ 触发 / 续排 / 重启恢复 | 时区与 RTC |
 | 文件库 | ✅ keep/list/export/del | 板载存储容量 |
+
+---
+
+## 实测记录
+
+### 2026-10-27 · 首次上板（riscv64 / Debian 系 / 8GB）
+
+| 项 | 实测值 / 现象 | 结论 |
+|---|---|---|
+| 安装 | `install.sh` 成功；venv/配置/unit 三处问题见下 | 已修 |
+| systemd 启动 | 首次 243/CREDENTIALS（缺 `/etc/chuan/secrets/*`） | 预期，放密钥后正常 |
+| venv | `apt install python3-venv` 后创建成功，耗时 21s | 正常 |
+| 沙盒冷启动 | `exec ls /home` 工具侧 39ms | 优于阈值 |
+| `/home` 隔离 | `No such file or directory` | 通过 |
+| 离线 lane 网络 | `curl` DNS 失败（exit=6）；走代理 exit=7 | 通过（无网卡） |
+| 联网 lane | `curl -x 127.0.0.1:7890 https://google.com` → HTTP/2 200，4.1s | 通过 |
+| 联网 lane DNS | `getent hosts github.com` → 20.205.243.166 | 通过 |
+
+**上板过程中发现并已修的问题**（都不在开发机上暴露）：
+
+1. `install.sh` 下载分支缺 `exit` → 装完报 `BIN_SRC: 未绑定的变量`（退出码非零，安装本身已完成）；
+2. 示例配置把可选的 `distill_prompt_file` 当默认值，指向不存在的文件 → 启动即退出；
+3. `/etc/chuan` 建成 0755 与 unit 的 `ConfigurationDirectoryMode=0750` 不一致；`playbooks_dir` 目录 daemon 无权创建；
+4. **`ProtectKernelTunables=yes` 让 bwrap 挂不了 `/proc`** → daemon 正常启动、沙盒与联网 lane 全部失效；
+5. 离线 `exec` 曾提供 `proxy` 参数并注入代理环境变量，实际必然失败（无网卡）→ 已从离线 lane 移除；
+6. venv 可用性只判断 `bin/python3` 存在，`ensurepip` 缺失留下的半成品会被永久沿用。
