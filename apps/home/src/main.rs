@@ -172,34 +172,39 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let rt = std::path::PathBuf::from(&cfg.runtime_dir);
     std::fs::create_dir_all(rt.join("py"))?;
     std::fs::create_dir_all(rt.join("node"))?;
-    if !rt.join("py/bin/python3").exists() {
-        println!("runtime: 创建 venv {}", rt.join("py").display());
-        // --system-site-packages：apt 装在系统里的包（numpy/Pillow 这类大件）也能直接用，
-        // 不必为它们在 riscv64 上现场编译。pip 装的包仍在 /py 里，优先命中。
-        let ok = std::process::Command::new("python3")
-            .arg("-m")
-            .arg("venv")
-            .arg("--system-site-packages")
-            .arg(rt.join("py"))
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            eprintln!("runtime: venv 创建失败（需要 python3-venv），install_deps(pip) 将不可用");
-        }
-    } else {
-        // 老 venv（没带 --system-site-packages）就地改标志，不用重建
-        let cfg = rt.join("py/pyvenv.cfg");
-        if let Ok(text) = std::fs::read_to_string(&cfg) {
-            if text.contains("include-system-site-packages = false") {
-                let _ = std::fs::write(
-                    &cfg,
-                    text.replace(
-                        "include-system-site-packages = false",
-                        "include-system-site-packages = true",
-                    ),
+
+    // 只判断 `bin/python3` 在不在会漏掉半成品：`ensurepip` 缺失时 venv 会创建出
+    // 一个能跑但没有 pip 的目录，之后永远走"已存在"分支，install_deps 永久不可用。
+    // 所以探针换成真的跑一次 `python3 -m pip --version`。
+    let py = rt.join("py");
+    match venv_probe(&py) {
+        Ok(()) => allow_system_site_packages(&py),
+        Err(reason) => {
+            if py.join("bin/python3").exists() {
+                println!("runtime: venv 不可用（{reason}），重建 {}", py.display());
+            } else {
+                println!("runtime: 创建 venv {}", py.display());
+            }
+            // --system-site-packages：apt 装在系统里的包（numpy/Pillow 这类大件）也能直接用，
+            // 不必为它们在 riscv64 上现场编译。pip 装的包仍在 /py 里，优先命中。
+            // 对已存在的目录重跑是安全的：会重写 bin/ 并重新执行 ensurepip，pip 包保留。
+            let ok = std::process::Command::new("python3")
+                .arg("-m")
+                .arg("venv")
+                .arg("--system-site-packages")
+                .arg(&py)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                eprintln!("runtime: venv 创建失败，install_deps(pip) 将不可用");
+                eprintln!(
+                    "  → 多半缺 ensurepip：apt install python3-venv（Debian 系也可能是 python3.13-venv）"
                 );
-                println!("runtime: venv 已允许读取系统包（include-system-site-packages=true）");
+            } else if let Err(e) = venv_probe(&py) {
+                eprintln!("runtime: venv 建好了但仍不可用（{e}）；install_deps(pip) 将不可用");
+            } else {
+                allow_system_site_packages(&py);
             }
         }
     }
@@ -448,4 +453,85 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     }
     let _ = poller.await;
     Ok(())
+}
+
+/// venv 探针：能跑 `python3 -m pip --version` 才算可用（只跑 `import sys` 不够——
+/// ensurepip 缺失时 python 可执行、pip 却不存在）。失败时返回可读原因，直接进日志。
+fn venv_probe(py: &std::path::Path) -> Result<(), String> {
+    let bin = py.join("bin/python3");
+    if !bin.exists() {
+        return Err("缺少 bin/python3".into());
+    }
+    let out = std::process::Command::new(&bin)
+        .args(["-m", "pip", "--version"])
+        .output()
+        .map_err(|e| format!("无法执行 {}: {e}", bin.display()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        return Err(format!("pip 探针退出码 {:?}", out.status.code()));
+    }
+    // 只留一行，避免把整段 traceback 灌进 journal
+    Err(first.chars().take(160).collect())
+}
+
+/// 老 venv（没带 --system-site-packages）就地改标志，不用重建。
+fn allow_system_site_packages(py: &std::path::Path) {
+    let cfg = py.join("pyvenv.cfg");
+    if let Ok(text) = std::fs::read_to_string(&cfg) {
+        if text.contains("include-system-site-packages = false") {
+            let _ = std::fs::write(
+                &cfg,
+                text.replace(
+                    "include-system-site-packages = false",
+                    "include-system-site-packages = true",
+                ),
+            );
+            println!("runtime: venv 已允许读取系统包（include-system-site-packages=true）");
+        }
+    }
+}
+
+#[cfg(test)]
+mod venv_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("chuan-venv-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn probe_rejects_missing_bin() {
+        let d = tmp("nobin");
+        let err = venv_probe(&d).unwrap_err();
+        assert!(err.contains("缺少"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn probe_rejects_python_without_pip() {
+        // 复现板上那种半成品：bin/python3 能执行，但没有 pip
+        let d = tmp("nopip");
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        let bin = d.join("bin/python3");
+        std::fs::write(&bin, "#!/bin/sh\necho 'No module named pip' >&2\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let err = venv_probe(&d).unwrap_err();
+        assert!(err.contains("No module named pip"), "{err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
