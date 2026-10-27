@@ -506,6 +506,13 @@ venv 建的时候带 `--system-site-packages`：**apt 装在系统里的 Python 
 ⚠️ 技术上做不到"只通内网不通公网"：有网卡就两者都可达，所以这条 lane 靠审批兜底，不是靠网络边界。
 网上导入的技能跑在离线的 `exec` 里，**调不到 `lan_exec`**——这两条路是隔开的。
 
+**mDNS（`.local`）**：这条 lane 会把宿主的 `/run/avahi-daemon`（如果有）只读挂进去，所以
+`getent hosts printer.local`、`avahi-resolve -n xxx.local` 都能用。家里打印机（CUPS 里的
+`dnssd://…`）、Home Assistant、智能插座基本都是这么发布的。离线 lane 不挂——那里没网络，
+解析了也连不上。
+
+代理与 mDNS 无关：`.local` 是局域网多播，永远不该走代理。
+
 ### workspace 清理
 
 `/ws` 是**草稿区**，不是档案库（真正的结论在账本与技能目录里）。所以会定期清理：

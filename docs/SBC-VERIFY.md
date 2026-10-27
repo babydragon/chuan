@@ -45,7 +45,11 @@
       `curl` 直连 exit=6、走代理 exit=7，与"无网卡"一致）
 - [x] 联网 lane（`lan_exec` / `network: true` 技能）能看到网卡，且 **DNS 可用**
       （**2026-10-27 实测**：`getent hosts github.com` → `20.205.243.166`，2.5s）
-- [ ] `[sandbox] mounts` 挂 `/run/cups` 后，沙盒内 `lpstat -e` 可见打印机（只读）
+- [x] `[sandbox] mounts` 挂 `/run/cups` 后，沙盒内 `lpstat -e` 可见打印机（只读）
+      （**2026-10-27 实测**：`lpstat -r` → `scheduler is running`；`lpstat -e` → `B7520DW` `T435W`；
+      默认队列 `B7520DW`；离线 `exec` 里即可用，说明走的是 socket 不是网络）
+- [ ] 联网 lane 能解析 `.local`（mDNS）（**2026-10-27 失败**：`avahi-resolve -n xxx.local` 报错，
+      根因是沙盒看不到 `/run/avahi-daemon`；已改为联网 lane 只读挂该目录，待新包复核）
 - [ ] `http://192.168.x.x` 被 `web_fetch` 拒绝并留痕
 
 ## 3. 出网与审计

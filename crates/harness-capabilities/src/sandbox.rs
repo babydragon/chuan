@@ -194,6 +194,17 @@ impl BwrapEnv {
                     }
                 }
             }
+            // mDNS：`.local` 名字要靠宿主 avahi 的 socket（nss-mdns）解析。沙盒里
+            // 看不到 /run，所以 `getent hosts printer.local` 一定失败——而家里大量
+            // 设备（打印机 dnssd://、Home Assistant、智能插座）都用 .local 发布。
+            // 只挂这一个目录，别把整个 /run 暴露（里面有 docker.sock 之类）。
+            //
+            // 代价：这条 lane 里的代码能连上 avahi，理论上可以发布/撤销 mDNS 记录。
+            // lan lane 本身就要逐条审批，且只在需要时用。
+            let avahi = Path::new("/run/avahi-daemon");
+            if avahi.exists() {
+                cmd.arg("--ro-bind").arg(avahi).arg(avahi);
+            }
         }
         // /tmp 是 tmpfs，算在服务的内存 cgroup 里：不设上限时它会长到内存的一半
         // （板上 8GB → 3.9GB），脚本写满就把整个服务拖进 OOM。这里按字节限死，

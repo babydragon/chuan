@@ -109,6 +109,46 @@ async fn truncates_huge_output() {
     assert!(out.stdout.len() <= 64 * 1024 + 16, "len={}", out.stdout.len());
 }
 
+/// 联网 lane 要能解析 `.local`：需要宿主 avahi 的 socket（nss-mdns）。
+/// 家里大量设备用 mDNS 发布（打印机 `dnssd://`、Home Assistant、智能插座）。
+#[tokio::test]
+async fn network_lane_sees_avahi_socket() {
+    if !has_bwrap() {
+        eprintln!("skip: no bwrap");
+        return;
+    }
+    if !std::path::Path::new("/run/avahi-daemon/socket").exists() {
+        eprintln!("skip: 宿主没跑 avahi-daemon");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+
+    let lan = BwrapEnv::new(ws.path()).with_network(true);
+    let out = lan
+        .exec(
+            &["sh".into(), "-lc".into(),
+              "test -S /run/avahi-daemon/socket && echo HAVE-SOCKET || echo NO-SOCKET".into()],
+            opts(8000),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.stdout.contains("HAVE-SOCKET"), "联网 lane 应能看到 avahi socket: {}", out.stdout);
+
+    // 离线 lane 不该有：那边没有网络，解析 .local 也没意义
+    let offline = BwrapEnv::new(ws.path());
+    let out = offline
+        .exec(
+            &["sh".into(), "-lc".into(),
+              "test -S /run/avahi-daemon/socket && echo HAVE-SOCKET || echo NO-SOCKET".into()],
+            opts(8000),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.stdout.contains("NO-SOCKET"), "离线 lane 不该看到 avahi: {}", out.stdout);
+}
+
 /// `/tmp` 是 tmpfs，必须限大小：不限制时它会长到内存的一半，脚本写满会把
 /// 整个服务（MemoryMax=1G）拖进 OOM。
 #[tokio::test]
