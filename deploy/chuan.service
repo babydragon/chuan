@@ -1,0 +1,46 @@
+[Unit]
+Description=chuan home assistant
+After=network-online.target
+Wants=network-online.target
+# 崩溃循环熔断：10 分钟内 5 次则进入 failed
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=chuan
+Group=chuan
+SupplementaryGroups=lp
+WorkingDirectory=/var/lib/chuan
+ExecStart=/usr/local/bin/chuan --config /etc/chuan/chuan.toml
+Restart=always
+RestartSec=2
+
+# 状态与配置目录
+StateDirectory=chuan
+StateDirectoryMode=0750
+ConfigurationDirectory=chuan
+ConfigurationDirectoryMode=0750
+
+# 凭据：root 读取，按 fd 注入，不进 environ（见 docs/OPS.md §2）
+LoadCredential=telegram_token:/etc/chuan/secrets/telegram_token
+LoadCredential=zai_key:/etc/chuan/secrets/zai_key
+Environment=CHUAN_TELEGRAM_TOKEN_FILE=%d/telegram_token
+Environment=CHUAN_KEY_FILE=%d/zai_key
+
+Environment=MALLOC_ARENA_MAX=2
+
+# 加固
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/chuan
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

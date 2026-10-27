@@ -1,0 +1,15 @@
+{
+  "name": "sha256",
+  "description": "计算一段文本的 SHA-256 十六进制哈希",
+  "params": {
+    "type": "object",
+    "properties": {
+      "text": { "type": "string", "description": "要计算哈希的文本" }
+    },
+    "required": ["text"]
+  },
+  "entry": "run.py",
+  "interpreter": "python3",
+  "timeout_ms": 5000,
+  "network": false
+}

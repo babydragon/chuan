@@ -1,0 +1,25 @@
+# Rust
+/target
+**/*.rs.bk
+
+# 本地运行产物（绝不提交）
+*.db
+*.db-shm
+*.db-wal
+*.log
+/workspaces/
+/media/
+/files/
+/backups/
+
+# 凭据与个人配置
+secrets/
+*.cred
+chuan.toml
+!deploy/chuan.toml.example
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store

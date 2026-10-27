@@ -1,0 +1,30 @@
+[package]
+name = "chuan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "chuan"
+path = "src/main.rs"
+
+[dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+harness-kernel = { workspace = true }
+harness-engine = { workspace = true }
+harness-store = { workspace = true }
+harness-channels = { workspace = true }
+harness-capabilities = { workspace = true }
+harness-observe = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+libc = "0.2"
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

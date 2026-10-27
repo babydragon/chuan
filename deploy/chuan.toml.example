@@ -1,0 +1,110 @@
+# chuan 配置示例（生产路径）。
+# 优先级：CLI > 环境变量 > 本文件 > 内置默认。
+# 密钥只通过 *_file 引用，不要写在这里。
+
+[app]
+name = "home"
+# 定时任务用的本地时区偏移（不做 DST）
+utc_offset = "+08:00"
+timezone = "Asia/Shanghai"
+
+[telegram]
+allowed_users = [123456789]
+stale_after_s = 300
+# 生产用 systemd 凭据时，由 unit 的 CHUAN_TELEGRAM_TOKEN_FILE=%d/telegram_token 覆盖
+token_file = "~/.config/chuan/secrets/telegram_token"
+
+[engine]
+# echo（离线回显）| zai | opencode-go
+provider = "zai"
+model = "glm-5.3-flash"
+api_key_file = "~/.config/chuan/secrets/zai_key"
+# base_url = "..."                 # 覆盖预设；以 /chat/completions 结尾则原样用
+# proxy = "http://127.0.0.1:7890"  # 模型走代理；不写=直连
+# system_prompt_file = "/etc/chuan/system.md"
+
+[actor]
+max_turns = 8
+# 0 = 不限（长任务优先）；靠 max_turns 与 /cancel 收口
+wall_clock_ms = 0
+# /ws 是草稿区：按天 + 总量清理（0 = 该维度不设限）
+workspace_keep_days = 7
+workspace_max_mb = 256
+# 上下文预算（token）；超出后按轮裁剪旧对话
+context_budget_tokens = 24000
+workspace = "/var/lib/chuan/workspaces"
+# 用户投递目录：只读挂到沙盒 /inbox
+inbox = "/var/lib/chuan/inbox"
+
+[storage]
+db = "/var/lib/chuan/chuan.db"
+lock = "/var/lib/chuan/chuan.lock"
+
+[skills]
+dir = "/var/lib/chuan/skills"
+# 沉淀流程说明（SOP）；不给则用内置文本。改流程只改这个文件，不用改二进制
+distill_prompt_file = "/etc/chuan/prompts/distill.md"
+# 操作规范目录（playbook）：<name>.md 覆盖内置文本
+playbooks_dir = "/etc/chuan/playbooks"
+
+[identity]
+# 一个人可以有多个通道地址；找不到绑定时用 default_user
+default_user = "owner"
+
+[[identity.user]]
+id = "owner"
+name = "主人"
+channels = ["telegram:123456789"]
+
+[policy]
+# 审批轴是"执行域"（能力越界），不是命令黑名单：
+#   sandbox      沙盒内（/ws 可写、宿主不可见、无网络）→ 问也没用
+#   self_modify  改自身（装/回滚技能、改配置）        → 该问
+#   outbound     出网：真正的闸是域名白名单          → 白名单内免问
+#   host_exec    宿主执行/提权                      → 默认关闭
+sandbox = "allow"
+self_modify = "ask"
+outbound = "allow"
+lan = "ask"        # 内网调试（有网卡）：局域网与公网都可达，靠审批兜底
+install = "ask"    # 装依赖（pip/npm）
+host_exec = "deny"
+# 额外加严的工具名（只能加严，不能放松 host_exec = "deny"）
+require_approval = []
+
+# 命名服务（可选）。kind = "http"（默认）或 "mcp"；token 只放凭据文件，权限 0600
+# 运行时新增的服务由 agent 通过 service 工具写到 <config>/services.d/<name>.toml，
+# 下次启动自动合并（同名覆盖本节里的定义）
+# [services.dida]
+# kind = "mcp"                      # mcp 走 Streamable HTTP
+# base = "https://mcp.dida365.com"
+# token_file = "/etc/chuan/secrets/dida_token"
+# tools = ["create_task", "list_undone_tasks_by_time_query"]   # 可选：只暴露这些
+
+[vision]
+# 开启后图片会作为多模态内容发给模型厂商（会外传，自行决定）
+enabled = false
+
+[media]
+# 聊天附件落盘（只读挂到沙盒 /media），30 天清理
+dir = "/var/lib/chuan/media"
+keep_days = 30
+
+[library]
+dir = "/var/lib/chuan/files"
+
+[sandbox]
+# 显式授权给沙盒的宿主挂载（默认空）。例：打印技能要用 CUPS
+# mounts = [{ src = "/run/cups", dst = "/run/cups", ro = true }]
+
+[net]
+log = "/var/lib/chuan/net-access.jsonl"
+
+[runtime]
+dir = "/var/lib/chuan/rt"
+# pip_index = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+[backup]
+dir = "/var/lib/chuan/backups"
+keep_days = 7
+keep_min = 2
+max_total_mb = 256

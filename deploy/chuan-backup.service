@@ -1,0 +1,14 @@
+[Unit]
+Description=chuan daily backup
+After=chuan.service
+
+[Service]
+Type=oneshot
+User=chuan
+Group=chuan
+WorkingDirectory=/var/lib/chuan
+ExecStart=/usr/local/bin/chuan --config /etc/chuan/chuan.toml backup
+StateDirectory=chuan
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/chuan

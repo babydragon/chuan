@@ -1,0 +1,91 @@
+digraph chuan_harness {
+  graph [rankdir=TB, splines=spline, nodesep=0.30, ranksep=0.34, pad=0.20,
+         fontname="Alibaba PuHuiTi", fontsize=11, newrank=true];
+  node  [shape=plaintext, fontname="Alibaba PuHuiTi", fontsize=10, margin=0];
+  edge  [fontname="Alibaba PuHuiTi", fontsize=9, color="#5a5a5a", arrowsize=0.65];
+
+  /* ================= 外部系统 ================= */
+  ext_tg  [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#eef4ff"><TR><TD><B>Telegram Bot API</B><BR/><FONT POINT-SIZE="9">外部 · 代理接入</FONT></TD></TR></TABLE>>];
+  ext_llm [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#eef4ff"><TR><TD><B>LLM Provider</B><BR/><FONT POINT-SIZE="9">OpenAI 兼容 · 远端 · 多模态</FONT></TD></TR></TABLE>>];
+  ext_svc [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7" BGCOLOR="#eef4ff"><TR><TD><B>第三方服务</B><BR/><FONT POINT-SIZE="9">MCP / HTTP API · token 宿主注入</FONT></TD></TR></TABLE>>];
+
+  /* ================= ① 接入层 ================= */
+  L1 [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
+    <TR><TD COLSPAN="3" BGCOLOR="#dce8f7"><B>① 接入层 · Channel</B>　<FONT POINT-SIZE="9">鉴权 · 幂等 · 流式回显 · 附件落盘</FONT></TD></TR>
+    <TR><TD>Telegram 通道<BR/><FONT POINT-SIZE="9">长轮询 / 节流编辑 / 按钮 / 分片 / 媒体下载</FONT></TD>
+        <TD>CLI 通道<BR/><FONT POINT-SIZE="9">stdin · stdout</FONT></TD>
+        <TD>HTTP / API<BR/><FONT POINT-SIZE="9">预留 · SSE 出口</FONT></TD></TR>
+  </TABLE>>];
+
+  /* ================= ② 会话与编排 ================= */
+  L2 [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
+    <TR><TD COLSPAN="4" BGCOLOR="#d9efdf"><B>② 会话与编排 · Orchestration</B></TD></TR>
+    <TR><TD>会话管理<BR/><FONT POINT-SIZE="9">隔离 / 排队 / 取消</FONT></TD>
+        <TD BGCOLOR="#eaf7ee" BORDER="2"><B>Turn Loop</B><BR/><FONT POINT-SIZE="9">模型 ⇄ 工具 / 终止 / 续跑 / 卡死检测</FONT></TD>
+        <TD>定时任务<BR/><FONT POINT-SIZE="9">静态消息 · 跑技能 · 脚本+模型加工</FONT></TD>
+        <TD>子 agent<BR/><FONT POINT-SIZE="9">未做 · 上下文隔离 / 结论回传</FONT></TD></TR>
+  </TABLE>>];
+
+  /* ================= ③ 上下文工程 ================= */
+  L3 [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
+    <TR><TD COLSPAN="5" BGCOLOR="#f7edd6"><B>③ 上下文工程 · Context Engineering</B>　<FONT POINT-SIZE="9">每轮组装 · 稳定前缀利于缓存</FONT></TD></TR>
+    <TR><TD>Prompt 组装<BR/><FONT POINT-SIZE="9">人格 / 时间锚点 / 宿主路径</FONT></TD>
+        <TD>裁剪与预算<BR/><FONT POINT-SIZE="9">按轮裁剪 · 工具输出 12k 上限</FONT></TD>
+        <TD>检索注入<BR/><FONT POINT-SIZE="9">FTS5 trigram（向量不做）</FONT></TD>
+        <TD>目录注入<BR/><FONT POINT-SIZE="9">技能 L1 · MCP 工具名</FONT></TD>
+        <TD>多模态<BR/><FONT POINT-SIZE="9">图片当轮注入 · 最多 4 张</FONT></TD></TR>
+  </TABLE>>];
+
+  /* ================= ④ 能力层 ================= */
+  L4 [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
+    <TR><TD COLSPAN="3" BGCOLOR="#e8dff7"><B>④ 能力层 · Tool Surface</B>　<FONT POINT-SIZE="9">小而锐 · 大结果落盘 · 按需取用</FONT></TD></TR>
+    <TR><TD BGCOLOR="#f2ecfc">工具注册表<BR/><FONT POINT-SIZE="9">运行时装配（service 可热加服务）</FONT></TD>
+        <TD>内置工具<BR/><FONT POINT-SIZE="9">read · write · exec · remember · remind</FONT><BR/><FONT POINT-SIZE="9">send_file · keep · files · playbook · install_deps</FONT></TD>
+        <TD>出网与审计<BR/><FONT POINT-SIZE="9">web_fetch（拒内网/留痕）· net_log</FONT></TD></TR>
+    <TR><TD BGCOLOR="#f2ecfc">技能 L2·L3<BR/><FONT POINT-SIZE="9">run_skill · publish_skill · rollback</FONT></TD>
+        <TD>服务接入<BR/><FONT POINT-SIZE="9">http · mcp · service（token 不进上下文）</FONT></TD>
+        <TD>宿主挂载<BR/><FONT POINT-SIZE="9">[sandbox] mounts（如 CUPS）· 打印靠技能</FONT></TD></TR>
+  </TABLE>>];
+
+  /* ================= ⑤ 执行层 ================= */
+  L5 [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
+    <TR><TD COLSPAN="4" BGCOLOR="#f7dede"><B>⑤ 执行层 · Execution</B>　<FONT POINT-SIZE="9">默认无网 · 硬超时 · 硬内存</FONT></TD></TR>
+    <TR><TD>ExecutionEnv<BR/><FONT POINT-SIZE="9">bwrap / 超时 killpg</FONT></TD>
+        <TD>三条 lane<BR/><FONT POINT-SIZE="9">sandbox 无网 · lan 调试 · install 装包</FONT></TD>
+        <TD>挂载集<BR/><FONT POINT-SIZE="9">/ws 读写 · /inbox /skills /media 只读 · /py /node</FONT></TD>
+        <TD>cgroup v2<BR/><FONT POINT-SIZE="9">memory · pids</FONT></TD></TR>
+  </TABLE>>];
+
+  /* ================= 贯穿层 ================= */
+  P [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
+    <TR>
+      <TD BGCOLOR="#eeeeee" ALIGN="LEFT"><B>⑦ 状态与资料（SQLite + 文件）</B><BR/><FONT POINT-SIZE="9">journal 状态（messages / tool_calls / attempts）<BR/>docs 结论：fact · file · reminder ｜ 文件库（KB，永久）<BR/>tasks · approvals ｜ net-access 审计日志</FONT></TD>
+      <TD BGCOLOR="#e2f0f2" ALIGN="LEFT"><B>⑥ 治理 · Governance</B><BR/><FONT POINT-SIZE="9">审批按执行域：sandbox / self_modify / outbound / lan / install / host_exec<BR/>副作用分级：Pure / Idem / External + 幂等键<BR/>身份：User ↔ 多通道 Binding<BR/>预算：token / 成本上限（未做）</FONT></TD>
+      <TD BGCOLOR="#f5e6dc" ALIGN="LEFT"><B>⑧ 可观测 · Observability</B><BR/><FONT POINT-SIZE="9">tracing → journald<BR/>出网审计（JSONL，8MB 轮转）<BR/>回放与评测（未做）</FONT></TD>
+    </TR>
+  </TABLE>>];
+
+  /* ================= 连线 ================= */
+  ext_tg  -> L1 [style=dashed, color="#3b6fb6", label=" update / 媒体"];
+  ext_llm -> L2 [dir=both, style=dashed, color="#3b6fb6", penwidth=1.2, label=" 请求（含图）/ delta"];
+  L4 -> ext_svc [dir=both, style=dashed, color="#3b6fb6", label=" http / mcp（token 由宿主注入）"];
+
+  L1 -> L2 [label=" Inbound"];
+  L2 -> L3 [label=" 每轮组装"];
+  L3 -> L4 [dir=both, label=" 工具声明 ⇄ 调用 / 结果"];
+  L4 -> L5 [label=" 执行"];
+  L5 -> P  [style=dotted, label=" 贯穿：所有层写入 / 调用"];
+
+  /* ================= 图例 ================= */
+  leg [label=<<TABLE BORDER="0" CELLSPACING="1" CELLPADDING="2">
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="9">实线 = 调用与数据流　虚线 = 外部交互　点线 = 贯穿能力</FONT></TD></TR>
+    <TR><TD ALIGN="LEFT"><FONT POINT-SIZE="9">粗框 = 核心循环（Turn Loop）　「未做」= 明确不在当前实现里</FONT></TD></TR>
+  </TABLE>>];
+  { rank=same; L1; ext_tg; }
+  { rank=same; L2; ext_llm; }
+  { rank=same; L4; ext_svc; }
+  L1 -> ext_tg [style=invis];
+  L2 -> ext_llm [style=invis];
+  { rank=sink; leg; }
+  P -> leg [style=invis];
+}
