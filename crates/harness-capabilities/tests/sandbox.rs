@@ -149,6 +149,39 @@ async fn network_lane_sees_avahi_socket() {
     assert!(out.stdout.contains("NO-SOCKET"), "离线 lane 不该看到 avahi: {}", out.stdout);
 }
 
+/// 凭据目录必须被遮掉：/etc 是整块挂进来的，daemon 与沙盒同 uid，
+/// 权限位挡不住，只能挂空 tmpfs 盖住。
+#[tokio::test]
+async fn masked_dir_is_empty_in_sandbox() {
+    if !has_bwrap() {
+        eprintln!("skip: no bwrap");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    // 造一个"凭据目录"挂进沙盒，再遮掉它
+    let secrets = tempfile::tempdir().unwrap();
+    std::fs::write(secrets.path().join("token"), b"super-secret").unwrap();
+    let env = BwrapEnv::new(ws.path())
+        .with_mounts(vec![harness_capabilities::Mount {
+            src: secrets.path().to_path_buf(),
+            dst: "/opt/secretbox".into(),
+            ro: true,
+        }])
+        .with_masked_dir("/opt/secretbox");
+
+    let out = env
+        .exec(
+            &["sh".into(), "-lc".into(),
+              "ls -A /opt/secretbox | wc -l; cat /opt/secretbox/token 2>/dev/null || echo READ-FAILED".into()],
+            opts(8000),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.stdout.contains("0"), "遮掉后应为空目录: {}", out.stdout);
+    assert!(out.stdout.contains("READ-FAILED"), "不该读到内容: {}", out.stdout);
+}
+
 /// `/tmp` 是 tmpfs，必须限大小：不限制时它会长到内存的一半，脚本写满会把
 /// 整个服务（MemoryMax=1G）拖进 OOM。
 #[tokio::test]

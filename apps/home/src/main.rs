@@ -214,7 +214,10 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         .with_skills(&cfg.skills_dir)
         .with_media(&cfg.media_dir)
         .with_mounts(cfg.sandbox_mounts.clone())
-        .with_runtime(&cfg.runtime_dir, false);
+        .with_runtime(&cfg.runtime_dir, false)
+        // /etc 整块只读挂进沙盒，凭据目录也在它下面；daemon 与沙盒同 uid，
+        // 权限位分不开，只能盖掉。沙盒里看到的是空目录。
+        .with_masked_dir(cfg.config_dir.join("secrets"));
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));

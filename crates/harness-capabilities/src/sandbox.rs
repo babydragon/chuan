@@ -70,6 +70,10 @@ pub struct BwrapEnv {
     network: bool,
     /// 运行时目录（venv / node_modules）：只读挂 `/py`、`/node`；装包时整块可写挂 `/rt`
     runtime: Option<(PathBuf, bool)>,
+    /// 要在沙盒里**遮掉**的宿主目录（挂一个空 tmpfs 盖上去）。
+    /// 典型用途：`/etc` 是整块只读挂进来的，凭据目录就在它下面——
+    /// 不遮的话，沙盒里的脚本能直接读到 token（我们和 daemon 同 uid，权限位挡不住）。
+    masked: Vec<PathBuf>,
 }
 
 impl BwrapEnv {
@@ -83,6 +87,7 @@ impl BwrapEnv {
             mounts: Vec::new(),
             network: false,
             runtime: None,
+            masked: Vec::new(),
         }
     }
 
@@ -122,6 +127,13 @@ impl BwrapEnv {
     }
 
     /// 保留网络（内网调试用）。**这会同时放开公网**：bwrap 只能整块隔离或放开。
+    /// 遮掉某个宿主目录：沙盒里同名路径变成空目录。
+    /// 用于凭据目录这类"被整块 /etc 带进来"的东西。
+    pub fn with_masked_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.masked.push(dir.into());
+        self
+    }
+
     pub fn with_network(mut self, on: bool) -> Self {
         self.network = on;
         self
@@ -178,6 +190,14 @@ impl BwrapEnv {
                     cmd.arg("--ro-bind").arg(p).arg(p);
                 }
                 _ => {}
+            }
+        }
+
+        // 凭据目录必须盖掉：/etc 是整块只读挂进来的，而 daemon 与沙盒同 uid，
+        // 靠权限位分不开。挂空 tmpfs 后沙盒里看到的是空目录。
+        for dir in &self.masked {
+            if dir.exists() {
+                cmd.arg("--tmpfs").arg(dir);
             }
         }
 
