@@ -42,9 +42,10 @@ lock = "/var/lib/chuan/chuan.lock"
 
 [skills]
 dir = "/var/lib/chuan/skills"
-# 沉淀流程说明（SOP）；不给则用内置文本。改流程只改这个文件，不用改二进制
-distill_prompt_file = "/etc/chuan/prompts/distill.md"
-# 操作规范目录（playbook）：<name>.md 覆盖内置文本
+# 沉淀流程说明（SOP）。**可选**：留空用内置文本；填了就必须存在，否则启动失败。
+# 想改流程时先 `mkdir -p /etc/chuan/prompts` 再写文件，然后取消下面这行注释。
+# distill_prompt_file = "/etc/chuan/prompts/distill.md"
+# 操作规范目录（playbook）：<name>.md 覆盖内置文本。安装脚本会建好这个目录
 playbooks_dir = "/etc/chuan/playbooks"
 
 [identity]

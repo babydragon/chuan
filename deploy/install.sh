@@ -130,8 +130,12 @@ fi
 
 # 2. 二进制与目录
 run install -Dm755 "$BIN_SRC" /usr/local/bin/chuan
-run install -d -m 0755 /etc/chuan
+# /etc/chuan 必须与 unit 的 ConfigurationDirectoryMode 一致（0750），
+# 且组为 chuan：否则 daemon 读不到 0640 的配置，systemd 每次启动还会告警。
+run install -d -m 0750 -o root -g chuan /etc/chuan
 run install -d -m 0700 -o root -g root /etc/chuan/secrets
+# 示例配置默认引用 /etc/chuan/playbooks；daemon 无权在 root 目录下创建，先建好
+run install -d -m 0750 -o root -g chuan /etc/chuan/playbooks
 run install -d -m 0750 -o chuan -g chuan /var/lib/chuan
 run install -d -m 0750 -o chuan -g chuan /var/lib/chuan/backups
 
