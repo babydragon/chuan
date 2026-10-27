@@ -41,6 +41,11 @@ jobs:
       - name: 安装脚本回归（不需要 root，不联网）
         run: bash scripts/check-install.sh
 
+      # 板上真实事故：unit 的 ProtectKernelTunables=yes 让 bwrap 挂不了 /proc，
+      # daemon 照常启动但整个沙盒失效。这里用 unit 里真实的加固项跑一次 bwrap。
+      - name: 部署 unit 与 bwrap 兼容性
+        run: bash scripts/check-sandbox-unit.sh
+
   build:
     name: build (${{ matrix.arch }})
     runs-on: ubuntu-latest

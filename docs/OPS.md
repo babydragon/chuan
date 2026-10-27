@@ -280,6 +280,30 @@ MemoryMax=1G
 WantedBy=multi-user.target
 ```
 
+### 加固项与 bwrap 的冲突（板上真实事故）
+
+**不要**给这个 unit 加 `ProtectKernelTunables=yes`、`ProtectKernelLogs=yes`、`ProtectHostname=yes`。
+
+它们会让 systemd 先动服务的 `/proc`（或 UTS namespace），之后 bwrap 在自己的 mount namespace 里挂全新 procfs 被内核拒绝：
+
+```
+bwrap: Can't mount proc on /proc: Operation not permitted
+```
+
+阴险之处在于 **daemon 照常启动、日志一切正常**，只有第一次 `exec` 才暴露——而且沙盒与联网 lane 会同时失效（两者都走 bwrap）。实测在 x86_64 + systemd 253 上可复现，与架构无关。
+
+用这些替代（收益接近，且与 bwrap 兼容）：
+
+```ini
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+```
+
+`scripts/check-sandbox-unit.sh` 会从 unit 里抽出全部加固项，用 `systemd-run` 真跑一次 bwrap 验证——CI 里跑，别只靠 review。
+
 资源限制走 `systemd-run --user --scope -p MemoryMax=`（已验证 `rc=137`）。系统服务内调用它需要 **user manager 在跑**：`loginctl enable-linger chuan`。若不可用，降级为 `prlimit`（对 Python 不可靠，需在 `/status` 标记）。
 
 `Delegate=yes` 只在需要自建子 cgroup 时使用，当前不用。

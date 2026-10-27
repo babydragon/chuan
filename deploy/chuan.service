@@ -36,7 +36,14 @@ PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ProtectKernelTunables=yes
+# 注意：不要加 ProtectKernelTunables=yes / ProtectKernelLogs=yes / ProtectHostname=yes。
+# 前两者会让 systemd 先动 /proc，后者与其他 namespace 项叠加时会与 bwrap 冲突：
+# bwrap 在自己的 mount namespace 里挂全新 procfs 会被内核拒绝：
+#   bwrap: Can't mount proc on /proc: Operation not permitted
+# 后果是 daemon 照常启动、沙盒与联网 lane 全部失效，只有真跑命令才暴露。
+# 用下面几项替代（等价收益，且与 bwrap 兼容；scripts/check-sandbox-unit.sh 会实测）。
+ProtectKernelModules=yes
+ProtectClock=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/chuan
