@@ -36,7 +36,6 @@
       （**2026-10-27 实测**：`touch /ws/a` → ok；写 `/inbox` → `Read-only file system`；
       `ls /var /root` → `No such file or directory`；沙盒内 `id` = `uid=996(chuan) gid=989(chuan)`；
       `/skills` `/media` 只读未单独验）
-      （**部分实测 2026-10-27**：`ls /home` → `No such file or directory`；其余待验）
 - [ ] `/py` `/node` 只读挂载；`PATH` 含 `/py/bin`
 - [x] `/tmp` 是 tmpfs 且**有上限**（**2026-10-27 实测**：修复前 `df -h /tmp` = 3.9G（内存一半），
       能写到把服务拖进 OOM；已加 `--size` 限 256MB，`tmp_has_size_cap` 守卫；上限值待新包复核）
@@ -44,8 +43,6 @@
       （**2026-10-27 实测**：`timeout_ms=2000` → `timeout after 2000ms`；之后 `ps -ef` 无 `sleep` 残留）
 - [x] 离线 lane 的 netns 里**只有 `lo`**（**2026-10-27 实测**：`ip -o link` 只有 `lo`；
       `curl` 直连 exit=6、走代理 exit=7，与"无网卡"一致）
-      （**间接 2026-10-27**：`curl` 直连 exit=6 DNS 解析失败、走代理 exit=7 连不上——符合"无网卡"；
-      未用 `ip a` 直接确认只有 lo）
 - [x] 联网 lane（`lan_exec` / `network: true` 技能）能看到网卡，且 **DNS 可用**
       （**2026-10-27 实测**：`getent hosts github.com` → `20.205.243.166`，2.5s）
 - [ ] `[sandbox] mounts` 挂 `/run/cups` 后，沙盒内 `lpstat -e` 可见打印机（只读）
