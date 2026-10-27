@@ -106,7 +106,11 @@ if [[ -z "${BIN_SRC:-}" || ! -f "${BIN_SRC:-/nonexistent}" ]]; then
     # 内层脚本来自已发布的包，可能是旧版（不认识 --proxy），故只用环境变量透传；
     # 它本身只装本地文件、不联网。用 bash 而不是 exec，好让 trap 清掉临时目录。
     [[ -n "$PROXY" ]] && export CHUAN_PROXY="$PROXY"
-    bash "$TMP/pkg/install.sh" ${ARGS[@]+"${ARGS[@]}"}
+    status=0
+    bash "$TMP/pkg/install.sh" ${ARGS[@]+"${ARGS[@]}"} || status=$?
+    # 必须在这里退出：否则会继续往下走「本地安装」分支，而下载路径没有 BIN_SRC，
+    # set -u 会报 "BIN_SRC: 未绑定的变量"（rc.1/rc.2 的真实事故）。
+    exit "$status"
   fi
 fi
 

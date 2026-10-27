@@ -37,6 +37,10 @@ jobs:
       - name: 分层守卫（kernel 不得依赖 IO 实现）
         run: python3 scripts/check-layering.py
 
+      # 覆盖过两次真实事故：下载分支后漏 exit（BIN_SRC 未绑定）、--proxy 参数错位
+      - name: 安装脚本回归（不需要 root，不联网）
+        run: bash scripts/check-install.sh
+
   build:
     name: build (${{ matrix.arch }})
     runs-on: ubuntu-latest
