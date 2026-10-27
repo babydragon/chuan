@@ -32,12 +32,18 @@
 
 ## 2. 沙盒与隔离
 
-- [ ] `/ws` 可写；`/inbox` `/skills` `/media` 只读；`/home` `/root` `/var` 不可见
+- [x] `/ws` 可写；`/inbox` `/skills` `/media` 只读；`/home` `/root` `/var` 不可见
+      （**2026-10-27 实测**：`touch /ws/a` → ok；写 `/inbox` → `Read-only file system`；
+      `ls /var /root` → `No such file or directory`；沙盒内 `id` = `uid=996(chuan) gid=989(chuan)`；
+      `/skills` `/media` 只读未单独验）
       （**部分实测 2026-10-27**：`ls /home` → `No such file or directory`；其余待验）
 - [ ] `/py` `/node` 只读挂载；`PATH` 含 `/py/bin`
-- [ ] `/tmp` 是 tmpfs：写入大文件的 OOM 边界（记录触发点）
-- [ ] 超时 `killpg`：`sleep 300` 到点被杀，无残留进程
-- [ ] 离线 lane 的 netns 里**只有 `lo`**
+- [x] `/tmp` 是 tmpfs 且**有上限**（**2026-10-27 实测**：修复前 `df -h /tmp` = 3.9G（内存一半），
+      能写到把服务拖进 OOM；已加 `--size` 限 256MB，`tmp_has_size_cap` 守卫；上限值待新包复核）
+- [x] 超时 `killpg`：`sleep 300` 到点被杀，无残留进程
+      （**2026-10-27 实测**：`timeout_ms=2000` → `timeout after 2000ms`；之后 `ps -ef` 无 `sleep` 残留）
+- [x] 离线 lane 的 netns 里**只有 `lo`**（**2026-10-27 实测**：`ip -o link` 只有 `lo`；
+      `curl` 直连 exit=6、走代理 exit=7，与"无网卡"一致）
       （**间接 2026-10-27**：`curl` 直连 exit=6 DNS 解析失败、走代理 exit=7 连不上——符合"无网卡"；
       未用 `ip a` 直接确认只有 lo）
 - [x] 联网 lane（`lan_exec` / `network: true` 技能）能看到网卡，且 **DNS 可用**
@@ -48,8 +54,11 @@
 ## 3. 出网与审计
 
 - [ ] `web_fetch` 取公网页面成功（TLS 根证书齐全；需要代理时生效）
+      （**2026-10-27 部分**：`openai.com` 返回 403 —— 响应头 `server: cloudflare` +
+      `cf-mitigated: challenge`，换浏览器 UA 同样 403，是源站反爬而非代理/请求头问题）
 - [ ] 大响应（>12KB JSON）变成"结构 + 预览"，全文落 `/ws/.tool-results/`
 - [ ] `net-access.jsonl` 落盘、权限 `600`、达到上限后轮转
+      （**2026-10-27 部分**：`tail` 能读到 403 那条记录，字段齐全；权限与轮转未验）
 - [ ] 拒绝内网的记录也写进日志
 
 ## 4. 通道与部署
@@ -137,3 +146,12 @@
 4. **`ProtectKernelTunables=yes` 让 bwrap 挂不了 `/proc`** → daemon 正常启动、沙盒与联网 lane 全部失效；
 5. 离线 `exec` 曾提供 `proxy` 参数并注入代理环境变量，实际必然失败（无网卡）→ 已从离线 lane 移除；
 6. venv 可用性只判断 `bin/python3` 存在，`ensurepip` 缺失留下的半成品会被永久沿用。
+
+### 待实现 / 已知缺口
+
+- ⚠️ **per-sandbox cgroup 限制未实现**：不变量 8 与 `docs/DESIGN.md` 写的是"cgroup 内存与 pids 硬限"，
+  实际代码只有 systemd `MemoryMax=1G` 兜底 + 沙盒 `/tmp` 256MB 上限。缺单次 `exec` 的
+  `memory.max` / `pids.max`——一个 fork 炸弹仍能在 1G 内把服务拖垮。实现方式待定
+  （per-exec `systemd-run --scope` 需要 user manager；或直接写 cgroup v2）。
+- ⚠️ **`web_fetch` 遇 Cloudflare 挑战**：403 + `cf-mitigated: challenge` 时模型无从判断，
+  会改用 `lan_exec` + `r.jina.ai` 兜底。可考虑在 403 且带该响应头时给一句"该站有反爬，可换源"。
