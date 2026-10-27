@@ -109,7 +109,32 @@ async fn truncates_huge_output() {
     assert!(out.stdout.len() <= 64 * 1024 + 16, "len={}", out.stdout.len());
 }
 
+/// `/tmp` 是 tmpfs，必须限大小：不限制时它会长到内存的一半，脚本写满会把
+/// 整个服务（MemoryMax=1G）拖进 OOM。
 #[tokio::test]
+async fn tmp_has_size_cap() {
+    if !has_bwrap() {
+        eprintln!("skip: no bwrap");
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let env = BwrapEnv::new(ws.path());
+    let out = env
+        .exec(
+            &[
+                "sh".into(),
+                "-lc".into(),
+                "df -k /tmp | awk 'NR==2{print $2}'".into(),
+            ],
+            opts(8000),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let kb: u64 = out.stdout.trim().parse().unwrap_or(u64::MAX);
+    assert!(kb <= 512 * 1024, "/tmp 上限过大（{kb}KB），应当有 --size 限制");
+}
+
 async fn inbox_is_readonly_and_tmp_is_isolated() {
     if !has_bwrap() {
         eprintln!("skip: no bwrap");

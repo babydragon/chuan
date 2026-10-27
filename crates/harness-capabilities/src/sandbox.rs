@@ -17,6 +17,11 @@ use tokio_util::sync::CancellationToken;
 
 const OUTPUT_CAP: usize = 64 * 1024;
 
+/// 沙盒内 `/tmp` 的上限（字节）。tmpfs 计入服务的内存 cgroup：不限制时会长到
+/// 内存的一半（板上 8GB → 3.9GB），脚本写满就把整个服务拖进 OOM。
+/// 256MB 够放解压包与临时帧；大产物应写 `/ws`（宿主磁盘）。
+const TMP_MAX_BYTES: &str = "268435456";
+
 /// 额外挂载：把宿主服务（CUPS socket、D-Bus…）暴露进沙盒。
 ///
 /// 这是**能力授权**，只能由主人写进配置：挂 `/run/cups` 意味着沙盒里任何代码
@@ -190,7 +195,12 @@ impl BwrapEnv {
                 }
             }
         }
-        cmd.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+        // /tmp 是 tmpfs，算在服务的内存 cgroup 里：不设上限时它会长到内存的一半
+        // （板上 8GB → 3.9GB），脚本写满就把整个服务拖进 OOM。这里按字节限死，
+        // 大产物应该写 /ws（宿主磁盘）。
+        cmd.args(["--proc", "/proc", "--dev", "/dev"]);
+        cmd.args(["--size", TMP_MAX_BYTES]);
+        cmd.arg("--tmpfs").arg("/tmp");
         cmd.arg("--dir").arg("/ws");
         cmd.arg("--bind").arg(&self.workspace).arg("/ws");
         if let Some(inbox) = &self.inbox {
