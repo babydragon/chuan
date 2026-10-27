@@ -32,25 +32,32 @@ jobs:
           bwrap --version || echo "bwrap 不可用，沙盒测试会自动跳过"
 
       - name: 单元与集成测试
-        # 沙盒测试在 userns 被禁时会自己跳过（探测的是"能不能真起沙盒"）
         run: cargo test --workspace --all-targets
 
       - name: 分层守卫（kernel 不得依赖 IO 实现）
         run: python3 scripts/check-layering.py
 
-  riscv64:
-    name: build (riscv64)
+  build:
+    name: build (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: riscv64gc-unknown-linux-gnu
+            arch: riscv64
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: riscv64gc-unknown-linux-gnu
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: riscv64
+          key: ${{ matrix.arch }}
 
       - uses: mlugg/setup-zig@v2
 
@@ -58,19 +65,72 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - name: 交叉编译（zig 提供 riscv64 的 C 工具链与链接器）
+      - name: 交叉编译
         run: |
-          cargo zigbuild --release --target riscv64gc-unknown-linux-gnu --bins
-          file target/riscv64gc-unknown-linux-gnu/release/chuan
-          # glibc 基线：zig 默认 2.28，板上的发行版应 ≥ 此值
-          readelf -V target/riscv64gc-unknown-linux-gnu/release/chuan | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3
+          cargo zigbuild --release --target ${{ matrix.target }} --bins
+          file target/${{ matrix.target }}/release/chuan
+          # glibc 基线：zig 默认 2.28，目标系统应 ≥ 此值
+          readelf -V target/${{ matrix.target }}/release/chuan \
+            | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3
 
-      - name: 上传产物
+      - name: 上传二进制
         uses: actions/upload-artifact@v4
         with:
-          name: chuan-riscv64
-          path: |
-            target/riscv64gc-unknown-linux-gnu/release/chuan
-            deploy/
+          name: chuan-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/chuan
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: release (${{ github.ref_name }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 打包（二进制 + 安装脚本 + 部署资产）
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p out
+          for arch in riscv64 x86_64; do
+            dist="dist-$arch"
+            mkdir -p "$dist"
+            cp "artifacts/chuan-$arch/chuan" "$dist/chuan"
+            cp deploy/install.sh deploy/chuan.toml.example \
+               deploy/chuan.service deploy/chuan-backup.service deploy/chuan-backup.timer \
+               README.md LICENSE "$dist/"
+            chmod +x "$dist/chuan" "$dist/install.sh"
+            tar -czf "out/chuan-$TAG-$arch-linux-gnu.tar.gz" -C "$dist" .
+            # 稳定别名：让 /releases/latest/download/chuan-<arch>-linux-gnu.tar.gz 永远指向最新
+            cp "out/chuan-$TAG-$arch-linux-gnu.tar.gz" "out/chuan-$arch-linux-gnu.tar.gz"
+          done
+          cp deploy/install.sh out/install.sh
+          cd out && sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: chuan ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            out/*.tar.gz
+            out/SHA256SUMS
+            out/install.sh
+          body: |
+            安装（RISC-V 单板机 / x86_64 Linux）：
+
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sudo bash
+            ```
+
+            或手动下载对应架构的 tar 包，解开后 `sudo ./install.sh`。
+            需要 systemd 与 root；安装脚本不会自动启动服务，步骤见脚本末尾提示。

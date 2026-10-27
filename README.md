@@ -9,6 +9,25 @@
 
 ---
 
+## 0. 安装（release）
+
+```bash
+# RISC-V 单板机或 x86_64 Linux，需要 root + systemd
+curl -fsSL https://github.com/babydragon/chuan/releases/latest/download/install.sh | sudo bash
+```
+
+或手动下载 `chuan-<tag>-<arch>-linux-gnu.tar.gz` 解开后 `sudo ./install.sh`。
+脚本只装文件、**不自动启动**；放密钥与启用步骤会打印在末尾。
+
+从源码构建：
+
+```bash
+cargo zigbuild --release --target riscv64gc-unknown-linux-gnu   # 需要 zig
+sudo deploy/install.sh
+```
+
+---
+
 ## 1. 它能做什么
 
 | 能力 | 说明 |
