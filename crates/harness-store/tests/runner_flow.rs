@@ -157,7 +157,8 @@ async fn tool_then_done_runs_three_phase_tx() {
     let call = CallId::from("call_1");
     let driver = FakeDriver::new(vec![
         Step::Tools {
-            text: String::new(),
+            // 中间轮说的话（板上实例：先列出的采购清单）不能被终稿刷掉
+            text: "先查一下清单".into(),
             calls: vec![ToolCallRequest {
                 call: call.clone(),
                 name: "echo".into(),
@@ -173,7 +174,7 @@ async fn tool_then_done_runs_three_phase_tx() {
     let runner = Runner { store: &store, driver: &driver, tools: &registry, env: &env, gate: None, outbox: None, docs: None };
     let pair = EventSink::channel(32);
     let out = runner.run(request(), pair.sink, CancellationToken::new()).await.unwrap();
-    assert_eq!(out.text, "完成");
+    assert_eq!(out.text, "先查一下清单\n\n完成", "中间轮正文要留在终稿里");
 
     // 工具调用账本：intent -> dispatched -> finished
     let rows = {

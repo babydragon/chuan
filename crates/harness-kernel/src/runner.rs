@@ -84,6 +84,16 @@ pub struct Runner<'a, S: Store, D: TurnDriver> {
     pub docs: Option<&'a dyn crate::tool::DocReader>,
 }
 
+/// 把各轮正文拼成终稿：空段落丢掉，段落之间空一行。
+fn join_said(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
     pub async fn run(
         &self,
@@ -95,6 +105,9 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         let run = req.run.clone();
         // 工具执行阶段还要发事件（审批通过后重新起算耗时），先留一份
         let tool_sink = sink.clone();
+        // 每轮正文累积：中间轮说的话（比如查完数据先列出的清单）也是用户看到的内容，
+        // 终稿若只取最后一步，会把已经展示过的内容刷掉。
+        let mut said: Vec<String> = Vec::new();
         // 0 = 不限：只靠 max_turns 与手工 /cancel 收口（长任务优先）
         let mut deadline = if req.wall_clock_ms == 0 {
             None
@@ -239,9 +252,16 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                     })
                     .await?;
                     tx.commit().await?;
+                    if !text.trim().is_empty() {
+                        said.push(text);
+                    }
+                    let text = join_said(&said);
                     return Ok(RunOutcome { text, status: RunStatus::Done, tools: used });
                 }
                 Ok(Step::Tools { text, calls }) => {
+                    if !text.trim().is_empty() {
+                        said.push(text.clone());
+                    }
                     self.persist_assistant_and_intents(&conv, &run, &turn_id, &text, &calls)
                         .await?;
 
