@@ -6,9 +6,12 @@ use harness_capabilities::{BwrapEnv, ReadTool, WriteTool};
 use harness_kernel::{ExecOpts, ExecutionEnv, Tool, ToolCtx, Workspace};
 use tokio_util::sync::CancellationToken;
 
+/// 真的能起一个沙盒才算"有 bwrap"：CI 上 userns 可能被 AppArmor 禁掉，
+/// 只看 `--version` 会让测试假失败。
 fn has_bwrap() -> bool {
     std::process::Command::new("bwrap")
-        .arg("--version")
+        .args(["--unshare-all", "--ro-bind", "/usr", "/usr", "--proc", "/proc",
+               "--dev", "/dev", "true"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

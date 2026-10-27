@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装沙盒依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          # Ubuntu 24.04 默认用 AppArmor 限制非特权 userns；放开才能跑沙盒测试
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version || echo "bwrap 不可用，沙盒测试会自动跳过"
+
+      - name: 单元与集成测试
+        # 沙盒测试在 userns 被禁时会自己跳过（探测的是"能不能真起沙盒"）
+        run: cargo test --workspace --all-targets
+
+      - name: 分层守卫（kernel 不得依赖 IO 实现）
+        run: python3 scripts/check-layering.py
+
+  riscv64:
+    name: build (riscv64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: riscv64
+
+      - uses: mlugg/setup-zig@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: 交叉编译（zig 提供 riscv64 的 C 工具链与链接器）
+        run: |
+          cargo zigbuild --release --target riscv64gc-unknown-linux-gnu --bins
+          file target/riscv64gc-unknown-linux-gnu/release/chuan
+          # glibc 基线：zig 默认 2.28，板上的发行版应 ≥ 此值
+          readelf -V target/riscv64gc-unknown-linux-gnu/release/chuan | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: chuan-riscv64
+          path: |
+            target/riscv64gc-unknown-linux-gnu/release/chuan
+            deploy/
+          if-no-files-found: error
+          retention-days: 14

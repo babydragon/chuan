@@ -776,8 +776,15 @@ mod tests {
 
     #[tokio::test]
     async fn runs_skill_in_sandbox() {
-        if std::process::Command::new("bwrap").arg("--version").output().is_err() {
-            eprintln!("skip: no bwrap");
+        // 能真正起沙盒才继续（CI 上 userns 可能被禁）
+        let ok = std::process::Command::new("bwrap")
+            .args(["--unshare-all", "--ro-bind", "/usr", "/usr", "--proc", "/proc",
+                   "--dev", "/dev", "true"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("skip: no usable bwrap");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
