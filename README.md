@@ -37,9 +37,12 @@ sudo deploy/install.sh
 装预发布版要显式指定版本：
 
 ```bash
-CHUAN_VERSION=v0.2.0-rc.1 \
-  curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/install.sh | sudo bash
+curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/install.sh \
+  | sudo CHUAN_VERSION=v0.2.0-rc.1 bash
 ```
+
+> 环境变量要放在 `sudo` 后面（`sudo VAR=x bash`），写在 `curl` 前面是无效的。
+> 二进制按 glibc 2.28 基线构建，目标系统 ≥ 2.28 即可。
 
 ---
 

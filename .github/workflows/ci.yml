@@ -67,7 +67,8 @@ jobs:
 
       - name: 交叉编译
         run: |
-          cargo zigbuild --release --target ${{ matrix.target }} --bins
+          # 后缀锁定 glibc 基线：默认会跟 zig 版本漂，2.28 能覆盖更多发行版
+          cargo zigbuild --release --target ${{ matrix.target }}.2.28 --bins
           file target/${{ matrix.target }}/release/chuan
           # glibc 基线：zig 默认 2.28，目标系统应 ≥ 此值
           readelf -V target/${{ matrix.target }}/release/chuan \
@@ -142,6 +143,6 @@ jobs:
             安装**预发布**版本（不会随 `latest` 更新）：
 
             ```bash
-            CHUAN_VERSION=${{ github.ref_name }} \
-              curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sudo bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh \
+              | sudo CHUAN_VERSION=${{ github.ref_name }} bash
             ```
