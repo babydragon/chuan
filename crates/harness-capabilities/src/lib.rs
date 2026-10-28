@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use harness_kernel::{env::{ExecOpts, ExecOutput}, EnvError, ExecutionEnv};
 
 pub mod admin;
+pub mod auth;
 pub mod install;
 pub mod library;
 pub mod mcp;

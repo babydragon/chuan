@@ -441,7 +441,11 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
 
         let (ok, preview) = match result {
             Ok(out) => {
-                let preview = render_preview(&out.content);
+                // 值不落地：工具输出在进上下文与账本之前，把像凭据的片段遮掉。
+                let (preview, hits) = crate::leak::redact(&render_preview(&out.content));
+                if !hits.is_empty() {
+                    tracing::warn!(kinds = ?hits, tool = %call.name, "工具输出里发现凭据形态，已打码");
+                }
                 let mut tx = self.store.begin_write().await?;
                 for d in out.doc_writes {
                     tx.upsert_doc(conv.clone(), run.clone(), into_doc(d)).await?;
@@ -462,7 +466,10 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                 (true, preview)
             }
             Err(e) => {
-                let preview = e.message.clone();
+                let (preview, hits) = crate::leak::redact(&e.message);
+                if !hits.is_empty() {
+                    tracing::warn!(kinds = ?hits, tool = %call.name, "工具错误里发现凭据形态，已打码");
+                }
                 let mut tx = self.store.begin_write().await?;
                 tx.close_tool_call(call.call.clone(), "error", preview.clone()).await?;
                 tx.append(NewEvent {

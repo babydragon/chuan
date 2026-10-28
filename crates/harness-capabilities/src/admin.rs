@@ -329,6 +329,10 @@ impl Tool for ServiceTool {
                                 "Authorization: Bearer {token}".into()
                             }),
                             extra_headers: Vec::new(),
+                            token_key: None,
+                            query: Default::default(),
+                            body: Default::default(),
+                            sign: None,
                         };
                         // 探活：至少证明 DNS/TLS/端点能通（不看状态码，API 常对 HEAD/根路径回 404）
                         let probe = self.http.probe(&svc).await;

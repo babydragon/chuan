@@ -9,6 +9,7 @@ pub mod env;
 pub mod error;
 pub mod event;
 pub mod ids;
+pub mod leak;
 pub mod identity;
 pub mod policy;
 pub mod record;

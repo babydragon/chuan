@@ -347,8 +347,49 @@ http(service="dida", method="POST", path="/open/v1/task", body={...})
 ```
 
 - 只能访问该服务配置的 host（path 里出现协议/域名直接拒绝），不跟重定向；
-- 审计日志记服务名、方法、路径、状态、耗时，**不记 header、不记 body**，错误信息里的 token 会被抹掉；
+- 审计日志记服务名、方法、路径、状态、耗时，**不记 header、不记 body**；日志与错误里的凭据值会打码；
 - 服务本身的 API 说明放 `playbook`（例如 `playbook("dida-api")`），不进内核。
+
+#### 带签名的 webhook（钉钉 / 飞书）
+
+签名在**宿主**算，凭据文件两行（第 1 行 token，第 2 行 secret）：
+
+```toml
+[services.dingtalk]
+base = "https://oapi.dingtalk.com/robot/send"
+token_file = "/etc/chuan/secrets/dingtalk"
+header = ""                                   # 凭据不放 header
+query = { access_token = "{token}", timestamp = "{ts_ms}", sign = "{sign}" }
+sign  = { canonical = "{ts_ms}\n{secret}" }    # 钉钉：毫秒 + 换行 + secret
+
+[services.feishu]
+base = "https://open.feishu.cn"
+token_file = "/etc/chuan/secrets/feishu"      # 第 1 行 hook id
+header = ""
+body = { timestamp = "{ts_s}", sign = "{sign}" }   # 飞书：秒，放在 body 里
+sign  = { canonical = "{ts_s}\n{secret}" }
+```
+
+调用侧：
+
+```
+http(service="dingtalk", method="POST", path="/robot/send", body={msgtype="text",...})
+http(service="feishu", method="POST", path="/open-apis/bot/v2/hook/{token}", body={...})
+```
+
+可用的模板变量：`{token}` `{secret}` `{sign}` `{ts_s}` `{ts_ms}` `{path}`。
+`{token}` 也可以出现在 **path** 里（飞书的 hook id 就在路径上，此时审计日志会打码）。
+
+**脚本生成内容、宿主负责发**：请求体可以来自 `/ws` 下的文件（限 1MB，仅 JSON）：
+
+```
+http(service="dingtalk", method="POST", path="/robot/send", body_file="report.json")
+```
+
+这样复杂的取数/排版留在脚本里，凭据始终不落到沙盒。
+
+> 设计取舍见 `docs/DECISIONS.md` D18：**不做通用出口代理**，也不支持 OAuth2 令牌交换
+> （需要缓存与过期刷新）——出现真实需求再单独设计。
 
 ### 文件库（keep / files）
 
@@ -561,7 +602,7 @@ sudo systemctl restart chuan
 | **`[vision]`** | `enabled`（图片走多模态，会上传 provider） |
 | `[policy]` | `sandbox`/`self_modify`/`outbound`/`lan`/`install`/`host_exec`（`allow`/`ask`/`deny`）、`require_approval`（额外加严） |
 | **`[sandbox]`** | `mounts`（把宿主服务只读挂进沙盒，如 `/run/cups`） |
-| **`[services.<name>]`** | `kind`（`http`/`mcp`）、`base`、`token_file`、`header`、`tools`、`catalog` |
+| **`[services.<name>]`** | `kind`（`http`/`mcp`）、`base`、`token_file`、`token_key`、`header`、`query`、`body`、`sign`、`tools`、`catalog` |
 | `[runtime]` | `dir`、`pip_index`、`npm_registry` |
 | `[skills]` | `dir`、`playbooks_dir`、`distill_prompt_file` |
 | **`[media]`** | `dir`、`keep_days` |

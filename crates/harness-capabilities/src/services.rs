@@ -31,45 +31,90 @@ pub struct Service {
     pub name: String,
     pub base: String,
     pub token_file: Option<PathBuf>,
-    /// 模板：`Authorization: Bearer {token}`
+    /// 凭据文件里用哪个键（`key = value` 形式）；不写则取第 1 行
+    pub token_key: Option<String>,
+    /// 模板：`Authorization: Bearer {token}`；留空表示不注入请求头
     pub header: String,
     pub extra_headers: Vec<(String, String)>,
+    /// 查询参数注入（值支持 `{token}` `{sign}` `{ts_s}` `{ts_ms}`）
+    pub query: BTreeMap<String, String>,
+    /// 请求体字段注入（飞书加签就放这里）
+    pub body: BTreeMap<String, String>,
+    /// HMAC-SHA256 签名（钉钉/飞书等 webhook）
+    pub sign: Option<crate::auth::SignConfig>,
+}
+
+impl Default for Service {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base: String::new(),
+            token_file: None,
+            token_key: None,
+            header: String::new(),
+            extra_headers: Vec::new(),
+            query: BTreeMap::new(),
+            body: BTreeMap::new(),
+            sign: None,
+        }
+    }
 }
 
 impl Service {
-    fn header_value(&self) -> Result<Option<(String, String)>, String> {
+    fn secret_file(&self) -> Result<Option<crate::auth::SecretFile>, String> {
+        match &self.token_file {
+            Some(f) => crate::auth::SecretFile::load(f).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// 解析本次请求的模板变量；签名在这里算（需要 secret 时缺了会明确报错）。
+    fn vars(&self, path: &str) -> Result<crate::auth::Vars, String> {
+        use crate::auth::Vars;
+        let mut v = Vars::new(now_ms(), path);
+        if let Some(f) = self.secret_file()? {
+            v.token = f.get(self.token_key.as_deref(), 0);
+            if let Some(cfg) = &self.sign {
+                v.secret = f.get(cfg.secret_key.as_deref(), 1);
+            }
+        }
+        if let Some(cfg) = &self.sign {
+            v.sign = Some(crate::auth::sign(cfg, &v)?);
+        }
+        Ok(v)
+    }
+
+    /// 生成注入后的请求头（名字, 值）。留空则不注入。
+    fn header_of(&self, vars: &crate::auth::Vars) -> Result<Option<(String, String)>, String> {
         if self.header.trim().is_empty() {
             return Ok(None);
         }
-        let Some((name, value)) = self.header.split_once(':') else {
+        let rendered = vars.render(&self.header);
+        let Some((name, value)) = rendered.split_once(':') else {
             return Err(format!("服务 {} 的 header 配置不合法（应为 `Name: 值`）", self.name));
         };
-        let mut value = value.trim().to_owned();
-        if value.contains("{token}") {
-            let file = self
-                .token_file
-                .as_ref()
-                .ok_or_else(|| format!("服务 {} 需要 token 但没配 token_file", self.name))?;
-            let token = std::fs::read_to_string(file)
-                .map_err(|e| format!("读取 {} 的 token 失败：{e}", self.name))?
-                .trim()
-                .to_owned();
-            if token.is_empty() {
-                return Err(format!("服务 {} 的 token 是空文件", self.name));
-            }
-            value = value.replace("{token}", &token);
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            return Ok(None);
         }
         Ok(Some((name.trim().to_owned(), value)))
     }
 
-    /// 把错误信息里可能出现的 token 抹掉（防手滑打日志）。
-    fn redact(&self, text: &str) -> String {
-        let Ok(Some((_, value))) = self.header_value() else { return text.to_owned() };
-        let secret = value.rsplit(' ').next().unwrap_or(&value);
-        if secret.len() < 6 {
-            return text.to_owned();
+    /// 把文本里所有已知凭据值抹掉（响应回显、错误信息、审计日志都要过一遍）。
+    fn scrub(&self, text: &str, extra: &[String]) -> String {
+        let mut values: Vec<String> = extra.to_vec();
+        if let Ok(Some(f)) = self.secret_file() {
+            for line in f.raw_lines() {
+                values.push(line.clone());
+            }
         }
-        text.replace(secret, "***")
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        harness_kernel::leak::scrub_values(text, &refs)
+    }
+
+    /// 兼容旧调用：读凭据后把值抹掉。
+    fn redact(&self, text: &str) -> String {
+        self.scrub(text, &[])
     }
 }
 
@@ -77,6 +122,32 @@ pub struct HttpServiceTool {
     services: std::sync::RwLock<BTreeMap<String, Service>>,
     client: reqwest::Client,
     log: PathBuf,
+}
+
+/// 读 `/ws` 下的文件作为请求体：绝对路径、`..`、越界都拒绝，大小限 1MB。
+fn read_workspace_file(root: &str, rel: &str) -> Result<Vec<u8>, String> {
+    const MAX: u64 = 1024 * 1024;
+    if rel.trim().is_empty() {
+        return Err("body_file 不能为空".into());
+    }
+    if rel.starts_with('/') || rel.contains("..") {
+        return Err("body_file 必须是 /ws 下的相对路径（例如 msg.json）".into());
+    }
+    let root = std::path::Path::new(root)
+        .canonicalize()
+        .map_err(|e| format!("workspace 不可用：{e}"))?;
+    let full = root.join(rel);
+    let canon = full
+        .canonicalize()
+        .map_err(|e| format!("读不到 body_file {rel}：{e}"))?;
+    if !canon.starts_with(&root) {
+        return Err("body_file 越出 workspace".into());
+    }
+    let meta = std::fs::metadata(&canon).map_err(|e| format!("读不到 body_file {rel}：{e}"))?;
+    if meta.len() > MAX {
+        return Err(format!("body_file 太大（{} 字节，上限 {MAX}）", meta.len()));
+    }
+    std::fs::read(&canon).map_err(|e| format!("读不到 body_file {rel}：{e}"))
 }
 
 impl HttpServiceTool {
@@ -120,8 +191,10 @@ impl HttpServiceTool {
     /// 探活：证明 base 能连上（不看状态码——很多 API 对根路径/HEAD 回 404）。
     pub async fn probe(&self, svc: &Service) -> String {
         let mut req = self.client.head(&svc.base);
-        if let Ok(Some((k, v))) = svc.header_value() {
-            req = req.header(&k, &v);
+        if let Ok(vars) = svc.vars("/") {
+            if let Ok(Some((k, v))) = svc.header_of(&vars) {
+                req = req.header(&k, &v);
+            }
         }
         match req.send().await {
             Ok(r) => format!("连接正常（HTTP {}）", r.status().as_u16()),
@@ -172,7 +245,8 @@ impl Tool for HttpServiceTool {
                     "service": { "type": "string", "description": "服务名，见工具说明" },
                     "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
                     "path": { "type": "string", "description": "以 / 开头的路径，可带 query" },
-                    "body": { "type": "object", "description": "JSON 请求体（可选）" }
+                    "body": { "type": "object", "description": "JSON 请求体（可选）" },
+                    "body_file": { "type": "string", "description": "从 /ws 下的文件读请求体（脚本生成内容、宿主负责发；仅 JSON）" }
                 },
                 "required": ["service", "method", "path"]
             }),
@@ -235,8 +309,42 @@ impl Tool for HttpServiceTool {
             ));
         }
 
-        let url = format!("{}{}", svc.base.trim_end_matches('/'), path);
-        let (hname, hvalue) = match svc.header_value() {
+        // 模板变量 + 签名：`{token}` 可以出现在 path（飞书 hook id 就在路径里）、
+        // query、body、header 里；值只在宿主侧替换，模型给的是占位符。
+        let vars = match svc.vars(path) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(ToolError::new(ErrorCode::Unavailable, svc.redact(&e), false));
+            }
+        };
+        let path_rendered = vars.render(path);
+        if path_rendered.contains("://") || path_rendered.contains("..") {
+            return Err(ToolError::new(ErrorCode::InvalidArgs, "渲染后的 path 不合法", false));
+        }
+        let mut url = format!("{}{}", svc.base.trim_end_matches('/'), path_rendered);
+        if !svc.query.is_empty() {
+            let mut u = match reqwest::Url::parse(&url) {
+                Ok(u) => u,
+                Err(e) => {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("base 或 path 拼不出合法 URL：{e}"),
+                        false,
+                    ));
+                }
+            };
+            {
+                let mut qp = u.query_pairs_mut();
+                for (k, tpl) in &svc.query {
+                    qp.append_pair(k, &vars.render(tpl));
+                }
+            }
+            url = u.to_string();
+        }
+        // 审计日志里的 path 也要抹掉值（Feishu 的 hook id 就在路径上）
+        let log_path = svc.scrub(&path_rendered, &vars.secrets());
+
+        let (hname, hvalue) = match svc.header_of(&vars) {
             Ok(Some(h)) => h,
             Ok(None) => (String::new(), String::new()),
             Err(e) => {
@@ -265,15 +373,48 @@ impl Tool for HttpServiceTool {
         for (k, v) in &svc.extra_headers {
             req = req.header(k, v);
         }
-        if let Some(body) = args.get("body") {
-            req = req.json(body);
+        // 请求体：调用方给的对象 + 服务配置里的注入字段（飞书加签）；
+        // 也可以从 /ws 读文件（脚本生成内容、宿主负责发）。
+        let mut body_json = args.get("body").cloned();
+        if !svc.body.is_empty() {
+            let mut obj = match body_json.take() {
+                Some(serde_json::Value::Object(m)) => m,
+                Some(_) => {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        "配置了 body 注入的服务只能接受 JSON 对象作为请求体",
+                        false,
+                    ));
+                }
+                None => serde_json::Map::new(),
+            };
+            for (k, tpl) in &svc.body {
+                obj.insert(k.clone(), serde_json::Value::String(vars.render(tpl)));
+            }
+            body_json = Some(serde_json::Value::Object(obj));
+        }
+        let mut raw_body: Option<Vec<u8>> = None;
+        if let Some(fp) = args.get("body_file").and_then(|v| v.as_str()) {
+            match read_workspace_file(&_ctx.workspace.root, fp) {
+                Ok(bytes) => raw_body = Some(bytes),
+                Err(e) => {
+                    return Err(ToolError::new(ErrorCode::InvalidArgs, e, false));
+                }
+            }
+        }
+        if let Some(body) = body_json {
+            req = req.json(&body);
+        } else if let Some(bytes) = raw_body {
+            req = req
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(bytes);
         }
 
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
                 let note = format!("请求失败：{e}");
-                self.log_line(&svc.name, &method, path, None, 0, started.elapsed().as_millis() as i64, &note);
+                self.log_line(&svc.name, &method, &log_path, None, 0, started.elapsed().as_millis() as i64, &note);
                 return Err(ToolError::new(ErrorCode::Unavailable, svc.redact(&note), false));
             }
         };
@@ -285,7 +426,7 @@ impl Tool for HttpServiceTool {
             .map(str::to_owned);
         if status.is_redirection() {
             let note = format!("服务返回 {} 重定向（不跟随）", status.as_u16());
-            self.log_line(&svc.name, &method, path, Some(status.as_u16()), 0, started.elapsed().as_millis() as i64, &note);
+            self.log_line(&svc.name, &method, &log_path, Some(status.as_u16()), 0, started.elapsed().as_millis() as i64, &note);
             return Err(ToolError::new(ErrorCode::Unavailable, note, false));
         }
 
@@ -303,7 +444,7 @@ impl Tool for HttpServiceTool {
                 Ok(None) => break,
                 Err(e) => {
                     let note = format!("读取响应中断：{e}");
-                    self.log_line(&svc.name, &method, path, Some(status.as_u16()), body.len(), started.elapsed().as_millis() as i64, &note);
+                    self.log_line(&svc.name, &method, &log_path, Some(status.as_u16()), body.len(), started.elapsed().as_millis() as i64, &note);
                     return Err(ToolError::new(ErrorCode::Unavailable, svc.redact(&note), false));
                 }
             }
@@ -312,14 +453,14 @@ impl Tool for HttpServiceTool {
         self.log_line(
             &svc.name,
             &method,
-            path,
+            &log_path,
             Some(status.as_u16()),
             body.len(),
             ms,
             if status.is_success() { "ok" } else { "http-error" },
         );
 
-        let text = String::from_utf8_lossy(&body).to_string();
+        let text = svc.scrub(&String::from_utf8_lossy(&body), &vars.secrets());
         if !status.is_success() {
             let hint = if status.as_u16() == 404 {
                 "\n提示：路径可能不对。先取 `playbook(\"<服务名>-api\")` 看规范；\
@@ -340,7 +481,7 @@ impl Tool for HttpServiceTool {
 
         // 统一策略：文本有预算，JSON 给结构，二进制只给元信息 + 路径
         let rendered = crate::payload::render(
-            &body,
+            text.as_bytes(),
             ctype.as_deref(),
             &_ctx.workspace.root,
             &_ctx.call.0,

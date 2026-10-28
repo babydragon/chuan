@@ -108,6 +108,26 @@ pub struct ServiceFile {
     pub tools: Vec<String>,
     /// MCP：目录形态 names（默认）/ full / summary
     pub catalog: Option<String>,
+    /// 凭据文件里用哪个键（`key = value`）；不写取第 1 行
+    pub token_key: Option<String>,
+    /// 查询参数注入，值可用 `{token}` `{sign}` `{ts_s}` `{ts_ms}`
+    #[serde(default)]
+    pub query: std::collections::BTreeMap<String, String>,
+    /// 请求体字段注入（飞书加签放这里）
+    #[serde(default)]
+    pub body: std::collections::BTreeMap<String, String>,
+    /// HMAC-SHA256 签名
+    pub sign: Option<SignFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct SignFile {
+    /// secret 在凭据文件里的键名；不写取第 2 行
+    pub secret_key: Option<String>,
+    /// 待签串模板，默认 `{ts_ms}\n{secret}`（钉钉）；飞书用 `{ts_s}\n{secret}`
+    pub canonical: Option<String>,
+    /// base64（默认）/ base64url / hex
+    pub encode: Option<String>,
 }
 
 fn default_service_kind() -> String {
@@ -754,8 +774,21 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
                 name: name.clone(),
                 base: s.base.clone(),
                 token_file: s.token_file.as_ref().map(|p| expand_tilde(p)),
+                token_key: s.token_key.clone(),
                 header: s.header.clone(),
                 extra_headers: s.extra_headers.clone(),
+                query: s.query.clone(),
+                body: s.body.clone(),
+                sign: s.sign.as_ref().map(|g| harness_capabilities::auth::SignConfig {
+                    secret_key: g.secret_key.clone(),
+                    canonical: g
+                        .canonical
+                        .clone()
+                        .unwrap_or_else(|| "{ts_ms}\n{secret}".into()),
+                    encode: harness_capabilities::auth::Encode::parse(
+                        g.encode.as_deref().unwrap_or("base64"),
+                    ),
+                }),
             })
             .collect(),
         library_dir: file

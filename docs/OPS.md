@@ -146,6 +146,8 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
   - `service` 的 `token_file`（dida365、weread…）：`0440 root:chuan`——**daemon 自己以 chuan 身份读**。
     目录本身也必须 `0750 root:chuan`，否则光是 `x` 位缺失就会 `Permission denied`（不是文件权限问题）；
 - 凭据内容只由宿主在发请求时读取，**不进上下文、不进日志、不进技能**；
+- 带签名的 webhook（钉钉/飞书）用 `sign` 在宿主侧算 HMAC-SHA256，见 README「带签名的 webhook」；
+- 工具输出在进上下文与账本前会过一遍泄漏检测（`harness_kernel::leak`），命中打码并记 `warn`；
 - 这些路径会按实际配置注入 system prompt，所以可以直接问 agent「key 该放哪」。
 
 `<config>` 默认 `~/.config/chuan`，`<skills>/<library>/<media>` 默认在 `~/.local/share/chuan/` 下。

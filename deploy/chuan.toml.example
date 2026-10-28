@@ -84,6 +84,25 @@ require_approval = []
 # token_file = "/etc/chuan/secrets/dida_token"
 # tools = ["create_task", "list_undone_tasks_by_time_query"]   # 可选：只暴露这些
 
+# —— 带签名的 webhook（钉钉 / 飞书）示例 ——
+# 凭据文件两行：第 1 行 token（或 hook id），第 2 行 secret。值只在宿主侧使用。
+#
+# [services.dingtalk]
+# base = "https://oapi.dingtalk.com/robot/send"
+# token_file = "/etc/chuan/secrets/dingtalk"       # 第 1 行 access_token，第 2 行 SEC 密钥
+# header = ""                                       # 钉钉不用 header
+# query = { access_token = "{token}", timestamp = "{ts_ms}", sign = "{sign}" }
+# sign = { canonical = "{ts_ms}\n{secret}" }
+#
+# [services.feishu]
+# base = "https://open.feishu.cn"
+# token_file = "/etc/chuan/secrets/feishu"          # 第 1 行 hook id，第 2 行 secret
+# header = ""
+# body = { timestamp = "{ts_s}", sign = "{sign}" }   # 飞书加签在 body 里，用秒
+# sign = { canonical = "{ts_s}\n{secret}" }
+# 调用：http(service="feishu", method="POST",
+#            path="/open-apis/bot/v2/hook/{token}", body={...})
+
 [proxy]
 # 宿主上的 HTTP 代理；留空则沿用 https_proxy / http_proxy
 url = "http://127.0.0.1:7890"
