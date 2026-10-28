@@ -102,6 +102,12 @@ KB 的最小实现是**文件库**：内容按摘要落盘在 `files/`，索引�
 **代价**：依赖 bwrap 存在；0.11 不支持部分新参数。
 **反悔成本**：低（`ExecutionEnv` 可换实现，Landlock 已验证可用作后备）。
 
+**实现状态（2026-10-28 核对）**：bwrap 白名单挂载与 `killpg` 已实现；**`memory.max` / `pids.max`
+的 per-exec 限额尚未实现**——当前内存边界只有 systemd 服务级 `MemoryMax=1G` 兜底，
+加上沙盒 `/tmp` 的 256MB 上限。`PLATFORM.md` 里"600MB 分配被 `rc=137` 杀死"是
+`systemd-run --scope -p MemoryMax=` 的实测，验证的是 **cgroup 机制可用**，不是单次 `exec` 已受限。
+缺口登记在 `SBC-VERIFY.md` 末尾；实现方式待定（per-exec scope 需要 user manager，或直接写 cgroup v2）。
+
 ---
 
 ## D11 · 并发按 lane，不按数量
