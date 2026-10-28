@@ -63,8 +63,9 @@ max_turns = 6            # 单个子 agent 的轮数上限
 max_tokens = 20000       # 单个子 agent 的 token 预算（prompt+completion）
 wall_ms = 120000         # 单个子 agent 的墙钟上限
 # 并发由 [lanes] agent 控制（默认 1）。
-# 前台静默多少秒后才启动后台任务；0 = 不等（会与前台抢 CPU）
-background_idle_s = 30
+# 前台静默多少秒后才启动后台任务；0 = 不等（会与前台抢模型车道，首字变慢）
+# 任务 tick 是 5s 一次（提醒仍是 30s），所以最坏等待 ≈ background_idle_s + 5s
+background_idle_s = 5
 #
 # 角色：模型只能点名；内容可以写在主配置里，也可以由 agent 用 role 工具写进 roles_dir。
 # 工具只能比上面的 tools 更窄。
@@ -538,7 +539,7 @@ latency_ms, tokens_in, tokens_out, cost_est
 |---|---|---|
 | `/prompt` | 打印实际生效的 system 指令（核心段 + 追加段，3000 字/条） | ✅ |
 | `/usage` | 今日 / 本月 token 与金额 | ✅（含子 agent 拆分） |
-| `/agents` | 运行中的子 agent（任务首行、已耗时），`/agents cancel <id>` | ✅ |
+| `/agents` | 运行中的子 agent（任务首行、已耗时、当前轮次/工具）；`cancel <id>`、`show <id>` 看子会话最近正文与工具轨迹 | ✅ |
 | `/tasks` | 后台任务（pending / running / done / interrupted）；`/tasks cancel <id>`；`/tasks retry <id>`（带上次进展重排） | ✅ |
 
 口径：

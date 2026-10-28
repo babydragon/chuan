@@ -267,7 +267,11 @@ MITM（自签 CA 进沙盒信任库）；要覆盖两条 lane 就得在离线 ne
    不复制历史消息。子会话 id 只能在本父会话名下使用（防止跨会话串数据）。
    理由：续跑的价值是"别从零开始"，不是"假装还是同一个进程"；把整段历史搬过去
    既费 token，又会让新子 agent 误以为那些步骤是它自己做的。
-9. **角色可由 agent 注册，但要人批**：`role(action=add|list|remove)` 写 `roles_dir/<name>.{toml,md}`，
+9. **父 agent 能管自己派的任务**：`task(action=list|status|cancel)`（`tier=1`、`Sandbox` 域）。
+   理由：`delegate(background=true)` 之后父只能干等，用户问"怎么样了"它只能编。给它查询与取消权，
+   但**不鼓励轮询**（完成会推消息）。**前台委托管不了**：模型在被阻塞时无法调用任何工具，
+   只能靠 `/cancel` 或角色的 `wall_ms`——这是阻塞式委托的固有代价。
+10. **角色可由 agent 注册，但要人批**：`role(action=add|list|remove)` 写 `roles_dir/<name>.{toml,md}`，
    域 `SelfModify`（逐次审批）、`tier=1`（子 agent 拿不到）。注册完**热加载**，下一次 delegate 即可用；
    父会话的 system 里会多一段"可派角色"清单，模型据此知道有几个"小弟"、各能做什么。
 

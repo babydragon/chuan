@@ -239,8 +239,11 @@ system_prompt_append_file = "~/.config/chuan/prompts/persona.md"
 |---|---|
 | 说了"派"但没派 | `/prompt` 里有没有派活段；`journalctl -u chuan | grep delegate` |
 | 派了但很快失败 | 日志里 `未知角色` / `额度已用完` / `子 agent 排队被取消` |
-| 后台任务一直 pending | 前台是否一直有活动（30s 静默才开始）；`/tasks` 状态 |
+| 后台任务一直 pending | 只有**正文消息**算前台活动（查 `/tasks` 不算）；默认静默 5s + tick 5s 后才开跑 |
 | 重启后任务没继续 | 设计如此：`interrupted` 只通知不重跑，用 `/tasks retry` |
 | `/cancel` 没反应 | 看日志是否停在模型请求上；30s 内没出现「⏹ 已取消」再发一次 |
 | 子 agent 预算不够 | 角色的 `max_tokens`（没配就用 `[agents] max_tokens`，默认 20k） |
+| 子任务总是"超时被中止" | 看**墙钟**不是 token：角色的 `wall_ms`（没配就用 `[agents] wall_ms`，默认 120s）。查资料类给 300000 |
+| 想让某角色"不限时" | 角色里写 `wall_ms = 0` 是**继承**（不是不限）；只有全局 `[agents] wall_ms = 0` 才不限，且不推荐——子 agent 没有卡死检测，会一直占着 agent 车道 |
+| 想知道子任务干了什么 | `/agents show <sub:…#n>`：最近两段正文 + 最后几条工具轨迹。**thinking 不落账本**（D3），事后看不到推理 |
 | 角色不生效 | `ls ~/.config/chuan/roles/`；`/prompt` 里的"可派角色"清单 |

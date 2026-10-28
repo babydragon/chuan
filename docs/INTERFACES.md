@@ -438,6 +438,9 @@ pub trait AgentSpawner: Send + Sync {
     async fn enqueue(&self, spec: AgentSpec) -> Result<String, AgentError> {
         Err(AgentError::Other("当前实现不支持后台任务".into()))
     }
+    /// 父 agent 管理任务用（`task` 工具）；不要拿来做进度轮询。
+    async fn tasks(&self) -> Result<Vec<TaskInfo>, AgentError>;
+    async fn cancel_task(&self, id: &str) -> Result<String, AgentError>;
 }
 ```
 
@@ -461,6 +464,8 @@ pub trait AgentSpawner: Send + Sync {
   `agent.spawned` / `agent.concluded` + 一条 `msg.tool_result`。
 - 子 run 不装配任何 `ask` 域工具：命中即 `ToolError`，**不进入审批流程**（子 agent 没有通道）。
 - 取消沿 `CancellationToken` 向下传；父崩溃 → 子 `run.finished(interrupted)`，重启不重放。
+- 后台任务由 `task` 工具（`tier=1`）暴露给父 agent：`list` / `status` / `cancel`。
+  前台委托是阻塞的，模型在等结果时无法调用工具，所以"管理前台"只能靠 `/cancel` 或 `wall_ms`。
 - 后台任务落 doc `kind="agent_task"` / `scope="task"`：payload 带 `text/role/inputs/status/conv/chat/attempts`，
   由 actor 的 30s tick 领取；`running` 在重启后标 `interrupted` 并通知，**不自动重跑**（D4）。
 
