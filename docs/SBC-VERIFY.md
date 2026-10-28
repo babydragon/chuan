@@ -209,8 +209,9 @@
       `ls ~/.config/chuan/roles/` 有 `coder.toml` + `coder.md`；**不重启**再用 `role=coder` 能生效
 - [ ] 角色热加载：直接改 `roles/coder.md` → 下一次 delegate 就带新提示词（不用重启）
 - [ ] 角色越权：把 `publish_skill` 写进角色 tools → 实际工具集里没有它（三层收窄）
-- [ ] 后台任务：`background=true` → 立刻返回任务号；`/tasks` 可见；前台静默后开跑，完成后推结论
-- [ ] 不抢前台：后台任务 pending 时连续发消息 → 任务不启动（`background_idle_s`）
+- [ ] 后台任务：让它"后台跑、慢慢做" → 立刻返回任务号；`/tasks` 可见；前台静默（默认 5s）后开跑，完成后推结论
+- [ ] 父 agent 管任务：问"那个任务怎样了" → 它调 `task(status)` 而不是编；说"停掉它" → 它调 `task(cancel)`
+- [ ] 不抢前台：后台任务 pending 时**连续发正文消息** → 任务不启动；只发 `/tasks` 这类指令不影响启动
 - [ ] 重启打断：后台任务运行中 `systemctl restart chuan`
       → 收到"被重启打断"；`/tasks retry <id>` 能带上次进展重排（新任务显示"续 task-xxx"）
 - [ ] 接手简报：retry 后子 agent 应复用 `/ws` 里已有产物，而不是从头再来（看它的第一轮工具调用）

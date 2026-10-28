@@ -305,13 +305,25 @@ pub trait Outbox: Send + Sync {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn effect(&self) -> EffectClass;
+    /// 工具档位：0 通用（子 agent 可用）/ 1 仅主会话
+    fn tier(&self) -> u8 { 0 }
+    /// 并发车道：默认 io；技能/装包类声明 compile
+    fn lane(&self) -> Lane { Lane::Io }
     async fn execute(&self, args: Value, ctx: &ToolCtx<'_>) -> Result<ToolOutput, ToolError>;
 }
 
 pub struct ToolCtx<'a> {
-    pub conv: ConversationId, pub call: CallId, pub run: RunId,
+    pub conv: ConversationId,
+    pub actor: &'a str,
+    pub run: RunId, pub call: CallId,
     pub workspace: &'a Workspace,
     pub env: &'a dyn ExecutionEnv,
+    pub outbox: &'a dyn Outbox,
+    pub docs: &'a dyn DocReader,
+    /// 本 run 的 system 指令（子 agent 复用以命中前缀缓存）
+    pub system_prompt: &'a str,
+    /// 只有主会话 run 注入；`None` = 不能派生（子 agent / 定时任务）
+    pub spawner: Option<&'a dyn AgentSpawner>,
     pub cancel: CancellationToken,
 }
 
@@ -387,7 +399,7 @@ pub trait ExecutionEnv: Send + Sync {
 ```rust
 pub struct AgentSpec {
     pub task: String,
-    pub profile: AgentProfile,        // 决定 model 与工具档位
+    pub profile: AgentProfile,        // 角色：决定提示词、模型与工具子集
     pub inputs: Vec<String>,          // /ws 下的文件路径，只传引用不传内容
     pub max_turns: u32, pub max_tokens: u64, pub wall_ms: u64,   // 0 = 用 [agents] 默认值
     pub parent_run: RunId,
@@ -423,6 +435,13 @@ pub struct Conclusion {
     pub artifacts: Vec<String>,       // /ws 下的产物路径（P4.1 暂为空，路径写在 summary 里）
     pub pending_actions: Vec<String>, // 需要父会话完成的动作（子 agent 无权做）
     pub usage: UsageSnapshot,         // P4.1 为空，归属统计随 P4.2 落地
+}
+
+/// 后台任务的状态快照（`task` 工具与 `/tasks` 共用）
+pub struct TaskInfo {
+    pub id: String, pub status: String, pub text: String,
+    pub created_ms: i64, pub started_ms: Option<i64>,
+    pub child_conv: Option<String>, pub result: Option<String>,
 }
 
 /// 角色来源：每次调用重新读盘，所以 `role` 工具写完即刻生效。
@@ -467,7 +486,7 @@ pub trait AgentSpawner: Send + Sync {
 - 后台任务由 `task` 工具（`tier=1`）暴露给父 agent：`list` / `status` / `cancel`。
   前台委托是阻塞的，模型在等结果时无法调用工具，所以"管理前台"只能靠 `/cancel` 或 `wall_ms`。
 - 后台任务落 doc `kind="agent_task"` / `scope="task"`：payload 带 `text/role/inputs/status/conv/chat/attempts`，
-  由 actor 的 30s tick 领取；`running` 在重启后标 `interrupted` 并通知，**不自动重跑**（D4）。
+  由 actor 的 5s tick 领取（提醒仍 30s）；`running` 在重启后标 `interrupted` 并通知，**不自动重跑**（D4）。
 
 ---
 

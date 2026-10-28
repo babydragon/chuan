@@ -3,7 +3,8 @@
 > 按"能交付什么"分期，不按时间。**每期验收以"一个真实场景跑通"为准。**
 > 每个验收项引用的能力，必须出现在同级或更早的阶段。
 >
-> **当前进度（2026-10-28）**：P0–P3 主体完成；目标板（riscv64）已跑通沙盒与两条 lane、代理、
+> **当前进度（2026-10-28）**：P0–P3 主体完成；**P4（子 agent / 角色 / 后台任务）已实现并在开发机验证，
+> 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
 > 预发布到 `v0.1.0-rc.9`。
@@ -211,8 +212,9 @@
 
 ### P4.3 · 后台 Task
 
-- ✅ doc `kind="agent_task"` 队列 + 30s tick 领取（复用 reminder 的版本号，**不启用空壳 `tasks` 表**）
+- ✅ doc `kind="agent_task"` 队列 + 5s tick 领取（提醒仍 30s；复用 reminder 的版本号，**不启用空壳 `tasks` 表**）
 - ✅ `delegate(background=true)` 立刻返回任务号；`/tasks` 列表、`/tasks cancel <id>`
+- ✅ `task` 工具（tier=1）：父 agent 能自己查/停任务，不必等主人代劳
 - ✅ 结果推回原会话（结论 + `待父执行` + 子会话引用）；同时写 `agent.concluded`
 - ✅ 重启语义（D4）：`running` → `interrupted` + 通知"结果未知、没有自动重跑"，**不重跑**
 - ✅ 接手：`delegate(continue_from=…)` / `/tasks retry <id>` 把上次结论与产物路径（≤1600 字）
@@ -223,7 +225,7 @@
 **验收**：
 
 1. 后台任务重启后继续，不重复执行已完成步骤 → **按 D4 改为"不重跑、只通知"**（避免 `External` 副作用重放）
-2. ✅ 前台 30s 内有活动时后台任务不启动（`background_idle_s`）
+2. ✅ 前台有活动时后台任务不启动（`background_idle_s`，默认 5s；只有正文消息算活动，查 `/tasks` 不算）
 3. ⏳ 后台任务（含它 fork 的沙盒子进程）预算耗尽后能被 `killpg` 收干净——依赖 per-exec cgroup，上板验
 
 > 已完成守卫测试：`background_task_runs_and_pushes_result`（入队→tick→推结果→doc 状态 done）、

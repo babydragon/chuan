@@ -70,12 +70,12 @@ curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/ins
 | 能力 | 说明 |
 |---|---|
 | 对话 | 流式输出，同一条消息里原地更新，不是"处理中…" |
-| 工具 | `exec`（bwrap 沙盒）· `read` `write`（仅工作区）· `remind` · `web_fetch` · `send_file` · `keep` `files` · `playbook` · `install_deps` · `run_skill` `publish_skill` · `http` `mcp` `service` |
+| 工具 | `exec`（bwrap 沙盒）· `read` `write`（仅工作区）· `remind` · `web_fetch` · `send_file` · `keep` `files` · `playbook` · `install_deps` · `run_skill` `publish_skill` · `http` `mcp` `service` · `delegate` `role` `task`（编排） |
 | 过程可见 | 状态行显示 `第 N 轮 · 思考/执行`，工具轨迹带参数与耗时 |
 | 分工 | `delegate` 派子 agent（独立上下文、只回传结论、不能再派）；可按角色（`coder`/`tutor`…）派；
   长活走后台任务，重启只通知不重跑；接手时带上次结论，不必从零开始。配置与日常话术见 [`docs/ROLES.md`](docs/ROLES.md) |
 | 安全 | 沙盒无网络、`/home` 与宿主 `/tmp` 不可见、`/tmp` 限 256MB、超时 killpg（服务级 `MemoryMax=1G` 兜底） |
-| 指令 | `/new` `/cancel` `/status` `/usage` `/prompt` `/agents` `/tasks` `/facts` `/reminders` `/help` |
+| 指令 | `/new` `/cancel` `/status` `/usage` `/prompt` `/agents` `/tasks` `/facts` `/reminders` `/forget` `/approve` `/deny` `/help` |
 
 家庭成员默认只能会话级使用；宿主/提权执行需要主人显式授权并逐条审批（见 `docs/DECISIONS.md` D15）。
 
@@ -154,9 +154,14 @@ chuan --config ~/.config/chuan/chuan.toml
 | 指令 | 作用 |
 |---|---|
 | `/new` | 开启新会话（保留长期记忆） |
-| `/cancel` | 取消当前任务 |
-| `/status` | 空闲/运行中、会话 epoch |
+| `/cancel` | 停掉前台任务 + 本会话的后台任务 |
+| `/status` | 空闲/运行中、会话 epoch、车道占用 |
+| `/usage` | 今日/本月用量（含子 agent 拆分与额度） |
+| `/prompt` | 实际生效的 system 指令 |
+| `/agents` | 运行中的子 agent；`cancel <id>`、`show <id>` |
+| `/tasks` | 后台任务；`cancel <id>`、`retry <id>` |
 | `/help` | 指令列表 |
+| `/reminders` | 查看/取消定时任务 |
 | `/facts` | 查看长期记忆 |
 | `/forget <id>` | 删除一条记忆 |
 | `/approve <id>` | 无按钮通道时确认审批 |

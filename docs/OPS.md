@@ -69,7 +69,7 @@ background_idle_s = 5
 #
 # 角色：模型只能点名；内容可以写在主配置里，也可以由 agent 用 role 工具写进 roles_dir。
 # 工具只能比上面的 tools 更窄。
-roles_dir = "~/.config/chuan/roles"
+roles_dir = "~/.config/chuan/roles"   # install.sh 的示例配置用 /etc/chuan/roles（agent 可写）
 # [agents.roles.coder]
 # system_prompt_file = "~/.config/chuan/prompts/coder.md"
 # model = "deepseek-v4.1-flash"      # 可选，缺省继承 [engine]
@@ -89,10 +89,7 @@ roles_dir = "~/.config/chuan/roles"
 #   <roles_dir>/coder.md     角色提示词（原样追加在父 system 之后）
 # 同名时以主配置为准（防止"改了配置却不生效"）。
 # 注册后父会话的机会清单里会多一行"可派子 agent 的角色：…"，模型据此决定 role。
-# 子 agent 默认继承 [engine]；要更便宜的档位就加 profile（只能更窄，不能越过内置白名单）
-# [agents.profiles.fast]
-# model = "glm-5.3-flash"
-# tools = ["read", "exec", "playbook"]
+# 子 agent 默认继承 [engine]；要给某个角色换便宜模型，就在该角色里写 model（只能更窄，不能越过白名单）。
 
 [budget]
 # 0 = 不限。按本地自然日/自然月统计，超限直接拒绝（run 入口 + delegate 前各查一次），
@@ -538,15 +535,20 @@ latency_ms, tokens_in, tokens_out, cost_est
 | 命令 | 输出 | 状态 |
 |---|---|---|
 | `/prompt` | 打印实际生效的 system 指令（核心段 + 追加段，3000 字/条） | ✅ |
-| `/usage` | 今日 / 本月 token 与金额 | ✅（含子 agent 拆分） |
+| `/usage` | 今日 / 本月 token、额度、子 agent 拆分（金额待 `[pricing]`） | ✅ |
 | `/agents` | 运行中的子 agent（任务首行、已耗时、当前轮次/工具）；`cancel <id>`、`show <id>` 看子会话最近正文与工具轨迹 | ✅ |
 | `/tasks` | 后台任务（pending / running / done / interrupted）；`/tasks cancel <id>`；`/tasks retry <id>`（带上次进展重排） | ✅ |
+| `/cancel` | 前台 run + 本会话的 pending/running 后台任务一起停，回报数量 | ✅ |
+
+模型侧有同名能力的工具（`tier=1`）：`delegate`（派活）、`role`（注册角色）、`task`（查/停后台任务），
+主人不需要记这些参数——用自然语言即可。
 
 口径：
 
 - `prompt_tokens` 含 system 指令与工具 schema，所以**一切按整请求算**，不按消息正文算。
 - 子 agent 的 token 同时计入自己的会话明细与**父 run 汇总**（D20）；日/月额度是全局的。
-- `cost_est` 由 `[pricing]` 查表计算，engine 不再写死 0；查不到价目记 0 并打 warning。
+- 金额**尚未实现**：`[pricing]` 只有配置位，`cost_est` 恒 0，`/usage` 会显示"金额未配 [pricing]"。
+  落地时由内核按 model 查表计算，查不到记 0 并打 warning。
 
 实测基线（2026-10-28，开发机账本 39 run / 93 turn / 88 次模型请求，`glm-5.3-flash`）：
 

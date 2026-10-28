@@ -247,7 +247,7 @@ MITM（自签 CA 进沙盒信任库）；要覆盖两条 lane 就得在离线 ne
 **决定**：
 
 1. 形态只有两种：**前台委托**（父 turn 内阻塞工具，≤120s，随父取消）与**后台 Task**
-   （durable doc 行 + 30s tick 领取，见 `ROADMAP.md` P4.3）。不做第三种。
+   （durable doc 行 + 5s tick 领取，见 `ROADMAP.md` P4.3）。不做第三种。
 2. **拓扑单层**：`depth ≤ 1`。子 agent 的工具集**不含** `delegate`——用工具集禁止，不靠提示词。
 3. 子 agent 有**独立 Conversation**（`sub:<parent_conv>#<n>`）与独立 run/journal，**不共享父历史**。
    回传 `Conclusion{status, summary ≤2000 字, child_conv, artifacts[], pending_actions[], usage}`；

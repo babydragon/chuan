@@ -21,10 +21,10 @@ model = "glm-5.3-flash"
 api_key_file = "~/.config/chuan/secrets/zai_key"
 # base_url = "..."                 # 覆盖预设；以 /chat/completions 结尾则原样用
 # proxy = "http://127.0.0.1:7890"  # 模型走代理；不写=直连
-# 整体替换内置 system 指令（一般不要用：内置的准确性/行为规则会全部消失）
-# system_prompt_file = "/etc/chuan/system.md"
-# 追加到内置指令末尾（推荐）：调教用，改完 systemctl restart chuan 即生效
-# system_prompt_extra_file = "/etc/chuan/prompts/extra.md"
+# system 指令是"核心段写死 + 只能追加"（D21）：核心段编译进二进制、不可替换，
+# 这里配的文件只追加在它之后。改完 systemctl restart chuan 生效；`/prompt` 可查看最终全文。
+# system_prompt_append_file = "/etc/chuan/prompts/extra.md"
+# 旧名 system_prompt_extra_file 仍兼容；system_prompt_file（整体替换）已废弃并会启动报错。
 
 [actor]
 max_turns = 8
@@ -38,6 +38,35 @@ context_budget_tokens = 24000
 workspace = "/var/lib/chuan/workspaces"
 # 用户投递目录：只读挂到沙盒 /inbox
 inbox = "/var/lib/chuan/inbox"
+
+[lanes]
+# 并发按资源类型限流（D11），不是按请求数。SBC 上不要调大。
+io = 2          # 文件、短命令
+compile = 1     # 编译/装包/技能 dry-run
+external = 1    # 模型请求（并发 1 时前台与子 agent 会轮流用，首字可能等一步）
+agent = 1       # 子 agent 并发
+
+[agents]
+# 子 agent（D19/D20）。enabled=false 时 delegate 一律拒绝。
+enabled = true
+max_per_run = 2          # 单个 run 最多派几个
+max_turns = 6            # 单个子 agent 的轮数上限
+max_tokens = 20000       # 单个子 agent 的 token 预算
+wall_ms = 120000         # 单个子 agent 的墙钟上限（0 = 不限，不推荐）
+background_idle_s = 5    # 前台静默多久才启动后台任务
+roles_dir = "/etc/chuan/roles"
+# 角色：模型只能点名，内容由配置或 agent 的 role 工具写入（热加载）。
+# 现成角色与日常话术见 docs/ROLES.md。
+# [agents.roles.coder]
+# tools = ["read", "write", "exec", "playbook"]
+# max_turns = 10
+# max_tokens = 40000
+# wall_ms = 300000
+
+[budget]
+# 0 = 不限。按本地自然日/月统计；超限在 run 入口与 delegate 前直接拒绝。
+daily_tokens = 0
+monthly_tokens = 0
 
 [storage]
 db = "/var/lib/chuan/chuan.db"

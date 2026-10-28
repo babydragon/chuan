@@ -83,8 +83,8 @@
 | **Turn Loop** | 模型⇄工具循环；最大轮次/总时长/token 预算；中断即落库 | 不写"智能"重试 |
 | 状态恢复 | 崩溃点分级（`DECISIONS.md` D4）；lease 过期标 interrupted | 不追求逐 token 续写 |
 | 任务调度 | 持久化 sleep；到点触发；lease + attempts；错过补跑 | 不用系统 cron |
-| 子 agent | 派生独立会话（`sub:<parent>#<n>`）；工具集 `tier=0`、不含 `delegate`；只回传 `Conclusion`（≤2000 字）；不得请求审批 | 不共享父历史、不做对等网状协作、不递归 |
-| 长任务 | 后台执行、进度、取消、重启续跑；doc `agent_task` 队列 + tick 领取 | 不对脚本内部 checkpoint |
+| 子 agent | 派生独立会话（`sub:<parent>#<n>`）；按角色装配提示词/模型/工具子集（只能收窄）；工具集 `tier=0`、不含 `delegate`；只回传 `Conclusion`（≤2000 字 + `pending_actions`）；不得请求审批 | 不共享父历史、不做对等网状协作、不递归 |
+| 长任务 | 后台执行、进度、取消、重启续跑；doc `agent_task` 队列 + 5s tick 领取（提醒仍 30s） | 不对脚本内部 checkpoint |
 | 并发闸门 | `io=2` / `compile=1` / `external=1` / `agent=1`；后台任务让前台 | 不按请求数放开并发 |
 
 ### ③ 上下文（L4）
@@ -103,6 +103,7 @@
 |---|---|---|
 | 工具注册表 | 运行时装配；角色裁剪；同名覆盖；延迟加载 | 不编译期写死 |
 | 内置工具 | `read` `write` `exec` `lan_exec` `remember` `remind` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
+| 编排工具 | `delegate`（派子 agent，tier=1）/ `role`（注册角色，SelfModify）/ `task`（查/停后台任务，tier=1） | 不做 workflow DSL |
 | 技能工具 | `run_skill` / `publish_skill` / `rollback_skill` | — |
 | 服务工具 | `http`（命名服务，支持 header/query/body/path 注入与 HMAC 签名）/ `mcp`（远端工具）/ `service`（运行期热加，写 `services.d/`） | token 不进上下文，也不进沙盒（D18） |
 | 技能工具 | manifest + scripts；stdin/stdout JSON；**纯函数** | 不直连打印/发送 |
@@ -208,15 +209,21 @@ remind(时间, 内容) → 写任务行 → 调度器 sleep 到期
 ### 7.5 一次委托（P4）
 
 ```
-父 turn 决定 delegate(task, inputs)
+父 turn 决定 delegate(task, inputs, role?, continue_from?)
   → 闸门：depth / max_per_run / agent lane / 日预算
+  → 解析角色（提示词/模型/工具子集）+ 接手简报（continue_from 的结论与产物，≤1600 字）
   → 建子会话 sub:<parent>#<n> + 子 run（agent.spawned）
-  → 子 run：独立上下文（同一 system 前缀 + 任务书 + 空历史）、tier=0 工具集
-       ├─ 正常结束 → Conclusion（≤2000 字 + 产物引用 + usage）
+  → 子 run：独立上下文（父 system 前缀 + 角色段 + 任务书 + 空历史）、tier=0 工具集
+       ├─ 正常结束 → Conclusion（≤2000 字 + pending_actions + 子会话引用）
        ├─ 预算/超时 → Conclusion{status=budget|timeout}，不重试
-       └─ 取消（父 /cancel 或崩溃）→ 子 run.finished(cancelled|interrupted)
+       └─ 取消（父 /cancel、/agents cancel 或崩溃）→ 子 run.finished(cancelled|interrupted)
   → agent.concluded + 父 msg.tool_result（只这一条进父上下文）
-  → usage 计入子会话明细与父 run 汇总
+  → usage 计入子会话明细，按会话前缀归属 agent
+
+后台形态（background=true）：
+  写 doc `agent_task`（pending）→ 5s tick 在前台静默 background_idle_s 后领取
+  → 完成把结论推回原会话，并写 msg.synthetic(agent_task_done) 进父账本
+  → 重启时 running → interrupted 只通知不重跑；/tasks retry 带上次结论重排
 ```
 
 ---

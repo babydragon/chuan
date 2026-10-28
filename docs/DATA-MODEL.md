@@ -117,6 +117,14 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 
 **判断标准**：删掉全部投影表后 `rebuild`，状态完全恢复。做不到就是 journal 缺字段。
 
+应用级 doc 种类（都走 `doc.upserted`，内核不认识语义）：
+
+| kind | scope | 用途 |
+|---|---|---|
+| `fact` | `user:<id>` / `family` | 长期记忆 |
+| `reminder` | — | 定时提醒（`next_at` 等） |
+| `agent_task` | `task` | 后台任务队列（status / child_conv / continue_from / result） |
+
 ---
 
 ## 5. 消息分页

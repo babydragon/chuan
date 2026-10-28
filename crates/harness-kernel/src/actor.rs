@@ -462,7 +462,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     &inb.conversation,
                     "可用指令：\n\
                      /new — 开启新会话（保留长期记忆）\n\
-                     /cancel — 取消当前任务\n\
+                     /cancel — 停掉前台任务与本会话的后台任务\n\
                      /status — 查看状态\n\
                      /facts — 查看长期记忆\n\
                      /reminders — 查看/取消定时任务\n\
@@ -471,6 +471,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                      /agents — 查看/取消运行中的子 agent\n\
                      /tasks — 查看/取消后台任务\n\
                      /forget <id> — 删除一条记忆\n\
+                     /approve <id> /deny <id> — 无按钮时处理审批\n\
                      /help — 本说明\n\n\
                      直接发消息即可对话；改动过文件的任务终稿会带「沉淀为 Skill」按钮，\
                      要导入外部技能直接说就行（模型会先取 playbook）。",

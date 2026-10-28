@@ -197,6 +197,8 @@ ensure_dir "$ETC/playbooks"  0750 root "$SVC_GROUP"
 ensure_dir "$ETC/prompts"    0750 root "$SVC_GROUP"
 # 运行期新增的服务写这里；必须让服务用户可写，否则重启就丢
 ensure_dir "$ETC/services.d" 0770 root "$SVC_GROUP"
+# 角色目录：agent 的 role 工具会往里写，必须让服务用户可写（与 services.d 同理）
+ensure_dir "$ETC/roles"      0770 root "$SVC_GROUP"
 ensure_dir "$STATE"          0750 "$SVC_USER" "$SVC_GROUP"
 ensure_dir "$STATE/backups"  0750 "$SVC_USER" "$SVC_GROUP"
 # daemon 运行期自建的目录：存在就顺手校正
@@ -272,6 +274,7 @@ cat <<NEXT
   /etc/chuan              0750 root:$SVC_GROUP
   /etc/chuan/secrets      0750 root:$SVC_GROUP   （文件见上）
   /etc/chuan/services.d   0770 root:$SVC_GROUP   （运行期加的服务写这里）
+  /etc/chuan/roles        0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
   /etc/chuan/playbooks    0750 root:$SVC_GROUP
   /var/lib/chuan          0750 $SVC_USER:$SVC_GROUP
 

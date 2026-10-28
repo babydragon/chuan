@@ -30,7 +30,7 @@ enabled = true
 # 子 agent 能用的工具总白名单（角色只能在这个范围内再收窄）
 # 默认就是 read/write/exec/playbook/web_fetch/keep/files，一般不用改
 max_per_run = 2          # 一次对话最多派几个
-background_idle_s = 30   # 前台静默多久才启动后台任务
+background_idle_s = 5    # 前台静默多久才启动后台任务（tick 另有 5s）
 roles_dir = "~/.config/chuan/roles"
 
 [budget]
@@ -49,7 +49,11 @@ agent = 1
 
 ---
 
-## 3. 角色（放 `~/.config/chuan/roles/`）
+## 3. 角色（目录由 `[agents] roles_dir` 决定）
+
+用 `install.sh` 安装时，示例配置把 `roles_dir` 指到 `/etc/chuan/roles`（installer 建成 0770 root:chuan，
+服务用户可写）；不走 installer 时默认是 `~/.config/chuan/roles`。**以 `chuan.toml` 里的值为准**，
+`ls` 一下就知道角色落在哪。
 
 每个角色两个文件：`<名字>.toml`（参数）+ `<名字>.md`（提示词，原样追加在父 system 之后）。
 **改完不用重启**，下一次派活就生效。
