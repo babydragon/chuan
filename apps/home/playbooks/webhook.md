@@ -24,7 +24,7 @@ sudo -u chuan head -n1 /etc/chuan/secrets/dingtalk   # 能读到才算对
 
 ```
 service(action="add", name="dingtalk",
-        base="https://oapi.dingtalk.com/robot/send",
+        base="https://oapi.dingtalk.com",
         token_file="/etc/chuan/secrets/dingtalk", header="",
         query={access_token="{token}", timestamp="{ts_ms}", sign="{sign}"},
         sign={canonical="{ts_ms}\n{secret}"})
@@ -71,6 +71,9 @@ http(service="feishu", method="POST", path="/open-apis/bot/v2/hook/{token}",
 也不配 `sign`：`service(add, ..., query={access_token="{token}"})` 即可。
 
 ## 通用规则
+
+- **`base` 只到域名**（`https://oapi.dingtalk.com`），入口路径一律由 `path` 给。
+  把 `/robot/send` 写进 base 又在 path 里重复，会拼成 `/robot/send/robot/send` → 404。
 
 - **不要索取、读取、复述 token/secret 的值**；你只处理文件路径，`{token}` `{sign}` 由宿主替换。
 - 不要猜 URL：钉钉只有一个入口 `/robot/send`；飞书 hook id 在路径上，用 `{token}` 占位。

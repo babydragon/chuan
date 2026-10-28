@@ -127,6 +127,17 @@ pub struct HttpServiceTool {
     log: PathBuf,
 }
 
+/// base 里自带的那段路径（`/` 视为没有）。用于检测"base 与 path 重复"。
+fn base_path_suffix(base: &str) -> Option<String> {
+    let u = reqwest::Url::parse(base).ok()?;
+    let p = u.path().trim_end_matches('/');
+    if p.is_empty() {
+        None
+    } else {
+        Some(p.to_owned())
+    }
+}
+
 /// 读 `/ws` 下的文件作为请求体：绝对路径、`..`、越界都拒绝，大小限 1MB。
 fn read_workspace_file(root: &str, rel: &str) -> Result<Vec<u8>, String> {
     const MAX: u64 = 1024 * 1024;
@@ -324,6 +335,21 @@ impl Tool for HttpServiceTool {
         let path_rendered = vars.render(path);
         if path_rendered.contains("://") || path_rendered.contains("..") {
             return Err(ToolError::new(ErrorCode::InvalidArgs, "渲染后的 path 不合法", false));
+        }
+        // base 带了路径、path 又写一遍 → 拼出 /x/x，必然是 404。
+        // 提前讲清楚，别让人对着 404 猜（板上真实踩过：/robot/send/robot/send）。
+        if let Some(suffix) = base_path_suffix(&svc.base) {
+            if path_rendered == suffix || path_rendered.starts_with(&format!("{suffix}/")) {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    format!(
+                        "路径重复：base 已经以 {suffix} 结尾，path 又写了 {path_rendered}，\
+                         会拼成 {suffix}{path_rendered}。\n\
+                         约定：base 只到域名（scheme://host[:port]），入口路径全部放进 path。"
+                    ),
+                    false,
+                ));
+            }
         }
         let mut url = format!("{}{}", svc.base.trim_end_matches('/'), path_rendered);
         if !svc.query.is_empty() {

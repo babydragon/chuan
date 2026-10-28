@@ -364,7 +364,7 @@ http(service="dida", method="POST", path="/open/v1/task", body={...})
 
 ```toml
 [services.dingtalk]
-base = "https://oapi.dingtalk.com/robot/send"
+base = "https://oapi.dingtalk.com"          # 只到域名：入口路径由 path 给
 token_file = "/etc/chuan/secrets/dingtalk"
 header = ""                                   # 凭据不放 header
 query = { access_token = "{token}", timestamp = "{ts_ms}", sign = "{sign}" }

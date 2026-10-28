@@ -412,3 +412,28 @@ async fn body_file_is_jailed_to_workspace() {
     let req = seen.lock().unwrap().clone();
     assert!(req.contains(r#""hello":"world""#), "body_file 内容没发出去: {req}");
 }
+
+/// base 带路径 + path 又写一遍 → 明确报"路径重复"，而不是等 404。
+#[tokio::test]
+async fn duplicate_base_and_path_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service {
+        name: "dingtalk".into(),
+        base: "https://oapi.dingtalk.com/robot/send".into(),
+        ..Default::default()
+    };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let err = tool
+        .execute(
+            serde_json::json!({"service":"dingtalk","method":"POST","path":"/robot/send","body":{}}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("路径重复"), "{}", err.message);
+    assert!(err.message.contains("只到域名"), "{}", err.message);
+}

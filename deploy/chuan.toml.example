@@ -88,7 +88,7 @@ require_approval = []
 # 凭据文件两行：第 1 行 token（或 hook id），第 2 行 secret。值只在宿主侧使用。
 #
 # [services.dingtalk]
-# base = "https://oapi.dingtalk.com/robot/send"
+# base = "https://oapi.dingtalk.com"        # 只到域名；/robot/send 由调用时的 path 给
 # token_file = "/etc/chuan/secrets/dingtalk"       # 第 1 行 access_token，第 2 行 SEC 密钥
 # header = ""                                       # 钉钉不用 header
 # query = { access_token = "{token}", timestamp = "{ts_ms}", sign = "{sign}" }
