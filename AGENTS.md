@@ -143,7 +143,7 @@ apps/<name>/            # 薄二进制 crate + config/prompts/skills/evals
 | 2 | `docs/DESIGN.md` | 分层（L1–L10）、模块、功能点、关键流程 |
 | 3 | `docs/DATA-MODEL.md` | 层→模块→crate 映射、事件分类、Journal、恢复判定 |
 | 4 | `docs/INTERFACES.md` | 契约：Channel / Store / Retriever / TurnDriver / Tool / ExecutionEnv / Renderer |
-| 5 | `docs/DECISIONS.md` | ADR（D1–D13、D15–D17）+ 已废弃清单 |
+| 5 | `docs/DECISIONS.md` | ADR（D1–D13、D15–D18）+ 已废弃清单 |
 | 6 | `docs/SELECTION.md` | 按层选型、依赖清单、排除项 |
 | 7 | `docs/OPS.md` | 配置、密钥、systemd、时间、重试、备份、降级 |
 | 8 | `docs/PLATFORM.md` | 目标板实测基线（沙盒/cgroup/glibc/bwrap） |

@@ -3,8 +3,9 @@
 > 运行在单块 RISC-V SBC（riscv64 / 8GB）上的个人助理 harness。Rust 单二进制，Telegram 为主入口。
 > 核心特征：**账本即真相的状态模型** + **沙盒化执行** + **可沉淀技能**。
 >
-> 当前状态：P0–P3 主体已实现并在开发机（x86_64）验证；**riscv64 端到端尚未上板**，
-> 逐条清单见 `SBC-VERIFY.md`。开发机只用于构建与联调，生产部署在目标板上。
+> 当前状态：P0–P3 主体已实现；**已在 riscv64 目标板上跑通**（沙盒隔离、两条 lane、代理、
+> mDNS、打印链路、定时任务含 pinned/polish、凭据不落沙盒），逐条实测值见 `SBC-VERIFY.md`。
+> 预发布到 `v0.1.0-rc.5`，正式版待定。
 
 ---
 
@@ -36,10 +37,12 @@
 4. **权限与隔离分离**：授权轴是"执行域"（sandbox / self_modify / outbound / lan / install / host_exec），不是命令黑名单；沙盒才是边界。
 5. **技能是纯函数**：只能读写 workspace，拿不到打印/发送的直连能力；`SKILL.md` 正文永不进上下文。
    领域能力（打印、服务 API）由技能实现，内核只给通用挂载与协议适配（D17）。
+   **凭据只在宿主侧**：值不进沙盒、不进上下文，注入发生在宿主构造请求时（D18）。
 6. **三个数据平面**：状态（journal）/ 结论（docs）/ 资料（KB），生命周期与备份方式不同。
 7. **四个替换型扩展点**：Channel（多通道并存）、Store（换数据库）、Retriever（换检索）、TurnDriver（换 LLM 实现），各有一致性测试。
 8. **LLM 客户端自写**（约 400 行），接口冻结为 `TurnDriver`；rig 的 loop 在 journal-first 前提下用不上。
-9. **沙盒 = bwrap 白名单挂载 + cgroup v2 硬限**，已在目标板验证：`/home` 不可见、外网不可达、600MB 分配被 `rc=137` 杀死。出网改由宿主 `web_fetch` 代取。
+9. **沙盒 = bwrap 白名单挂载**（`/home` 不可见、默认无网、超时 killpg）。内存边界目前是
+   **服务级 `MemoryMax=1G` + 沙盒 `/tmp` 256MB**；*per-exec `cgroup` 限额尚未实现*（缺口见 `SBC-VERIFY.md`）。出网由宿主 `web_fetch` / `lan_exec` 代取。
 10. **当前不做**：向量、多租户 SaaS、插件热加载、通用 workflow 引擎——都要等第二个应用证明需求。
 
 ---

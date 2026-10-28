@@ -101,9 +101,9 @@
 | 模块 | 功能点 | 不做 |
 |---|---|---|
 | 工具注册表 | 运行时装配；角色裁剪；同名覆盖；延迟加载 | 不编译期写死 |
-| 内置工具 | `read` `write` `exec` `remember` `remind` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
+| 内置工具 | `read` `write` `exec` `lan_exec` `remember` `remind` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
 | 技能工具 | `run_skill` / `publish_skill` / `rollback_skill` | — |
-| 服务工具 | `http`（命名服务）/ `mcp`（远端工具）/ `service`（运行期热加） | token 不进上下文 |
+| 服务工具 | `http`（命名服务，支持 header/query/body/path 注入与 HMAC 签名）/ `mcp`（远端工具）/ `service`（运行期热加，写 `services.d/`） | token 不进上下文，也不进沙盒（D18） |
 | 技能工具 | manifest + scripts；stdin/stdout JSON；**纯函数** | 不直连打印/发送 |
 | 宿主特权工具 | `web_fetch`（唯一出网路径，已实现）、`send`（待做） | 永不下沉沙盒 |
 | 领域能力 | **用技能实现**（打印、发现、查墨量…）；内核只给通用挂载 `[sandbox] mounts` | 内核不提供 `print` 之类的领域工具 |

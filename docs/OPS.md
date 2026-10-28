@@ -75,7 +75,8 @@ host_exec = "deny"
 # 额外加严的工具名（只能加严，不能放松 host_exec = "deny"）
 require_approval = []
 
-# 命名服务（可选）。kind = "http"（默认）或 "mcp"；token 只放凭据文件，权限 0600
+# 命名服务（可选）。kind = "http"（默认）或 "mcp"。
+# token 只放凭据文件：LoadCredential 用 0400 root:root，服务 token 用 0440 root:chuan
 # [services.dida]
 # kind = "mcp"
 # base = "https://mcp.dida365.com"
@@ -101,7 +102,7 @@ enabled = true     # 默认 false
 ```toml
 [proxy]
 url = "http://127.0.0.1:7890"   # 留空则读 https_proxy / http_proxy
-sandbox   = "auto"    # auto = 只在 exec(proxy=true) 时注入 / always / never
+sandbox   = "auto"    # auto = 只在 lan_exec(proxy=true) 时注入 / always / never
 web_fetch = "auto"    # auto = 直连失败再试代理 / always / never
 services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 ```
@@ -218,10 +219,10 @@ chuan backup                             # 备份 + 按策略清理
 |---|---|---|---|
 | `LoadCredentialEncrypted=` | **加密**（主机/TPM 密钥） | 仅凭据目录，服务停止即销毁 | **最推荐** |
 | `LoadCredential=` | 文件 root-only，服务用户不可读 | 凭据目录 fd 路径，不进 environ | 推荐 |
-| 文件 0600 + 应用读取 | 依赖文件权限 | 同用户的任意进程可读（含 agent 的 Host 执行） | 可接受 |
+| `0440 root:<svc>` + 应用读取（daemon 自己读） | 组可读 | 同用户进程可读——**所以沙盒里这个目录必须遮蔽**（D18） | 仅用于服务 token |
 | `EnvironmentFile=` / `Environment=` | 依赖文件权限 | **`/proc/<pid>/environ` 同用户可读、子进程继承** | **不推荐** |
 
-关键点：**环境变量不是"放进文件就安全了"**。`EnvironmentFile` 只是让 systemd 把内容读进进程环境，任何同用户进程都能从 `/proc/<pid>/environ` 拿到，且会被子进程继承（沙盒里我们 `--clearenv` 清掉，但宿主侧执行不会）。
+关键点：**同 uid 下权限位挡不住读取**（daemon 与沙盒都是服务用户），所以凭据目录在沙盒里是空的只读 tmpfs，而不是靠 chmod。**环境变量不是"放进文件就安全了"**。`EnvironmentFile` 只是让 systemd 把内容读进进程环境，任何同用户进程都能从 `/proc/<pid>/environ` 拿到，且会被子进程继承（沙盒里我们 `--clearenv` 清掉，但宿主侧执行不会）。
 
 ### 2.2 推荐写法
 

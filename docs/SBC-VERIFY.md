@@ -50,7 +50,7 @@
       默认队列 `B7520DW`；离线 `exec` 里即可用，说明走的是 socket 不是网络）
 - [x] 联网 lane 能解析 `.local`（mDNS）（**2026-10-27 实测**：`getent hosts BRW4CD577B1850A.local`
       → `10.84.1.136`，2.0s。sandbox 原有的二进制靠 `[sandbox] mounts` 加 `/run/avahi-daemon` 打通；
-      rc.4 起联网 lane 自动挂载，不再需要写配置。注意队列名 `B7520DW` 不是主机名，
+      自 rc.4 起联网 lane 自动挂载，不再需要写配置。注意队列名 `B7520DW` 不是主机名，
       `lpstat -v` 给的是 `ipp://BRW4CD577B1850A.local:631/ipp/print`）
 - [ ] `http://192.168.x.x` 被 `web_fetch` 拒绝并留痕
 

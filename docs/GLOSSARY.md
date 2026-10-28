@@ -21,6 +21,9 @@
 | **能力层** | Tool Surface | 工具注册表的整体 | 工具箱 |
 | **回合驱动** | TurnDriver | 生成请求、解析流、产出 `Step` 的接口；engine 是它的实现 | loop 库、agent 框架 |
 | **渲染器** | Renderer | 把 Event 编排成 View、做节流/分片/降级 | 格式化器 |
+| **凭据** | Credential / Secret | 一份 token/密钥；**值只存在于宿主侧**，沙盒里看不到（D18） | key、密码、token 当同义词混用 |
+| **服务** | Service | 配置好的命名外部端点（`kind = http` 或 `mcp`），模型只说服务名与路径 | 插件、连接器 |
+| **规范** | Playbook | 给模型看的操作流程文本（`playbook(topic)` 按需取，永久不进 prompt） | 文档、说明书、SOP 混用 |
 | **子 agent** | SubAgent | 由父会话派生、独立上下文、只回传结论的执行体 | 分身、worker |
 
 ## B. 会话与状态

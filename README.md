@@ -318,7 +318,7 @@ MCP 服务 `dida`（用 mcp(server="dida", tool=…, args=…) 调用）：
 ```toml
 [proxy]
 url = "http://127.0.0.1:7890"   # 留空则用 https_proxy / http_proxy
-sandbox   = "auto"   # auto = 只在 exec(proxy=true) 时注入；always / never
+sandbox   = "auto"   # auto = 只在 lan_exec(proxy=true) 时注入；always / never
 web_fetch = "auto"   # auto = 直连失败再试代理；always / never
 services  = "never"  # http/mcp 默认直连；国内服务绕代理更慢
 ```
@@ -674,7 +674,9 @@ systemctl restart chuan
 └── printer_api.cred
 ```
 
-明文文件只用于一次性加密，加密后删除。目录 `0700 root`，服务用户不可读。
+明文文件只用于一次性加密，加密后删除。目录是 `0750 root:chuan`（服务用户能进入、
+读不到 0400 的凭据）；**这是"存储加密"的可选加固**，出厂 unit 用的是明文 `LoadCredential=`
+（`0400 root:root`），要启用加密需把 unit 里的 `LoadCredential=` 换成 `LoadCredentialEncrypted=`。
 
 ### 5.3 加密与注入
 
@@ -709,8 +711,10 @@ Environment=CHUAN_KEY_FILE=%d/llm_zai
 ### 5.5 审计与排障
 
 ```bash
-# 权限自检：应无任何输出（没有组/其他人可读的文件）
-find /etc/chuan/secrets -perm /077 -ls
+# 权限自检：只允许 0400 root:root（LoadCredential）与 0440 root:chuan（服务 token）
+sudo ls -l /etc/chuan/secrets
+# 组可读的文件只该是服务 token；出现 other 可读就要修
+sudo find /etc/chuan/secrets -perm /007 -ls
 
 # 确认明文已清除
 grep -rIl 'sk-' /etc/chuan /var/lib/chuan 2>/dev/null

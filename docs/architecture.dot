@@ -40,10 +40,10 @@ digraph chuan_harness {
   L4 [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
     <TR><TD COLSPAN="3" BGCOLOR="#e8dff7"><B>④ 能力层 · Tool Surface</B>　<FONT POINT-SIZE="9">小而锐 · 大结果落盘 · 按需取用</FONT></TD></TR>
     <TR><TD BGCOLOR="#f2ecfc">工具注册表<BR/><FONT POINT-SIZE="9">运行时装配（service 可热加服务）</FONT></TD>
-        <TD>内置工具<BR/><FONT POINT-SIZE="9">read · write · exec · remember · remind</FONT><BR/><FONT POINT-SIZE="9">send_file · keep · files · playbook · install_deps</FONT></TD>
+        <TD>内置工具<BR/><FONT POINT-SIZE="9">read · write · exec · lan_exec · remember · remind</FONT><BR/><FONT POINT-SIZE="9">send_file · keep · files · playbook · install_deps</FONT></TD>
         <TD>出网与审计<BR/><FONT POINT-SIZE="9">web_fetch（拒内网/留痕）· net_log</FONT></TD></TR>
     <TR><TD BGCOLOR="#f2ecfc">技能 L2·L3<BR/><FONT POINT-SIZE="9">run_skill · publish_skill · rollback</FONT></TD>
-        <TD>服务接入<BR/><FONT POINT-SIZE="9">http · mcp · service（token 不进上下文）</FONT></TD>
+        <TD>服务接入<BR/><FONT POINT-SIZE="9">http · mcp · service（token 不进上下文/沙盒）</FONT></TD>
         <TD>宿主挂载<BR/><FONT POINT-SIZE="9">[sandbox] mounts（如 CUPS）· 打印靠技能</FONT></TD></TR>
   </TABLE>>];
 
