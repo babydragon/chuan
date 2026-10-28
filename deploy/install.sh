@@ -136,13 +136,15 @@ UNITDIR="${R}/etc/systemd/system"
 
 stat_mode()  { stat -c '%a' "$1" 2>/dev/null; }
 stat_owner() { stat -c '%U:%G' "$1" 2>/dev/null; }
+# stat 输出 `750`，配置里写的是 `0750`：必须按八进制数值比，否则每次都说"校正"。
+same_mode()  { [[ $((8#$1)) -eq $((8#$2)) ]]; }
 
 # 建目录；已存在就校正权限（幂等：可以反复执行，用来修历史安装）
 ensure_dir() {
   local p=$1 mode=$2 owner=$3 group=$4 cur_m cur_o
   if [[ -d $p ]]; then
     cur_m=$(stat_mode "$p"); cur_o=$(stat_owner "$p")
-    if [[ $cur_m != "$mode" || $cur_o != "$owner:$group" ]]; then
+    if ! same_mode "$cur_m" "$mode" || [[ $cur_o != "$owner:$group" ]]; then
       if [[ $DRY_RUN -eq 1 ]]; then
         echo "  ~ 校正 $p：$cur_m $cur_o → $mode $owner:$group"
       else
@@ -159,7 +161,7 @@ ensure_file() {
   local p=$1 mode=$2 owner=$3 group=$4 cur_m cur_o
   [[ -f $p ]] || return 1
   cur_m=$(stat_mode "$p"); cur_o=$(stat_owner "$p")
-  if [[ $cur_m != "$mode" || $cur_o != "$owner:$group" ]]; then
+  if ! same_mode "$cur_m" "$mode" || [[ $cur_o != "$owner:$group" ]]; then
     if [[ $DRY_RUN -eq 1 ]]; then
       echo "  ~ 校正 $p：$cur_m $cur_o → $mode $owner:$group"
     else
@@ -279,10 +281,14 @@ cat <<NEXT
     沙盒脚本、装包都用它，不需要在 systemd 里再加 Environment）
 NEXT
 
-if [[ $ENABLE -eq 1 && -z $R ]]; then
-  run systemctl enable --now chuan.service
-  run systemctl enable --now chuan-backup.timer
-  say "已启用 chuan.service 与 chuan-backup.timer"
-elif [[ -z $R ]] && systemctl is-active --quiet chuan.service 2>/dev/null; then
-  say "chuan.service 正在运行：文件已更新，记得 systemctl restart chuan 让新二进制生效"
+if [[ -z $R ]]; then
+  if [[ $ENABLE -eq 1 ]]; then
+    run systemctl enable --now chuan.service
+    run systemctl enable --now chuan-backup.timer
+    say "已启用 chuan.service 与 chuan-backup.timer"
+  fi
+  # enable --now 对已在运行的服务不会重启：升级后必须显式 restart 才会用上新二进制
+  if systemctl is-active --quiet chuan.service 2>/dev/null; then
+    say "chuan.service 正在运行（可能是旧进程）：升级后请执行 systemctl restart chuan"
+  fi
 fi

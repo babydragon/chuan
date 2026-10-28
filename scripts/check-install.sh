@@ -102,8 +102,16 @@ if sudo -n true 2>/dev/null; then
   expect "二进制"     /usr/local/bin/chuan        "755 root:root"
   expect "unit"       /etc/systemd/system/chuan.service "644 root:root"
 
+  # 幂等：第二次跑不应该再报任何"校正"（stat 的 750 vs 配置的 0750 必须按数值比）
+  sudo env CHUAN_ROOT="$ROOT" CHUAN_USER="$U" CHUAN_GROUP="$G" \
+      BIN_SRC="$WORK/pkg/chuan" bash "$REPO_ROOT/deploy/install.sh" --no-enable > "$WORK/real2.log" 2>&1 \
+    || fail "第二次真装失败"
+  if grep -q "^  ~ 校正 " "$WORK/real2.log"; then
+    fail "第二次安装仍在报校正（不幂等）：$(grep "^  ~ 校正 " "$WORK/real2.log" | head -3)"
+  fi
+
   sudo rm -rf "$ROOT"
-  echo "权限校正 OK（真装到临时根）"
+  echo "权限校正 OK（真装到临时根，二次安装无变更）"
 else
   echo "skip: 没有免密 sudo，跳过真装校验"
 fi
