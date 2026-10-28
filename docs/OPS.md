@@ -82,6 +82,7 @@ roles_dir = "~/.config/chuan/roles"
 # tools = ["read", "write", "web_fetch"]
 # max_turns = 4
 #
+# 现成角色（coder / tutor / researcher / ops）与日常话术见 ROLES.md。
 # roles_dir 里的布局（agent 用 role 工具维护，热加载、不用重启）：
 #   <roles_dir>/coder.toml   description/model/tools/max_*
 #   <roles_dir>/coder.md     角色提示词（原样追加在父 system 之后）

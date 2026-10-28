@@ -8,7 +8,7 @@
 > P4 已完成：车道闸门、前台委托、角色、token 预算与用量归属、后台任务与接手；金额口径未做（D20）。
 > 逐条见 `ROADMAP.md §5`，板上验证清单见 `SBC-VERIFY.md §11`。
 > 逐条实测值见 `SBC-VERIFY.md`——它是唯一权威，概览与此冲突时以它为准。
-> 预发布到 `v0.1.0-rc.7`，正式版待定。
+> 预发布到 `v0.1.0-rc.8`，正式版待定。
 
 ---
 
@@ -26,6 +26,8 @@
 | 8 | [`OPS.md`](OPS.md) | 配置、密钥、systemd、时间时区、重试、备份、磁盘 |
 | 9 | [`GLOSSARY.md`](GLOSSARY.md) | **术语与命名标准的唯一出处**，写代码前先读 |
 | 10 | [`SBC-VERIFY.md`](SBC-VERIFY.md) | 只能在目标板确认的项（上板清单），上板时按它逐条勾 |
+| 11 | [`ROLES.md`](ROLES.md) | 子 agent 怎么配、有哪些现成角色、平时怎么说话 |
+| 12 | [`VERIFY-P4.md`](VERIFY-P4.md) | P4 验证剧本：聊天话术 + 观察面 + 失败信号 |
 
 图：`architecture.png`（源 `architecture.dot`，同时导出 `.svg`）。
 历史版本与已合并的文档在 `archive/`。

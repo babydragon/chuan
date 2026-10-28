@@ -193,6 +193,9 @@
 
 ## 11. 子 agent 与后台任务（P4）
 
+> 逐条**怎么引出场景**（聊天话术 + 观察面 + 失败信号）见 `VERIFY-P4.md`；
+> 这一节只保留可直接勾的断言。
+
 **板上验证入口**：Telegram 对话 + 库里的账本（没有 CLI 通道）。
 查库：`sqlite3 /var/lib/chuan/chuan.db`（按你的 `[storage] db` 改）。
 
