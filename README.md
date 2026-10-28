@@ -19,6 +19,10 @@ curl -fsSL https://github.com/babydragon/chuan/releases/latest/download/install.
 或手动下载 `chuan-<tag>-<arch>-linux-gnu.tar.gz` 解开后 `sudo ./install.sh`。
 脚本只装文件、**不自动启动**；放密钥与启用步骤会打印在末尾。
 
+安装脚本是**幂等**的：重跑一次就会建好缺的目录、校正已有目录与凭据文件的权限
+（`/etc/chuan` 0750、`services.d` 0770、`LoadCredential` 凭据 0400 root、服务 token 0440 root:chuan）。
+升级或"权限被我改乱了"时，直接重跑它即可，不会覆盖 `chuan.toml`。
+
 **下载需要代理时**（GitHub 慢或被墙）：外层 `curl` 取脚本、内层 `curl` 下 tar 包是两次独立请求，都要给代理：
 
 ```bash

@@ -69,4 +69,43 @@ leftover=$(ls -d /tmp/tmp.* 2>/dev/null | grep -v "^$WORK\$" | wc -l || true)
 leftover=${leftover//[!0-9]/}
 [[ "$leftover" == "0" ]] || fail "临时目录残留 $leftover 个：$(ls -d /tmp/tmp.* | grep -v "^$WORK\$" | head -3)"
 
-echo "install.sh OK（4 组用例）"
+# ---------- 真装一次到临时根，验证目录与权限（含"修正历史安装"）----------
+if sudo -n true 2>/dev/null; then
+  ROOT="$(mktemp -d)"
+  G="$(id -gn)"
+  U="$(id -un)"
+  # 造一份"权限全错"的历史安装
+  sudo install -d -m 0755 -o root -g root "$ROOT/etc/chuan"
+  sudo install -d -m 0700 -o root -g root "$ROOT/etc/chuan/secrets"
+  printf 'x\n' | sudo tee "$ROOT/etc/chuan/secrets/telegram_token" >/dev/null
+  printf 'y\n' | sudo tee "$ROOT/etc/chuan/secrets/weread_token" >/dev/null
+  printf 'a = 1\n' | sudo tee "$ROOT/etc/chuan/chuan.toml" >/dev/null
+  sudo chmod 0644 "$ROOT/etc/chuan/secrets/telegram_token" "$ROOT/etc/chuan/secrets/weread_token" "$ROOT/etc/chuan/chuan.toml"
+
+  sudo env CHUAN_ROOT="$ROOT" CHUAN_USER="$U" CHUAN_GROUP="$G" \
+      BIN_SRC="$WORK/pkg/chuan" bash "$REPO_ROOT/deploy/install.sh" --no-enable > "$WORK/real.log" 2>&1 \
+    || fail "真装失败：$(tail -5 "$WORK/real.log")"
+
+  mode_of() { stat -c '%a %U:%G' "$ROOT$1"; }
+  expect() { local got; got=$(mode_of "$2"); [[ "$got" == "$3" ]] || fail "$1：$2 是 [$got]，期望 [$3]"; }
+
+  expect "配置目录"   /etc/chuan                  "750 root:$G"
+  expect "secrets"    /etc/chuan/secrets          "750 root:$G"
+  expect "services.d" /etc/chuan/services.d       "770 root:$G"
+  expect "playbooks"  /etc/chuan/playbooks        "750 root:$G"
+  expect "prompts"    /etc/chuan/prompts          "750 root:$G"
+  expect "状态目录"   /var/lib/chuan              "750 $U:$G"
+  expect "配置(已有)" /etc/chuan/chuan.toml       "640 root:$G"
+  # LoadCredential 引用的凭据：root 独占；其它服务 token：组可读
+  expect "telegram"   /etc/chuan/secrets/telegram_token "400 root:root"
+  expect "服务 token" /etc/chuan/secrets/weread_token   "440 root:$G"
+  expect "二进制"     /usr/local/bin/chuan        "755 root:root"
+  expect "unit"       /etc/systemd/system/chuan.service "644 root:root"
+
+  sudo rm -rf "$ROOT"
+  echo "权限校正 OK（真装到临时根）"
+else
+  echo "skip: 没有免密 sudo，跳过真装校验"
+fi
+
+echo "install.sh OK（4 组用例 + 权限校正）"

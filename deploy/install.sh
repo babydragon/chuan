@@ -18,6 +18,11 @@
 #   CHUAN_REPO      覆盖仓库（默认 owner/repo 见下）
 #   CHUAN_BASE_URL  覆盖下载源（默认 https://github.com，可换镜像）
 #   BIN_SRC         直接指定二进制路径
+#   CHUAN_USER      服务用户名（默认 chuan）
+#   CHUAN_GROUP     服务组名（默认 chuan）
+#   CHUAN_ROOT      安装根（默认空=真实系统）；打包/测试时指向临时目录
+#
+# 幂等：可以反复执行。新装会创建目录，已有安装会**校正**目录与凭据文件权限。
 set -euo pipefail
 
 REPO="${CHUAN_REPO:-babydragon/chuan}"
@@ -34,7 +39,7 @@ while [[ $# -gt 0 ]]; do
                  PROXY="$2"; shift 2 ;;
     --proxy=*)   PROXY="${1#--proxy=}"; shift ;;
     -h|--help)
-      if [[ -r "$0" ]]; then sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+      if [[ -r "$0" ]]; then sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
       else echo "用法：install.sh [--no-enable] [--dry-run] [--proxy URL]（CHUAN_VERSION=v0.1.0 指定版本）"
       fi
       exit 0 ;;
@@ -117,63 +122,156 @@ fi
 [[ -f "$BIN_SRC" ]] || die "找不到二进制 $BIN_SRC"
 [[ $EUID -eq 0 || $DRY_RUN -eq 1 ]] || die "需要 root"
 
-say "安装 $BIN_SRC → /usr/local/bin/chuan"
+# ---------- 路径与身份 ----------
+# CHUAN_ROOT：把安装根指到临时目录（打包/测试用，正常安装留空）
+# CHUAN_USER / CHUAN_GROUP：服务用户（默认 chuan）
+R="${CHUAN_ROOT:-}"
+SVC_USER="${CHUAN_USER:-chuan}"
+SVC_GROUP="${CHUAN_GROUP:-chuan}"
+BIN="${R}/usr/local/bin/chuan"
+ETC="${R}/etc/chuan"
+SECRETS="$ETC/secrets"
+STATE="${R}/var/lib/chuan"
+UNITDIR="${R}/etc/systemd/system"
+
+stat_mode()  { stat -c '%a' "$1" 2>/dev/null; }
+stat_owner() { stat -c '%U:%G' "$1" 2>/dev/null; }
+
+# 建目录；已存在就校正权限（幂等：可以反复执行，用来修历史安装）
+ensure_dir() {
+  local p=$1 mode=$2 owner=$3 group=$4 cur_m cur_o
+  if [[ -d $p ]]; then
+    cur_m=$(stat_mode "$p"); cur_o=$(stat_owner "$p")
+    if [[ $cur_m != "$mode" || $cur_o != "$owner:$group" ]]; then
+      if [[ $DRY_RUN -eq 1 ]]; then
+        echo "  ~ 校正 $p：$cur_m $cur_o → $mode $owner:$group"
+      else
+        chown "$owner:$group" "$p" && chmod "$mode" "$p"
+        echo "  ~ 校正 $p：$cur_m $cur_o → $mode $owner:$group"
+      fi
+    fi
+  else
+    run install -d -m "$mode" -o "$owner" -g "$group" "$p"
+  fi
+}
+
+ensure_file() {
+  local p=$1 mode=$2 owner=$3 group=$4 cur_m cur_o
+  [[ -f $p ]] || return 1
+  cur_m=$(stat_mode "$p"); cur_o=$(stat_owner "$p")
+  if [[ $cur_m != "$mode" || $cur_o != "$owner:$group" ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      echo "  ~ 校正 $p：$cur_m $cur_o → $mode $owner:$group"
+    else
+      chown "$owner:$group" "$p" && chmod "$mode" "$p"
+      echo "  ~ 校正 $p：$cur_m $cur_o → $mode $owner:$group"
+    fi
+  fi
+  return 0
+}
 
 # 1. 服务专用用户
-if ! id -u chuan >/dev/null 2>&1; then
-  run useradd --system --home /var/lib/chuan --shell /usr/sbin/nologin chuan
-  [[ $DRY_RUN -eq 1 ]] || say "已创建用户 chuan"
-fi
-if getent group lp >/dev/null 2>&1; then
-  run usermod -aG lp chuan
+if [[ -z $R ]]; then
+  if ! id -u "$SVC_USER" >/dev/null 2>&1; then
+    run useradd --system --home /var/lib/chuan --shell /usr/sbin/nologin "$SVC_USER"
+    [[ $DRY_RUN -eq 1 ]] || say "已创建用户 $SVC_USER"
+  fi
+  if getent group lp >/dev/null 2>&1; then
+    run usermod -aG lp "$SVC_USER"
+  fi
 fi
 
-# 2. 二进制与目录
-run install -Dm755 "$BIN_SRC" /usr/local/bin/chuan
-# /etc/chuan 必须与 unit 的 ConfigurationDirectoryMode 一致（0750），
-# 且组为 chuan：否则 daemon 读不到 0640 的配置，systemd 每次启动还会告警。
-run install -d -m 0750 -o root -g chuan /etc/chuan
-# secrets 目录必须让服务用户能"进入"（x 位）：systemd 读 LoadCredential 用的是 root，
-# 但 service 的 token_file 是 daemon 自己读的，0700 root:root 会让它 EACCES。
-# 文件本身仍按用途分权限：LoadCredential 用的 0400 root:root，服务 token 用 0440 root:chuan。
-run install -d -m 0750 -o root -g chuan /etc/chuan/secrets
-# 示例配置默认引用 /etc/chuan/playbooks；daemon 无权在 root 目录下创建，先建好
-run install -d -m 0750 -o root -g chuan /etc/chuan/playbooks
-# 调教用的追加 prompt / 自定义 SOP 都放这里
-run install -d -m 0750 -o root -g chuan /etc/chuan/prompts
-# 运行期新增的服务（service 工具）要写到这里；必须让 chuan 可写，否则重启就丢
-run install -d -m 0770 -o root -g chuan /etc/chuan/services.d
-run install -d -m 0750 -o chuan -g chuan /var/lib/chuan
-run install -d -m 0750 -o chuan -g chuan /var/lib/chuan/backups
+# 2. 二进制
+say "安装 $BIN_SRC → $BIN"
+run install -Dm755 -o root -g root "$BIN_SRC" "$BIN"
 
-# 3. 配置（不覆盖已有）
+# 3. 目录（新装建、旧装校正）
+# /etc/chuan 必须与 unit 的 ConfigurationDirectoryMode 一致（0750），组为服务组：
+# 否则 daemon 读不到 0640 的配置，systemd 每次启动还会告警。
+ensure_dir "$ETC"            0750 root "$SVC_GROUP"
+# secrets 目录要让服务用户"进得去"（x 位）；文件权限见第 5 步
+ensure_dir "$SECRETS"        0750 root "$SVC_GROUP"
+ensure_dir "$ETC/playbooks"  0750 root "$SVC_GROUP"
+ensure_dir "$ETC/prompts"    0750 root "$SVC_GROUP"
+# 运行期新增的服务写这里；必须让服务用户可写，否则重启就丢
+ensure_dir "$ETC/services.d" 0770 root "$SVC_GROUP"
+ensure_dir "$STATE"          0750 "$SVC_USER" "$SVC_GROUP"
+ensure_dir "$STATE/backups"  0750 "$SVC_USER" "$SVC_GROUP"
+# daemon 运行期自建的目录：存在就顺手校正
+for d in workspaces inbox skills media files rt; do
+  [[ -d "$STATE/$d" ]] && ensure_dir "$STATE/$d" 0750 "$SVC_USER" "$SVC_GROUP"
+done
+
+# 4. 配置（不覆盖已有）
 CFG="$(asset chuan.toml.example)" || die "缺少 chuan.toml.example"
-if [[ -f /etc/chuan/chuan.toml ]]; then
-  say "/etc/chuan/chuan.toml 已存在，保持不变"
+if [[ -f "$ETC/chuan.toml" ]]; then
+  say "$ETC/chuan.toml 已存在，保持不变（只校正权限）"
+  ensure_file "$ETC/chuan.toml" 0640 root "$SVC_GROUP"
 else
-  run install -Dm640 -o root -g chuan "$CFG" /etc/chuan/chuan.toml
-  [[ $DRY_RUN -eq 1 ]] || say "已生成 /etc/chuan/chuan.toml（按需修改 allowed_users / model / 路径）"
+  run install -Dm640 -o root -g "$SVC_GROUP" "$CFG" "$ETC/chuan.toml"
+  [[ $DRY_RUN -eq 1 ]] || say "已生成 $ETC/chuan.toml（按需修改 allowed_users / model / 路径）"
 fi
 
-# 4. systemd
+# 5. 凭据文件权限校正
+#    - unit 里 LoadCredential 引用的（以及 *.cred）：systemd 以 root 读 → 0400 root:root
+#    - 其余（service 的 token_file）：daemon 以服务用户读 → 0440 root:<group>
+declare -A ROOT_ONLY=()
+UNIT_SRC="$(asset chuan.service || true)"
+if [[ -n $UNIT_SRC ]]; then
+  while IFS= read -r line; do
+    case $line in
+      LoadCredential=*)
+        spec=${line#LoadCredential=}
+        ROOT_ONLY[${spec%%:*}]=1
+        ;;
+    esac
+  done < "$UNIT_SRC"
+fi
+if [[ -d $SECRETS ]]; then
+  while IFS= read -r f; do
+    [[ -f $f ]] || continue
+    base=$(basename "$f")
+    if [[ -n "${ROOT_ONLY[$base]:-}" || $base == *.cred ]]; then
+      ensure_file "$f" 0400 root root
+    else
+      ensure_file "$f" 0440 root "$SVC_GROUP"
+    fi
+  done < <(find "$SECRETS" -maxdepth 1 -type f 2>/dev/null)
+fi
+
+# 6. systemd 单元
 for u in chuan.service chuan-backup.service chuan-backup.timer; do
   f="$(asset "$u")" || die "缺少 $u"
-  run install -Dm644 "$f" "/etc/systemd/system/$u"
+  if [[ -z $R ]]; then
+    run install -Dm644 -o root -g root "$f" "/etc/systemd/system/$u"
+  else
+    run install -Dm644 -o root -g root "$f" "$UNITDIR/$u"
+  fi
 done
-run systemctl daemon-reload
+if [[ -z $R ]]; then
+  run systemctl daemon-reload
+fi
 
-cat <<'NEXT'
+cat <<NEXT
 
 下一步（未自动执行）：
-  1) 放密钥（root 只读）：
+  1) 放密钥（systemd 以 root 读，服务用户看不到）：
        install -m 0400 -o root -g root <token>   /etc/chuan/secrets/telegram_token
        install -m 0400 -o root -g root <api-key> /etc/chuan/secrets/zai_key
-     若用别的 provider，改 unit 里的 LoadCredential 名与 CHUAN_KEY_FILE
+     其它服务凭据（service 的 token_file）用 0440 root:$SVC_GROUP，否则 daemon 读不到：
+       install -m 0440 -o root -g $SVC_GROUP <token> /etc/chuan/secrets/<name>
   2) 编辑 /etc/chuan/chuan.toml（allowed_users、model、路径）
   3) 启用：
        systemctl enable --now chuan.service
        systemctl enable --now chuan-backup.timer
   4) 看日志： journalctl -u chuan -f
+
+目录与权限（本脚本会建好并校正已有安装）：
+  /etc/chuan              0750 root:$SVC_GROUP
+  /etc/chuan/secrets      0750 root:$SVC_GROUP   （文件见上）
+  /etc/chuan/services.d   0770 root:$SVC_GROUP   （运行期加的服务写这里）
+  /etc/chuan/playbooks    0750 root:$SVC_GROUP
+  /var/lib/chuan          0750 $SVC_USER:$SVC_GROUP
 
 代理说明：
   - 下载/安装阶段：--proxy 或 CHUAN_PROXY / https_proxy
@@ -181,8 +279,10 @@ cat <<'NEXT'
     沙盒脚本、装包都用它，不需要在 systemd 里再加 Environment）
 NEXT
 
-if [[ $ENABLE -eq 1 ]]; then
+if [[ $ENABLE -eq 1 && -z $R ]]; then
   run systemctl enable --now chuan.service
   run systemctl enable --now chuan-backup.timer
   say "已启用 chuan.service 与 chuan-backup.timer"
+elif [[ -z $R ]] && systemctl is-active --quiet chuan.service 2>/dev/null; then
+  say "chuan.service 正在运行：文件已更新，记得 systemctl restart chuan 让新二进制生效"
 fi
