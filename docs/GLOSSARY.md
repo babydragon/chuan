@@ -24,7 +24,13 @@
 | **凭据** | Credential / Secret | 一份 token/密钥；**值只存在于宿主侧**，沙盒里看不到（D18） | key、密码、token 当同义词混用 |
 | **服务** | Service | 配置好的命名外部端点（`kind = http` 或 `mcp`），模型只说服务名与路径 | 插件、连接器 |
 | **规范** | Playbook | 给模型看的操作流程文本（`playbook(topic)` 按需取，永久不进 prompt） | 文档、说明书、SOP 混用 |
-| **子 agent** | SubAgent | 由父会话派生、独立上下文、只回传结论的执行体 | 分身、worker |
+| **子 agent** | SubAgent | 由父会话派生、独立上下文（`sub:<parent_conv>#<n>`）、只回传结论的执行体；`depth ≤ 1`，不得请求审批 | 分身、worker |
+| **角色** | Role | 子 agent 的一组提示词/模型/工具子集/预算；只能收窄，模型只能点名 | 人设、persona |
+| **接手简报** | Handoff brief | 交给新子 agent 的"上次进展"（结论 + 产物路径，≤1600 字），不是历史重放 | 上下文迁移、续跑 |
+| **后台任务** | BackgroundTask | 落 doc 的 `agent_task`，前台静默后由 tick 领取；结果推回原会话 | 异步任务、队列 |
+| **委托** | Delegate / `delegate` | 父 turn 内派出子 agent 的那个工具调用；前台阻塞 ≤120s，后台落 `agent_task` | 分派、派活 |
+| **结论** | Conclusion | 子 agent 回传的唯一产物：状态 + ≤2000 字摘要 + 产物引用 + `pending_actions` + usage | 摘要、结果全文 |
+| **待父执行** | `pending_actions` | 子 agent 无权完成、需父会话在本轮做的动作清单（`[待父执行]` 分节） | 未完成事项、TODO |
 
 ## B. 会话与状态
 
@@ -76,6 +82,7 @@
 | 术语 | 英文 / 代码名 | 定义 | 不要这样说 |
 |---|---|---|---|
 | **上下文组装** | Context Assembly | 每轮拼装模型输入 | 拼 prompt |
+| **核心段** | Core prompt | 编译进二进制的 system 指令，不可被配置替换；配置只能追加 | 默认提示词 |
 | **压缩** | Compaction | 超阈值时摘要旧内容，保留未决事项 | 截断 |
 | **工具结果清理** | Tool-result Clearing | 用占位符替换旧工具输出，保留调用记录 | 删除 |
 | **固定事实** | Pinned | 始终注入的高置信事实 | 核心记忆 |
@@ -98,7 +105,7 @@
 | **轨迹** | Trace | 一次运行的结构化执行记录 | 日志 |
 | **回放** | Replay | 用录制数据重跑，做回归 | 重演 |
 | **一致性测试** | Conformance | 替换型扩展点必须通过的测试套件 | 集成测试 |
-| **通道车道** | Lane | 并发配额：`io` / `compile` / `external` | 线程池、队列 |
+| **通道车道** | Lane | 并发配额：`io` / `compile` / `external` / `agent` | 线程池、队列 |
 | **降级模式** | Degraded Mode | 沙盒或依赖不可用时的收紧运行态 | 兜底 |
 
 ---
@@ -130,6 +137,7 @@
 | 技能 | Skill | `skill_` |
 | 通道 | Channel | `ch_` |
 | 车道 | Lane | `lane_` |
+| 子 agent 会话 | SubAgentConversation | `sub_` |
 
 ---
 
@@ -141,6 +149,7 @@
 | 工具 | `tool.call_started` · `tool.call_finished` · `tool.call_abandoned` |
 | 审批 | `approval.requested` · `approval.resolved` |
 | 任务 | `task.enqueued` · `task.leased` · `task.finished` |
+| 编排 | `agent.spawned` · `agent.concluded` |
 | 其他 | `usage.recorded` · `artifact.created` · `ctx.compacted` · `doc.upserted` |
 
 ## J. 命名豁免

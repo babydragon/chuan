@@ -26,8 +26,10 @@ struct EApproval {
 struct Inner {
     journal: Vec<Event>,
     tool_calls: HashMap<String, harness_kernel::ToolCallRow>,
+    /// call_id → conv_id。桩也要按会话过滤，否则测试会掩盖"跨会话串数据"的真实 bug。
+    tool_conv: HashMap<String, String>,
     docs: HashMap<String, Doc>,
-    usage: Vec<(Timestamp, UsageRecord)>,
+    usage: Vec<(Timestamp, String, UsageRecord)>,
     tasks: HashMap<String, TaskRecord>,
     task_status: HashMap<String, String>,
     kv: HashMap<String, String>,
@@ -296,6 +298,7 @@ impl Tx for EphemeralTx {
         calls: Vec<ToolCallRecord>,
     ) -> Result<(), StoreError> {
         for c in calls {
+            self.state.tool_conv.insert(c.call.0.clone(), conv.0.clone());
             self.state.tool_calls.insert(
                 c.call.0.clone(),
                 harness_kernel::ToolCallRow {
@@ -326,12 +329,13 @@ impl Tx for EphemeralTx {
     async fn close_tool_call(
         &mut self,
         call: CallId,
-        status: &str,
-        _preview: String,
+        _status: &str,
+        preview: String,
     ) -> Result<(), StoreError> {
+        // 与 SQLite 后端一致：status 列恒为 finished，失败原因进 preview 与事件 payload。
         if let Some(r) = self.state.tool_calls.get_mut(&call.0) {
             r.status = "finished".into();
-            r.preview = Some(status.to_string());
+            r.preview = Some(preview);
         }
         Ok(())
     }
@@ -348,8 +352,8 @@ impl Tx for EphemeralTx {
         Ok(())
     }
 
-    async fn record_usage(&mut self, _conv: ConversationId, _run: harness_kernel::RunId, u: UsageRecord) -> Result<(), StoreError> {
-        self.state.usage.push((now_ms(), u));
+    async fn record_usage(&mut self, conv: ConversationId, _run: harness_kernel::RunId, u: UsageRecord) -> Result<(), StoreError> {
+        self.state.usage.push((now_ms(), conv.0, u));
         Ok(())
     }
 
@@ -454,9 +458,23 @@ impl ReadTx for EphemeralRead {
             .collect())
     }
 
+    async fn usage_split(&mut self, since: Timestamp) -> Result<harness_kernel::UsageSplit, StoreError> {
+        let mut split = harness_kernel::UsageSplit::default();
+        for (at, conv, u) in &self.state.usage {
+            if *at < since {
+                continue;
+            }
+            let slot = if conv.starts_with("sub:") { &mut split.agent } else { &mut split.main };
+            slot.prompt_tokens += u.prompt_tokens as u64;
+            slot.completion_tokens += u.completion_tokens as u64;
+            slot.cost_est += u.cost_est;
+        }
+        Ok(split)
+    }
+
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError> {
         let mut t = UsageTotal::default();
-        for (at, u) in &self.state.usage {
+        for (at, _, u) in &self.state.usage {
             if *at >= since {
                 t.prompt_tokens += u.prompt_tokens as u64;
                 t.completion_tokens += u.completion_tokens as u64;
@@ -470,7 +488,13 @@ impl ReadTx for EphemeralRead {
         Ok(self.state.tasks.get(&id.0).cloned())
     }
 
-    async fn tool_calls(&mut self, _conv: ConversationId) -> Result<Vec<harness_kernel::ToolCallRow>, StoreError> {
-        Ok(self.state.tool_calls.values().cloned().collect())
+    async fn tool_calls(&mut self, conv: ConversationId) -> Result<Vec<harness_kernel::ToolCallRow>, StoreError> {
+        Ok(self
+            .state
+            .tool_calls
+            .iter()
+            .filter(|(id, _)| self.state.tool_conv.get(*id) == Some(&conv.0))
+            .map(|(_, r)| r.clone())
+            .collect())
     }
 }

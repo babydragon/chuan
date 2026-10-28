@@ -26,6 +26,11 @@ token_file = "~/.config/chuan/secrets/telegram_token"
 provider = "zai"                     # echo | zai | opencode-go
 model    = "glm-5.3-flash"
 api_key_file = "~/.config/chuan/secrets/zai_key"
+# system 指令两段式（D21）：核心段写死 → 本项追加。只能追加，不能替换核心。
+# 旧名 system_prompt_extra_file 仍可用（会提示改名）；system_prompt_file 已废弃并直接报错，
+# 因为它过去是"整体替换"，静默改成追加会让人误以为核心已被覆盖。
+# `/prompt` 可查看最终生效的全文。
+# system_prompt_append_file = "~/.config/chuan/prompts/persona.md"
 # base_url = "..."                   # 覆盖预设；以 /chat/completions 结尾则原样用
 # proxy = "http://127.0.0.1:7890"    # 模型走代理；不写=直连
 # system_prompt_file = "~/.config/chuan/prompts/system.md"
@@ -39,6 +44,63 @@ workspace_keep_days = 7
 workspace_max_mb = 256
 context_budget_tokens = 24000
 workspace = "~/.local/share/chuan/workspaces"
+
+[lanes]
+# 并发配额（D11）：按资源类型限流，不按请求数。0 会被抬到 1。
+# 整板约 0.3–0.6 核，调大只会让 TG 长轮询与 timer 抖动。
+io = 2          # 文件、短命令、轻工具
+compile = 1     # 编译/装包/技能 dry-run（run_skill / publish_skill / install_deps）
+external = 1    # 模型请求（也是 provider 限流的第一道闸）
+agent = 1       # 子 agent 派生（P4.1 起生效）
+
+[agents]
+# 子 agent 闸门（DECISIONS.md D19/D20）。enabled = false 时 delegate 一律拒绝。
+enabled = true
+max_per_run = 2          # 单个 run 最多派几个子 agent
+# tools = ["read", "write", "exec", "playbook", "web_fetch", "keep", "files"]
+#   子 agent 能看到的工具。默认只给免审批域；放宽这里不等于放宽权限（审批域仍会拦）。
+max_turns = 6            # 单个子 agent 的轮数上限
+max_tokens = 20000       # 单个子 agent 的 token 预算（prompt+completion）
+wall_ms = 120000         # 单个子 agent 的墙钟上限
+# 并发由 [lanes] agent 控制（默认 1）。
+# 前台静默多少秒后才启动后台任务；0 = 不等（会与前台抢 CPU）
+background_idle_s = 30
+#
+# 角色：模型只能点名；内容可以写在主配置里，也可以由 agent 用 role 工具写进 roles_dir。
+# 工具只能比上面的 tools 更窄。
+roles_dir = "~/.config/chuan/roles"
+# [agents.roles.coder]
+# system_prompt_file = "~/.config/chuan/prompts/coder.md"
+# model = "deepseek-v4.1-flash"      # 可选，缺省继承 [engine]
+# tools = ["read", "write", "exec", "playbook"]
+# max_turns = 10
+# max_tokens = 40000
+# wall_ms = 300000
+#
+# [agents.roles.tutor]
+# system_prompt_file = "~/.config/chuan/prompts/tutor.md"
+# tools = ["read", "write", "web_fetch"]
+# max_turns = 4
+#
+# roles_dir 里的布局（agent 用 role 工具维护，热加载、不用重启）：
+#   <roles_dir>/coder.toml   description/model/tools/max_*
+#   <roles_dir>/coder.md     角色提示词（原样追加在父 system 之后）
+# 同名时以主配置为准（防止"改了配置却不生效"）。
+# 注册后父会话的机会清单里会多一行"可派子 agent 的角色：…"，模型据此决定 role。
+# 子 agent 默认继承 [engine]；要更便宜的档位就加 profile（只能更窄，不能越过内置白名单）
+# [agents.profiles.fast]
+# model = "glm-5.3-flash"
+# tools = ["read", "exec", "playbook"]
+
+[budget]
+# 0 = 不限。按本地自然日/自然月统计，超限直接拒绝（run 入口 + delegate 前各查一次），
+# 不排队、不静默降级；拒绝文案里会写清"用了多少 / 上限多少 / 改哪个字段"。
+daily_tokens = 0
+monthly_tokens = 0
+
+# [pricing]：金额口径**尚未实现**（D20 只做了 token 闸门）。
+# 现在 cost_est 恒为 0，`/usage` 会显示"金额未配 [pricing]"。
+# 落地时再加：单位 元/百万 token，按 model 查表，查不到记 0 并打 warning。
 
 [storage]
 db = "~/.local/share/chuan/chuan.db"
@@ -443,7 +505,7 @@ WantedBy=timers.target
 ```
 ts, level, component, event,
 conv_id, turn_id (opt), run_id, call_id (opt),
-lane (io|compile|external|model),
+lane (io|compile|external|agent),
 outcome (ok|error|timeout|cancelled),
 latency_ms, tokens_in, tokens_out, cost_est
 ```
@@ -464,3 +526,50 @@ latency_ms, tokens_in, tokens_out, cost_est
 | 时钟不可信 | 暂停定时消息，等待同步 |
 
 降级必须**可见**（`/status` 与启动日志），不允许静默。
+
+---
+
+## 12. 成本与配额观测（P4）
+
+命令（P4 落地）：
+
+| 命令 | 输出 | 状态 |
+|---|---|---|
+| `/prompt` | 打印实际生效的 system 指令（核心段 + 追加段，3000 字/条） | ✅ |
+| `/usage` | 今日 / 本月 token 与金额 | ✅（含子 agent 拆分） |
+| `/agents` | 运行中的子 agent（任务首行、已耗时），`/agents cancel <id>` | ✅ |
+| `/tasks` | 后台任务（pending / running / done / interrupted）；`/tasks cancel <id>`；`/tasks retry <id>`（带上次进展重排） | ✅ |
+
+口径：
+
+- `prompt_tokens` 含 system 指令与工具 schema，所以**一切按整请求算**，不按消息正文算。
+- 子 agent 的 token 同时计入自己的会话明细与**父 run 汇总**（D20）；日/月额度是全局的。
+- `cost_est` 由 `[pricing]` 查表计算，engine 不再写死 0；查不到价目记 0 并打 warning。
+
+实测基线（2026-10-28，开发机账本 39 run / 93 turn / 88 次模型请求，`glm-5.3-flash`）：
+
+| 指标 | 值 |
+|---|---|
+| 单请求 prompt | 中位 **3.7k**，p80 6.5k，最大 9.5k |
+| 每个 run | 均 **9.4k prompt + 0.6k completion**，峰值 33.9k |
+| 每 run 轮数 | ≈ 2.4 |
+
+由此得两条运维口径：
+
+1. **一次委托 ≈ 一次普通 run 的 token**。委托常态下更贵（子 agent 要重付前缀，+10~30%），
+   只有"读大材料"或"父历史接近 `context_budget_tokens`"时才省——不要用"省 token"解释多 agent。
+2. 派发次数就是放大倍数。`max_per_run` 与 `[budget]` 是硬闸门，调大前先看 `/usage` 的日曲线。
+
+告警：单 run 子 agent token > 3× 均值 → 一条 warning；日额度用掉 80% → TG 提示；用尽 → 拒绝新委托。
+
+后台任务与前台的关系（别误解"并行"）：
+
+- 后台任务**只在**"没有 run 在跑 + 前台静默 `background_idle_s`"时才启动，不会抢答你的消息。
+- 启动后它与前台**共用 `external` 车道（默认 1）**：你新发消息会立刻开跑自己的 run，
+  但发往模型的那一步要等子 agent **当前这一轮**请求返回（通常几秒到十几秒）。
+- 完成结果除了推一条消息给你，还会写一条 `msg.synthetic(agent_task_done)` 进父会话账本——
+  这样你下一句问"刚才那个任务怎样了"，模型是知道的。
+- 进度查询目前只有 `/tasks`（命令）；模型没有对应工具，别指望它自己说"进行到 40%"。
+
+> 用包月/Coding Plan 时把 `[budget]` 全留 0：只记录、不拦截，`/usage` 仍然按天/按月统计，
+> 需要时再填额度即可（无需重启之外的额外操作）。

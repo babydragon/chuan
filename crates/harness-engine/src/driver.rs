@@ -96,6 +96,7 @@ impl<T: SseTransport + 'static> TurnDriver for ModelDriver<T> {
             turn_id: TurnId(format!("{}-t0", spec.run.0)),
             cancel: CancellationToken::new(),
             usage: Vec::new(),
+            attempts: 0,
             retry: self.retry.clone(),
         }))
     }
@@ -113,6 +114,8 @@ struct WireTurn<T: SseTransport> {
     turn_id: TurnId,
     cancel: CancellationToken,
     usage: Vec<UsageRecord>,
+    /// 累计模型请求次数（含重试）：`turn.finished` 里记下来，能对上 provider 账单。
+    attempts: u32,
     retry: RetryPolicy,
 }
 
@@ -122,6 +125,7 @@ impl<T: SseTransport + 'static> Turn for WireTurn<T> {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
+            self.attempts += 1;
             match self.attempt().await {
                 Ok(step) => return Ok(step),
                 Err(e) if retryable(&e) && attempt < self.retry.max_attempts => {
@@ -160,6 +164,10 @@ impl<T: SseTransport + 'static> Turn for WireTurn<T> {
 
     fn turn_id(&self) -> TurnId {
         self.turn_id.clone()
+    }
+
+    fn attempts(&self) -> u32 {
+        self.attempts
     }
 }
 

@@ -212,6 +212,11 @@ impl Tool for RunSkillTool {
         EffectClass::External
     }
 
+    /// 技能脚本可能在沙盒里编译东西：占 compile 车道（D11）。
+    fn lane(&self) -> harness_kernel::Lane {
+        harness_kernel::Lane::Compile
+    }
+
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -242,6 +247,7 @@ impl Tool for RunSkillTool {
         let entry = format!("/skills/{}/{}", manifest.name, manifest.entry);
         let argv = vec![manifest.interpreter.clone(), entry];
         let opts = ExecOpts {
+            nice: true, // 技能脚本可能在编译/装包：让出 CPU
             timeout_ms: manifest.timeout_ms,
             cwd: None,
             env: Vec::new(),
@@ -391,6 +397,7 @@ impl PublishSkillTool {
                 format!("/ws/publish/{name}/{}", manifest.entry),
             ];
             let opts = ExecOpts {
+                nice: true,
                 timeout_ms: manifest.timeout_ms.min(20_000),
                 cwd: None,
                 env: Vec::new(),
@@ -526,6 +533,11 @@ impl Tool for PublishSkillTool {
     fn effect(&self) -> EffectClass {
         // 改的是宿主上的技能目录：不重试（失败重放没有意义）
         EffectClass::External
+    }
+
+    /// examples dry-run 会在沙盒里执行脚本，可能编译：占 compile 车道。
+    fn lane(&self) -> harness_kernel::Lane {
+        harness_kernel::Lane::Compile
     }
 
     fn domain(&self) -> harness_kernel::Domain {
@@ -799,6 +811,8 @@ mod tests {
             root: ws.path().to_string_lossy().into(),
         };
         let ctx = ToolCtx {
+            system_prompt: "",
+            spawner: None,
             conv: harness_kernel::ConversationId("c".into()),
             actor: "42",
             outbox: &harness_kernel::NullOutbox,
@@ -846,6 +860,8 @@ mod tests {
     ) -> ToolCtx<'a> {
         let _ = ws;
         ToolCtx {
+            system_prompt: "",
+            spawner: None,
             conv: harness_kernel::ConversationId("c".into()),
             actor: "42",
             outbox: &harness_kernel::NullOutbox,

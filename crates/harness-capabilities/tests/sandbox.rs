@@ -18,7 +18,7 @@ fn has_bwrap() -> bool {
 }
 
 fn opts(ms: u64) -> ExecOpts {
-    ExecOpts { timeout_ms: ms, cwd: None, env: vec![], stdin: None }
+    ExecOpts { timeout_ms: ms, cwd: None, env: vec![], stdin: None, nice: false }
 }
 
 #[tokio::test]
@@ -255,6 +255,8 @@ async fn write_tool_jails_paths() {
     let env = harness_capabilities::NullEnv;
     let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
             outbox: &harness_kernel::NullOutbox,
@@ -441,6 +443,8 @@ async fn install_skips_when_already_importable() {
     let tool = InstallTool::new(std::sync::Arc::clone(&env), None, None);
     let wsx = Workspace { run: harness_kernel::RunId("r".into()), root: ws.path().to_string_lossy().into() };
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
             outbox: &harness_kernel::NullOutbox,
@@ -507,6 +511,8 @@ async fn network_skill_gets_network_and_offline_skill_does_not() {
         .with_network(std::sync::Arc::new(net_env));
     let wsx = Workspace { run: harness_kernel::RunId("r".into()), root: ws.path().to_string_lossy().into() };
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
             outbox: &harness_kernel::NullOutbox,
@@ -643,6 +649,8 @@ async fn send_file_respects_workspace_and_mime() {
     let wsx = Workspace { run: harness_kernel::RunId("r".into()), root: ws.path().to_string_lossy().into() };
     let env = harness_capabilities::NullEnv;
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &rec,
@@ -693,6 +701,8 @@ async fn proxy_env_only_exists_in_network_lane() {
     let offline_env = BwrapEnv::new(ws.path());
     let offline = ExecTool::sandboxed().with_proxy(proxy.clone());
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,

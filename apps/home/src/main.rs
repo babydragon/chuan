@@ -14,8 +14,8 @@ mod workspace_gc;
 use std::sync::Arc;
 
 use harness_capabilities::{
-    BwrapEnv, ExecTool, FilesTool, HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
-    NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindTool,
+    BwrapEnv, DelegateTool, DiskRoles, ExecTool, FilesTool, HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
+    NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindTool, RoleTool,
     RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, WebFetchTool,
     WriteTool,
 };
@@ -304,6 +304,10 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         )),
     ));
     tools.register(Arc::new(RollbackSkillTool::new(Arc::clone(&skills))));
+    // 子 agent 委托（D19）。tier=1：子 agent 的工具集里没有它。
+    tools.register(Arc::new(DelegateTool));
+    // 角色管理（SelfModify → 逐次审批）：agent 可以注册"小弟"，主人批过才生效。
+    tools.register(Arc::new(RoleTool::new(&cfg.roles_dir)));
 
     let driver = any_driver::build(
         &cfg.provider,
@@ -361,6 +365,8 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             model: cfg.model.clone().unwrap_or_else(|| cfg.provider.clone()),
             max_turns: cfg.max_turns,
             wall_clock_ms: cfg.wall_clock_ms,
+            lanes: harness_kernel::Lanes::new(cfg.lane_limits),
+            agents: cfg.agents.clone(),
             workspace_root: cfg.workspace.clone(),
             system_prompt: cfg.system_prompt.clone(),
             policy: cfg.policy.clone(),
@@ -373,6 +379,9 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             },
             distill_prompt: cfg.distill_prompt.clone(),
             tz_offset_min: cfg.tz_offset_min,
+            budget: cfg.budget,
+            roles: Some(Arc::new(DiskRoles::new(&cfg.roles_dir))
+                as Arc<dyn harness_kernel::RoleSource>),
             identity: Arc::clone(&cfg.identity),
             vision: cfg.vision,
             proxy_hint: cfg.proxy.url.as_ref().map(|url| {

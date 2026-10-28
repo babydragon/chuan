@@ -11,7 +11,7 @@ use harness_kernel::{
     ApprovalId, CallId, ConversationId, ConversationView, Doc, DocId, DocOp, DocQuery, EventKind,
     NewApproval, Resolve,
     Message, MessagePage, NewEvent, ReadTx, Role, RunId, Seq, Store, StoreError, TaskId,
-    TaskRecord, Timestamp, ToolCallRecord, TurnId, Tx, UsageRecord, UsageTotal, now_ms,
+    TaskRecord, Timestamp, ToolCallRecord, TurnId, Tx, UsageRecord, UsageSplit, UsageTotal, now_ms,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use tokio::sync::{mpsc, oneshot};
@@ -543,10 +543,23 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
             Ok(OpResult::Unit)
         }
         Op::RecordUsage(conv, run, u) => {
+            // 归属由会话 id 推出来：子 agent 的会话固定是 `sub:<parent>#<n>`（D19）。
+            // 不靠调用方传参，免得某个调用点忘了带就变成一笔糊涂账。
+            let agent = agent_of(&conv.0);
             conn.execute(
-                "INSERT INTO usage_rollup (at, model, prompt_tokens, completion_tokens, cost_est)
-                 VALUES (?1,?2,?3,?4,?5)",
-                params![now_ms(), u.model, u.prompt_tokens, u.completion_tokens, u.cost_est],
+                "INSERT INTO usage_rollup
+                   (at, model, prompt_tokens, completion_tokens, cost_est, conv_id, run_id, agent)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    now_ms(),
+                    u.model,
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    u.cost_est,
+                    conv.0,
+                    run.0,
+                    agent
+                ],
             )
             .map_err(map_err)?;
             // 账本必须同源，否则 rebuild 归零。
@@ -568,6 +581,16 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
             )?;
             Ok(OpResult::Unit)
         }
+    }
+}
+
+/// 会话 → 主体。子 agent 的会话 id 由内核固定为 `sub:...`（D19），
+/// 所以归属不需要额外传参，也不可能"忘了记"。
+fn agent_of(conv_id: &str) -> &'static str {
+    if conv_id.starts_with("sub:") {
+        "agent"
+    } else {
+        "main"
     }
 }
 
@@ -837,14 +860,18 @@ fn rebuild(conn: &Connection) -> Result<(), StoreError> {
             }
             EventKind::UsageRecorded => {
                 conn.execute(
-                    "INSERT INTO usage_rollup (at, model, prompt_tokens, completion_tokens, cost_est)
-                     VALUES (?1,?2,?3,?4,?5)",
+                    "INSERT INTO usage_rollup
+                       (at, model, prompt_tokens, completion_tokens, cost_est, conv_id, run_id, agent)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                     params![
                         at,
                         v["model"].as_str().unwrap_or("unknown"),
                         v["prompt_tokens"].as_u64().unwrap_or(0) as i64,
                         v["completion_tokens"].as_u64().unwrap_or(0) as i64,
-                        v["cost_est"].as_f64().unwrap_or(0.0)
+                        v["cost_est"].as_f64().unwrap_or(0.0),
+                        conv_id,
+                        run_id,
+                        agent_of(&conv_id)
                     ],
                 )
                 .map_err(map_err)?;
@@ -1266,6 +1293,41 @@ impl ReadTx for SqliteRead {
             .collect::<Result<_, _>>()
             .map_err(map_err)?;
         Ok(docs)
+    }
+
+    async fn usage_split(&mut self, since: Timestamp) -> Result<UsageSplit, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT agent,
+                        COALESCE(SUM(prompt_tokens),0),
+                        COALESCE(SUM(completion_tokens),0),
+                        COALESCE(SUM(cost_est),0)
+                 FROM usage_rollup WHERE at>=?1 GROUP BY agent",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![since], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    UsageTotal {
+                        prompt_tokens: r.get::<_, i64>(1)? as u64,
+                        completion_tokens: r.get::<_, i64>(2)? as u64,
+                        cost_est: r.get::<_, f64>(3)?,
+                    },
+                ))
+            })
+            .map_err(map_err)?;
+        let mut split = UsageSplit::default();
+        for row in rows {
+            let (agent, total) = row.map_err(map_err)?;
+            if agent == "agent" {
+                split.agent = total;
+            } else {
+                split.main = total;
+            }
+        }
+        Ok(split)
     }
 
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError> {

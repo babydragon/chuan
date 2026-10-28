@@ -78,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ws = std::env::temp_dir().join("chuan-drill-ws");
             std::fs::create_dir_all(&ws)?;
             let env = BwrapEnv::new(&ws);
+            let lanes = harness_kernel::Lanes::default();
             let mut tools = ToolRegistry::new();
             tools.register(Arc::new(ExecTool::sandboxed()));
             let runner = Runner {
@@ -85,6 +86,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 driver: &OneShotDriver,
                 tools: &tools,
                 env: &env,
+                lanes: &lanes,
+                spawner: None,
                 gate: None,
                 outbox: None,
                 docs: None,
@@ -102,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 images: Vec::new(),
                 actor: "drill".into(),
                 context_budget_chars: 100_000,
+                token_budget: None,
             };
             println!("drill running; kill -9 me now");
             let _ = runner.run(req, pair.sink, CancellationToken::new()).await;

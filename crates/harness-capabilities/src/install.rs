@@ -28,6 +28,7 @@ impl InstallTool {
     /// 在装包 lane 里跑一次探针；失败当作"没有"。
     async fn probe(&self, argv: &[String], env: &[(String, String)]) -> bool {
         let opts = ExecOpts {
+            nice: true, // 探针也是跑 pip/npm
             timeout_ms: 20_000,
             cwd: None,
             env: env.to_vec(),
@@ -122,6 +123,11 @@ pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/no
     fn effect(&self) -> EffectClass {
         // 联网拉外部代码、改运行时：失败不自动重发
         EffectClass::External
+    }
+
+    /// pip/npm 装包常带 C 扩展编译：占 compile 车道（D11）。
+    fn lane(&self) -> harness_kernel::Lane {
+        harness_kernel::Lane::Compile
     }
 
     fn domain(&self) -> harness_kernel::Domain {
@@ -254,6 +260,7 @@ pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/no
         // 装包几乎一定要出网：有代理就带上，否则 pip/npm 可能在墙外卡死
         env.extend(self.proxy.env());
         let opts = ExecOpts {
+            nice: true, // pip/npm 常带 C 扩展编译
             timeout_ms: INSTALL_TIMEOUT_MS,
             cwd: None,
             env: std::mem::take(&mut env),

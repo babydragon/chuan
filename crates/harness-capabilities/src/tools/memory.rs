@@ -113,6 +113,8 @@ mod tests {
         let env = crate::NullEnv;
         let ws = Workspace { run: RunId("r".into()), root: "/tmp".into() };
         let ctx = ToolCtx {
+            system_prompt: "",
+            spawner: None,
             conv: ConversationId("c".into()),
             actor: "42",
             outbox: &harness_kernel::NullOutbox,

@@ -58,6 +58,9 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 - **Run**：一条入站输入触发的完整生命周期；同一 `run_id` 贯穿其所有事件。
 - **Turn**：一次模型请求 + 该轮工具调用，同属一个 run。
 - **终止由 `run.finished` 唯一表示**；`turn.finished` 只表示"这一轮结束，可能还有下一轮"。
+- **子 agent**：独立 conversation（`sub:<parent_conv>#<n>`）+ 独立 `run_id`，`depth = 1`。
+  父只写 `agent.spawned` / `agent.concluded`；子自己的 `turn.*` / `tool.*` 落自己的 conversation，
+  因此 "模型看见过的东西" 仍可从账本逐会话重建。
 
 ---
 
@@ -70,7 +73,7 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `turn.finished` | 每轮结束（run 可能继续） | `turn_no`, `stop_reason` | kernel |
 | `msg.assistant` | 模型响应完整落库 | `content[]`, `tool_calls[]`, `finish_reason` | kernel |
 | `msg.tool_result` | 工具结束后 | `call_id`, `ok`, `output_preview`, `artifact_refs[]` | kernel |
-| `msg.synthetic` | 模型不可见但影响上下文的插入 | `reason`(`repair`/`no_result`/`compaction_head`), `content` | kernel |
+| `msg.synthetic` | 模型不可见但影响上下文的插入 | `reason`(`repair`/`no_result`/`compaction_head`/`agent_task_interrupted`/`agent_task_done`), `content` | kernel |
 | `tool.call_started` | 决定调用时（**尚未执行**） | `call_id`, `name`, `args`, `effect`, `idem_key` | kernel |
 | `tool.call_dispatched` | **真正执行前的最后一刻** | `call_id` | kernel |
 | `tool.call_finished` | 执行结束 | `call_id`, `status`, `duration_ms`, `truncated` | kernel |
@@ -82,7 +85,9 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `task.leased` | 抢到租约 | `task_id`, `lease_until`, `attempt_no` | kernel |
 | `task.finished` | 完成/失败/取消 | `task_id`, `status`, `result_ref` | kernel |
 | `run.finished` | run 终态（唯一终止点） | `status`(`done`/`failed`/`cancelled`), `stop_reason` | kernel |
-| `usage.recorded` | 每次模型调用 | `model`, `prompt_tokens`, `completion_tokens`, `cost_est` | kernel（engine 只返回 usage） |
+| `agent.spawned` | 派出子 agent（前台或后台） | `child_conv`, `child_run`, `profile`, `task`, `depth`, `caps` | kernel |
+| `agent.concluded` | 子 agent 定稿，结论交回父 | `status`(`done`/`budget`/`timeout`/`failed`/`cancelled`), `summary`, `artifact_refs[]`, `usage` | kernel |
+| `usage.recorded` | 每次模型调用 | `model`, `prompt_tokens`, `completion_tokens`, `cost_est`, **`agent`**, **`parent_run?`** | kernel（engine 只返回 usage） |
 | `artifact.created` | 产物落盘 | `artifact_id`, `path`, `kind`, `bytes`, `sha256` | kernel |
 | `ctx.compacted` | 压缩发生 | `up_to_seq`, `summary_ref`, `tokens_before/after` | kernel |
 | `doc.upserted` | 文档写入 | `doc_id`, `doc_kind`, `scope`, `op`, **`payload`, `version`, `target?`** | kernel（代表应用执行） |
@@ -105,8 +110,8 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `tasks` | 调度与租约（CAS） | `task.*` |
 | `approvals` | 审批状态、单次消费、**卡片 msg_ref** | `approval.*` |
 | `docs` | 记忆/配置/画像（含 payload 与 version） | `doc.upserted` |
-| `usage_rollup` | 日/月成本 | `usage.recorded` |
-| `artifacts` | 产物索引 | `artifact.created` |
+| `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出）；`cost_est` 待 `[pricing]` | `usage.recorded` |
+| ~~`artifacts`~~ | **无独立表**：产物是 `artifacts/` 下的文件 + `artifact.created` 事件，按 sha256 寻址 | `artifact.created` |
 | `docs_fts`（未来） | FTS5 检索 | `doc.upserted` |
 | `chunks` / `chunks_fts` / `doc_vectors`（未来） | 知识库 | ingest 管道 |
 
@@ -151,6 +156,7 @@ async fn messages(&mut self, conv: ConversationId, from: Seq, max_turns: u16)
 | `call_dispatched` 无 `finished`，`effect=external` | `abandoned(crash)`，**永不自动重发** |
 | `msg.assistant` 已提交、无 `call_started` | 该轮未开始执行，重新进入循环 |
 | `turn.started` 无 `msg.assistant` | 流式中：丢弃半截，重发该轮 |
+| `agent.spawned` 无 `agent.concluded` | 子 run 按上表各自收尾；父的 `delegate` 调用记 `abandoned(crash)`，**不重新派生** |
 
 `call_dispatched` 的存在与否，是"从未执行"与"执行后丢失结果"的唯一区分依据。
 
@@ -177,5 +183,7 @@ async fn messages(&mut self, conv: ConversationId, from: Seq, max_turns: u16)
 ## 9. 迁移与重建
 
 - `PRAGMA user_version` 单调递增，只前向；迁移前自动 `VACUUM INTO`。
+- V5（用量归属）给 `usage_rollup` 加了 `conv_id` / `run_id` / `agent` 三列；历史行没有会话信息，
+  `agent` 一律记 `main`，不猜测。
 - `rebuild` 是验收工具，不是日常路径：删投影表 → 按 `(created_at, conv_id, seq)` 折叠 → 比对结果。
 - 不支持二进制回滚（旧代码读不了新 schema）。

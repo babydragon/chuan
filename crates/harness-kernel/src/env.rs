@@ -9,6 +9,8 @@ pub struct ExecOpts {
     pub env: Vec<(String, String)>,
     /// 传给子进程的 stdin（技能用 JSON 参数）
     pub stdin: Option<String>,
+    /// 以 nice 19 启动（编译/装包类，D11）。沙盒实现里用 setpriority。
+    pub nice: bool,
 }
 
 #[derive(Clone, Debug, Default)]

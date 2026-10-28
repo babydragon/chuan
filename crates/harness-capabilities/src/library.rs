@@ -419,6 +419,8 @@ mod flow_tests {
         let wsx = Workspace { run: RunId("r".into()), root: ws.path().to_string_lossy().into() };
         let env = NullEnv;
         let ctx = ToolCtx {
+            system_prompt: "",
+            spawner: None,
             conv: ConversationId("c".into()),
             actor: "42",
             outbox: &harness_kernel::NullOutbox,

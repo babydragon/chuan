@@ -132,6 +132,19 @@ pub struct UsageTotal {
     pub cost_est: f64,
 }
 
+impl UsageTotal {
+    pub fn tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
+/// 用量按主体拆分：主会话 vs 子 agent（D20）。
+#[derive(Clone, Debug, Default)]
+pub struct UsageSplit {
+    pub main: UsageTotal,
+    pub agent: UsageTotal,
+}
+
 #[derive(Clone, Debug)]
 pub struct TaskRecord {
     pub id: TaskId,

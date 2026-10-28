@@ -54,7 +54,7 @@
 4. `kill -9` 后：`Pure` 工具可重跑，`External` **不重跑**并告知主人
 5. 磁盘上只存在一个 SQLite 连接（单写者）
 
-> 说明：`attempts` 账本与预算在 P1；P0 的恢复只需要副作用等级与幂等键，不需要预算。
+> 说明：`attempts` 账本与预算在 P1（未做，已并入 P4.2 一起落地）；P0 的恢复只需要副作用等级与幂等键，不需要预算。
 > **崩溃演练已通过**（2026-10-26）：工具执行中 `kill -9` → 重启 `recover()` 标记 `abandoned` + `run.finished(interrupted)`。
 
 ---
@@ -67,7 +67,7 @@
 - LLM 重试 ✅ 已实现（5xx/流中断 1→2→4s ±20%，最多 3 次；Quota/Auth 永不重试）
 - `web_fetch` ✅ 已实现（宿主代取、拒绝内网/回环、逐次审计；未做域名白名单——默认全放行+记录）
 - 能力边界策略 ✅ 已实现（按执行域：sandbox / self_modify / outbound / lan / install / host_exec）
-- `attempts` 账本 + 日/月预算 + 超限拒绝（**未做**，`wall_clock` 已改为 0=不限，靠 max_turns 与 cancel 收口）
+- `attempts` 账本 + 日/月预算 + 超限拒绝（**未做**；已并入 P4.2。`wall_clock` 已改为 0=不限，目前靠 max_turns 与 cancel 收口）
 - 运维两件套：迁移前备份、`OnFailure` 告警
 - 降级模式（沙盒失败 / LLM 连续失败 / 磁盘满 / 时钟不可信）
 
@@ -125,17 +125,109 @@
 
 ## 5. P4 · 会分工
 
-**交付**：子 agent 与后台长任务。
+**交付**：子 agent 与后台长任务。**P4.0–P4.3 已完成（P4.2 不含金额）**
+（设计见 `DECISIONS.md` D19/D20、`INTERFACES.md §6.3`）。
 
-- 子 agent（独立上下文/工具集、只回传结论、禁止递归）
-- 后台 Task（lease、进度、取消、重启续跑）
-- lane 并发（`io=2` / `compile=1` / `external=1`）
+按 4.0 → 4.1 → 4.2 → 4.3 顺序做，每步独立验收；P4.2 必须先于 P4.3（后台任务无人盯，没预算不开放）。
+
+### P4.0 · 前置（lane 与裁剪）
+
+- ✅ 四个并发闸门：`io=2` / `compile=1` / `external=1` / `agent=1`（`[lanes]`，可配）。
+  模型请求走 `external`，工具按 `Tool::lane()` 取许可；排队可被 `/cancel` 打断。
+- ✅ `Tool::tier()` + `ToolRegistry::specs_for(tier)`：按 `(tier, name)` 排序，裁剪 = 削尾部。
+- ✅ `/usage`（今日/本月 token、额度、子 agent 拆分；未配 `[pricing]` 时明说"金额未配"）。
+- ✅ `/prompt`：打印生效的 system 指令（核心段 + 追加段），核心不可被配置覆盖（D21）。
+- ⏳ `nice 19` 与后台任务的让路逻辑留到 P4.3（要等后台执行器一起做）。
 
 **验收**：
 
-1. 子 agent 跑完后主上下文只增加一条结论
-2. 后台任务重启后继续，不重复执行已完成步骤
-3. 编译任务运行时，TG 首字延迟仍 < 1.5s
+1. 编译 lane 满载时，TG 首字延迟相对空闲的退化 < 1s（绝对阈值按 provider 分档，见 §0）
+2. 裁剪后 `specs()` 仍是稳定前缀（快照测试）
+
+> 已完成的守卫测试：`lanes::tests::*`（独占、跨 lane 互不影响、排队可取消、0 抬到 1）、
+> `tool_registry::tests::trimming_keeps_prefix_stable`、`actor_answers_slash_usage`。
+
+### P4.1 · 前台委托
+
+- ✅ `AgentSpawner` + `delegate` 工具（`tier=1`、effect `External`）
+- ✅ 子会话（`sub:<parent>#<n>`）/ 独立 run / `agent.spawned` / `agent.concluded`
+- ✅ 结论回传（≤2000 字，按字符截断；完整过程指向子会话账本）
+- ✅ 取消链（父取消联动子 run；`/agents cancel <id>` 只杀子任务）
+- ✅ 子 agent 的工具集只含 `tier=0`；审批门对 `ask` 一律拒绝（fail-closed）
+- ✅ 角色：`[agents.roles.<name>]`（提示词 / 模型 / 工具子集 / 预算），`delegate(role=…)` 只能点名；未知角色报错
+- ✅ `role` 工具：agent 可注册/查看/删除角色（`SelfModify` 逐次审批，`tier=1`），`roles_dir` 热加载，
+  角色清单注入父 system（"有几个小弟、各能做什么"）
+- ✅ token 预算（`RunRequest.token_budget`，按轮累计，超限以 `budget` 收尾）
+- ⏳ 子 agent 的 usage 归属（`usage.recorded.agent/parent_run`、V5 列）随 P4.2 一起做
+- ✅ `pending_actions`：子 agent 用 `[待父执行]` 分节写"需要父做的动作"，内核切出来单列给父
+- ⏳ 产物列表（`Conclusion.artifacts`）暂为空，路径由子 agent 写进结论
+
+**验收**：
+
+1. 子 agent 跑完后主上下文只增加一条结论（父上下文 token 增量 < 500）
+2. 子工具集没有 `delegate`；子 agent 调 `http` 立即失败，不弹审批
+3. 父 `/cancel` 能终止子 run；父 `kill -9` 后子 run 标 interrupted，重启不重跑
+
+> 已完成的守卫测试：`child_agent_is_isolated_and_cannot_self_modify`（父/子两个 run、
+> 子历史只有任务书、子工具集无 `delegate`、`selfmod` 被拒并留痕）、
+> `spawn_extracts_pending_actions`（清单切出、正文不重复、子会话序号递增）、
+> `delegate` 的三个门槛测试、`agent::tests` 的 5 个解析用例、`actor_answers_slash_agents`。
+
+#### 已评估但未实现：预授权能力
+
+**设想**：`delegate(..., allow=["lan_exec"])`，把父**本轮已被人批过**的执行域作为一次性能力
+传给子 run（限次数 + TTL），省掉"子做完 → 交回父 → 父再做"的往返。
+
+**现在不做**：`pending_actions` 已经覆盖了"交回父执行"的路径；预授权的收益（省一次往返）
+低于它把审批语义复杂化的风险（人批的是父的动作，却等于放开了子 agent 的动作范围）。
+
+**触发条件**（满足任一才做）：真实使用中反复出现同一步往返
+（例如连续发布 3 个技能、同一网段的多轮扫描），且每次子 agent 都停在同一个动作上。
+
+**若实现必须满足**：① 审批卡上明写"允许子 agent 在 N 分钟内使用 X"；② 能力只能由父的既有
+审批派生，模型不能自授；③ 写进 `agent.spawned` payload（可审计）；④ 默认关闭，按次计数。
+
+### P4.2 · 成本闸门
+
+- ✅ token 预算：`[budget] daily_tokens / monthly_tokens`（0 = 不限），run 入口与 `delegate` 前各查一次
+- ✅ 拒绝可见：回一条「今日额度已用完（105 / 100 token，其中子 agent 25）… 调大 `[budget] daily_tokens`」
+- ✅ 用量归属（schema V5）：`usage_rollup` 增 `conv_id / run_id / agent`，由会话 id 推出（`sub:` → 子 agent），
+  不靠调用方传参；`/usage` 多一行"其中子 agent 今日 X"
+- ✅ attempts 账本的最小形态：`Turn::attempts()`（含重试）写进 `turn.finished`，可与 provider 账单对数
+- ⏳ **金额**：`[pricing]` 与 `cost_est` 计算**未实现**——用户口径是"金额先不算"，`cost_est` 恒 0，
+  `/usage` 明说"金额未配 [pricing]"
+- ⏳ 单 run 子 agent 异常告警（token > 3× 均值）未做
+
+**验收**：
+
+1. ✅ 日预算耗尽后 `delegate` 直接拒绝并告知主人，不排队
+2. ✅ `/usage` 能指出子 agent 今天花了多少；归属按会话推出，重建后不丢
+3. ⏳ 金额口径（`cost_est` 与账单一致）——待 `[pricing]` 落地后再验
+
+> 已完成的守卫测试：`budget::tests::*`（0=不限、文案带用量与改法、月/日先后）、
+> `over_budget_blocks_run_with_visible_message`、`over_budget_blocks_delegation`、
+> `p4_2` 相关的一致性测试（`usage_split` 在 Ephemeral 与 SQLite 上同结果，rebuild 后归属不丢）。
+
+### P4.3 · 后台 Task
+
+- ✅ doc `kind="agent_task"` 队列 + 30s tick 领取（复用 reminder 的版本号，**不启用空壳 `tasks` 表**）
+- ✅ `delegate(background=true)` 立刻返回任务号；`/tasks` 列表、`/tasks cancel <id>`
+- ✅ 结果推回原会话（结论 + `待父执行` + 子会话引用）；同时写 `agent.concluded`
+- ✅ 重启语义（D4）：`running` → `interrupted` + 通知"结果未知、没有自动重跑"，**不重跑**
+- ✅ 接手：`delegate(continue_from=…)` / `/tasks retry <id>` 把上次结论与产物路径（≤1600 字）
+  注入新子 agent；任务 doc 入队时即记 `child_conv`，打断后也知道该续哪个
+- ✅ `nice 19`：技能/装包/探针的 `exec` 走 `setpriority(19)`；编译车道同时只跑一个
+- ⏳ per-exec cgroup 限额（`SBC-VERIFY §10`，触发式）
+
+**验收**：
+
+1. 后台任务重启后继续，不重复执行已完成步骤 → **按 D4 改为"不重跑、只通知"**（避免 `External` 副作用重放）
+2. ✅ 前台 30s 内有活动时后台任务不启动（`background_idle_s`）
+3. ⏳ 后台任务（含它 fork 的沙盒子进程）预算耗尽后能被 `killpg` 收干净——依赖 per-exec cgroup，上板验
+
+> 已完成守卫测试：`background_task_runs_and_pushes_result`（入队→tick→推结果→doc 状态 done）、
+> `idle_gate_holds_background_task`（前台活跃时保持 pending）、
+> `restart_marks_running_task_interrupted`（重启只通知、不重跑）。
 
 ---
 

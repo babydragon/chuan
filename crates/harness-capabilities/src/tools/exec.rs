@@ -133,6 +133,7 @@ impl Tool for ExecTool {
             Vec::new()
         };
         let opts = ExecOpts {
+            nice: false,
             timeout_ms: args.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(15_000),
             cwd: None,
             env,

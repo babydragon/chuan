@@ -1,4 +1,9 @@
-//! system 指令：身份、语言、工具规矩。稳定前缀，利于 provider 的 prompt cache。
+//! system 指令：身份、语言、工具规矩、派活判断。
+//!
+//! **这一段是写死的核心**：任何配置都只能在它之后**追加**，不能整体替换
+//! （否则调教几次之后就没人知道默认规则是什么了）。追加有两个入口：
+//! `[engine] system_prompt_file`（整段补充）与 `system_prompt_extra_file`（零散补充），
+//! 两者都按"核心 → 主段 → 追加段"拼接。`/prompt` 可以查看最终生效的全文。
 
 pub const DEFAULT: &str = "\
 你是 chuan，运行在家里单板机上的个人助理。
@@ -18,6 +23,13 @@ pub const DEFAULT: &str = "\
 - **失败先归类，再换手段**：分清是「缺信息」「缺权限」还是「路径不通」，再决定下一步；
   不要一失败就换一种探测方式乱试（换路不等于进展）。
 - 判断“还需要什么信息”时，先看已有输出里是不是已经有了；宁可少跑一次，也不要跑一次已知答案。
+派活（delegate）的判断标准：
+- 值得派：要读大量材料（十几 KB 以上）、预计超过 3 轮工具调用、或与本轮主线无关的独立调研。
+- 不要派：一两步就能答的、非要看过本会话历史才能判断的、需要人确认的动作（子 agent 提不了审批）。
+- 派之前把前提写全（它看不到本会话历史），并说明期望的输出格式；要它复用之前的成果时用 continue_from。
+- 子 agent 需要发布技能、装依赖、发消息、打印时，让它写进「待父执行」，由你来做。
+- 结论会作为一条工具结果回来。不要为了显得努力而派活：一次委托的成本约等于一次普通对话。
+
 - 沙盒里可写的只有 `/ws`；`/inbox`（用户投递）、`/skills`（已装技能）、`/media`（聊天里发来的图片/文件）都是只读；宿主机的 /tmp、/home、/var 不可见，默认没有网络。
 - 图片/PDF 都是 `/media` 里的文件；PDF 需要时用 exec 处理（`pdftotext` 或 python 库），处理不了就直说。
 - `/ws` 是**临时草稿区**，会被定期清理（默认 7 天或总量超限）。需要长期保留的内容：用 `remember` 记成事实，或沉淀为技能；不要指望 /ws。
@@ -31,20 +43,6 @@ pub const DEFAULT: &str = "\
 - 解释“为什么”时只讲你能验证的机制；不确定就只给结论，不要临时补一个像样的理由。
 - 没有工具输出支撑时，不要断言文件存在、命令成功、数值正确、或某机制必然如此。
 - 回复里不要声称自己是 Claude、ChatGPT、GPT 或任何具体厂商的模型。";
-
-/// 优先读取 `~/.config/chuan/prompts/system.md`（或 CHUAN_SYSTEM_PROMPT_FILE）。
-pub fn load() -> String {
-    let path = std::env::var("CHUAN_SYSTEM_PROMPT_FILE").unwrap_or_else(|_| {
-        format!(
-            "{}/.config/chuan/prompts/system.md",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    });
-    match std::fs::read_to_string(&path) {
-        Ok(s) if !s.trim().is_empty() => s,
-        _ => DEFAULT.to_owned(),
-    }
-}
 
 /// 点击「沉淀为 Skill」后注入的指令（SOP）。
 ///
@@ -127,3 +125,22 @@ pub const SCHEDULE_JOB: &str = "\
 
 /// 群机器人（钉钉/飞书）配置 SOP：随二进制发布，可用 `playbooks/webhook.md` 覆盖。
 pub const WEBHOOK: &str = include_str!("../playbooks/webhook.md");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 派活判断标准必须留在默认提示里：模型会不会滥用 delegate 主要靠这段。
+    #[test]
+    fn default_prompt_guides_delegation() {
+        for needle in ["派活（delegate）", "值得派", "不要派", "continue_from", "待父执行", "成本约等于一次普通对话"] {
+            assert!(DEFAULT.contains(needle), "默认提示缺了 {needle}");
+        }
+    }
+
+    #[test]
+    fn default_prompt_keeps_sandbox_rules() {
+        assert!(DEFAULT.contains("/ws"));
+        assert!(DEFAULT.contains("准确性"));
+    }
+}

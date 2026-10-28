@@ -108,6 +108,10 @@ pub struct ToolCtx<'a> {
     pub env: &'a dyn ExecutionEnv,
     pub outbox: &'a dyn Outbox,
     pub docs: &'a dyn DocReader,
+    /// 本 run 的 system 指令。子 agent 复用它以命中前缀缓存（D19）。
+    pub system_prompt: &'a str,
+    /// 只有主会话 run 才有；`None` = 这个 run 不能派生（子 agent / 定时任务）。
+    pub spawner: Option<&'a dyn crate::agent::AgentSpawner>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -115,6 +119,18 @@ pub struct ToolCtx<'a> {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     fn effect(&self) -> EffectClass;
+
+    /// 工具档位：`0` 通用（子 agent 也能拿到）、`1` 仅主会话。
+    /// 用于子 agent 的工具裁剪（`DECISIONS.md` D19）。**不进 wire**，只在内核内排序/过滤。
+    fn tier(&self) -> u8 {
+        0
+    }
+
+    /// 并发车道（`DECISIONS.md` D11）。默认 `io`；编译/装包类长任务声明 `compile`。
+    fn lane(&self) -> crate::lanes::Lane {
+        crate::lanes::Lane::Io
+    }
+
     /// 审批卡上给人看的一句话（例：把解析后的触发时间写出来）。
     /// 默认 None → 退化为"工具 + 参数"的机械展示。
     fn approval_hint(&self, args: &serde_json::Value) -> Option<String> {

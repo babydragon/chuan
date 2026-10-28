@@ -147,14 +147,26 @@ pub async fn suite<S: Store>(store: &S) {
     )
     .await
     .unwrap();
+    // 子 agent 的用量记在 `sub:` 会话下：归属由会话 id 推出，不靠调用方声明。
+    tx.record_usage(
+        ConversationId::from("sub:c1#1"),
+        run.clone(),
+        UsageRecord { model: "m".into(), prompt_tokens: 7, completion_tokens: 3, cost_est: 0.002 },
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
 
     let mut rd = store.begin_read().await.unwrap();
     let got = rd.get_doc(DocId::from("d1")).await.unwrap().expect("doc 应可读");
     assert_eq!(got.payload["printer"], "HP");
     let total = rd.usage_total(0).await.unwrap();
-    assert_eq!(total.prompt_tokens, 10);
-    assert!((total.cost_est - 0.001).abs() < 1e-9);
+    assert_eq!(total.prompt_tokens, 17);
+    assert!((total.cost_est - 0.003).abs() < 1e-9);
+    let split = rd.usage_split(0).await.unwrap();
+    assert_eq!(split.main.prompt_tokens, 10, "主会话只算自己的");
+    assert_eq!(split.agent.prompt_tokens, 7, "子 agent 的用量要单独归集");
+    assert_eq!(split.main.tokens() + split.agent.tokens(), total.tokens());
     let listed = rd.list_docs(DocQuery { scopes: vec!["family".into()], kinds: vec![], limit: 10 }).await.unwrap();
     assert_eq!(listed.len(), 1);
 }
@@ -185,7 +197,9 @@ async fn sqlite_rebuild_matches_live_state() {
     };
     let usage_before = {
         let mut rd = store.begin_read().await.unwrap();
-        rd.usage_total(0).await.unwrap().prompt_tokens
+        let total = rd.usage_total(0).await.unwrap();
+        let split = rd.usage_split(0).await.unwrap();
+        (total.prompt_tokens, split.main.prompt_tokens, split.agent.prompt_tokens)
     };
 
     store.rebuild().await.unwrap();
@@ -196,11 +210,14 @@ async fn sqlite_rebuild_matches_live_state() {
     };
     let usage_after = {
         let mut rd = store.begin_read().await.unwrap();
-        rd.usage_total(0).await.unwrap().prompt_tokens
+        let total = rd.usage_total(0).await.unwrap();
+        let split = rd.usage_split(0).await.unwrap();
+        (total.prompt_tokens, split.main.prompt_tokens, split.agent.prompt_tokens)
     };
 
     assert_eq!(before, after, "rebuild 后 tool_calls 必须一致");
-    assert_eq!(usage_before, usage_after, "rebuild 后 usage 必须一致");
+    assert_eq!(usage_before, usage_after, "rebuild 后 usage（含 agent 归属）必须一致");
+    assert_eq!(usage_before.2, 7, "重建后子 agent 的用量不能丢");
 }
 
 #[tokio::test]

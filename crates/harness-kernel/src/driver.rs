@@ -120,5 +120,10 @@ pub trait Turn: Send {
     ) -> Result<(), EngineError>;
     fn canceller(&self) -> tokio_util::sync::CancellationToken;
     fn usage(&self) -> UsageSnapshot;
+    /// 本 Turn 到目前为止发出的模型请求次数（含重试）。默认 0：桩不需要实现。
+    /// 记进 `turn.finished`，形成可审计的 attempts 账本（D20）。
+    fn attempts(&self) -> u32 {
+        0
+    }
     fn turn_id(&self) -> TurnId;
 }

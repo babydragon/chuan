@@ -53,6 +53,8 @@ async fn injects_token_and_hides_it() {
     let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
     let env = harness_capabilities::NullEnv;
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,
@@ -103,6 +105,8 @@ async fn rejects_bad_paths_and_unknown_services() {
     let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
     let env = harness_capabilities::NullEnv;
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,
@@ -177,6 +181,8 @@ async fn large_json_is_summarized() {
     let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
     let env = harness_capabilities::NullEnv;
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,
@@ -242,6 +248,8 @@ fn ctx_for<'a>(
     env: &'a harness_capabilities::NullEnv,
 ) -> ToolCtx<'a> {
     ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,

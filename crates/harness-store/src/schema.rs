@@ -1,6 +1,6 @@
 //! Schema 与迁移。只前向，靠 `PRAGMA user_version` 记录版本。
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub const V1: &str = r#"
 CREATE TABLE journal (
@@ -99,4 +99,13 @@ CREATE VIRTUAL TABLE docs_fts USING fts5(
 );
 "#;
 
-pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4)];
+pub const V5: &str = r#"
+-- 用量归属（D20）：能按会话 / run / 主体（主 or 子 agent）拆开。
+-- 历史行没有 conv 信息，agent 一律记为 main。
+ALTER TABLE usage_rollup ADD COLUMN conv_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_rollup ADD COLUMN run_id  TEXT NOT NULL DEFAULT '';
+ALTER TABLE usage_rollup ADD COLUMN agent   TEXT NOT NULL DEFAULT 'main';
+CREATE INDEX usage_agent ON usage_rollup(agent, at);
+"#;
+
+pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5)];

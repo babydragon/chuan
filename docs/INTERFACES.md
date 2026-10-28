@@ -1,13 +1,14 @@
 # 契约
 
-> 替换型：**Channel / Store / Retriever / TurnDriver**；组合型：**Tool / ExecutionEnv**；内核内策略：**Renderer**。
+> 替换型：**Channel / Store / Retriever / TurnDriver**；组合型：**Tool / ExecutionEnv / AgentSpawner**；内核内策略：**Renderer**。
 > 数据模型 `DATA-MODEL.md`，运维 `OPS.md`，术语 `GLOSSARY.md`。
 
 ---
 
 ## 0. 总则
 
-- 四个替换型各配一致性测试；Tool / ExecutionEnv 靠 schema 与单测。
+- 四个替换型各配一致性测试；Tool / ExecutionEnv 靠 schema 与单测；AgentSpawner 是组合型
+  （内核自己实现，工具只依赖 trait），靠"父上下文只增结论 / 禁递归"的集成测试。
 - 必须有 `EphemeralStore` 与 `EchoChannel` 两个桩，逼接口中立。
 - 依赖守卫：`kernel` 依赖树中不得出现 `reqwest`/`teloxide-core`/`rusqlite`/`rmcp`/`image`。
 
@@ -19,7 +20,7 @@
 pub struct Caps {
     pub edit: bool, pub buttons: bool, pub markdown: bool,
     pub max_text: usize, pub media: MediaCaps,
-    pub min_edit_interval_ms: u32,     // TG 暂定 1000，ROADMAP V3 实测后调整
+    pub min_edit_interval_ms: u32,     // TG 2500：1s 持续约 3 分钟会被洪水控制（板上实测 retry_after 169–181s）
 }
 
 pub enum EditOutcome { Edited, NotModified, TooOld, Rejected { retry_after_ms: u32 } }
@@ -280,7 +281,7 @@ pub enum Block {
 
 ---
 
-### 6.1 出站文件
+### 5.1 出站文件
 
 工具不能直接拿整个 Channel，只能通过 `ToolCtx.outbox` 往**当前会话**发一个文件：
 
@@ -297,7 +298,7 @@ pub trait Outbox: Send + Sync {
 
 ---
 
-## 6. Tool / ExecutionEnv
+## 6. Tool / ExecutionEnv / AgentSpawner
 
 ```rust
 #[async_trait]
@@ -379,6 +380,90 @@ pub trait ExecutionEnv: Send + Sync {
 沙盒的默认 lane 永不联网；外部数据有两条路：宿主 `web_fetch` 代取（拒绝内网/回环、逐次审计），
 或技能声明 `network: true` 走独立联网 lane（`lan_exec` 同款）。凭据由宿主注入，不进上下文。
 
+### 6.3 子 agent（委托）
+
+契约见 `DECISIONS.md` D19（形态与约束）、D20（记账与闸门）。内核只提供**派生与回传**，不做调度策略。
+
+```rust
+pub struct AgentSpec {
+    pub task: String,
+    pub profile: AgentProfile,        // 决定 model 与工具档位
+    pub inputs: Vec<String>,          // /ws 下的文件路径，只传引用不传内容
+    pub max_turns: u32, pub max_tokens: u64, pub wall_ms: u64,   // 0 = 用 [agents] 默认值
+    pub parent_run: RunId,
+    pub depth: u8,                    // 恒为 1；>1 直接拒绝
+    /// 接手上一次：任务号 `task-…` 或子会话 `sub:…#n`。内核解析成一段"上次进展"简报
+    /// （结论 + 产物路径，≤1600 字）注进子 agent，不重放历史。
+    pub continue_from: Option<String>,
+    /// 预分配的子会话 id（后台任务入队时定），只能在本父会话名下使用。
+    pub child_conv: Option<String>,
+}
+
+pub struct AgentProfile {
+    pub name: String,                 // "inherit" | [agents.roles] 里的角色名
+    pub model: Option<String>,        // None = 角色或 [engine]
+    pub tools: Option<Vec<String>>,   // 只能更窄（白名单 ∩ 角色 ∩ 这里）
+}
+
+pub struct RoleSpec {                 // [agents.roles.<name>] / roles_dir/<name>.toml
+    pub description: Option<String>,  // 注入父 system 的角色清单
+    pub system_prompt: Option<String>,// 追加在父前缀之后
+    pub model: Option<String>,
+    pub tools: Option<Vec<String>>,   // 只能收窄
+    pub max_turns: u32, pub max_tokens: u64, pub wall_ms: u64,  // 0 = 跟随 [agents]
+}
+
+pub enum AgentStatus { Done, Budget, Timeout, Failed, Cancelled }
+
+pub struct Conclusion {
+    pub status: AgentStatus,
+    pub summary: String,              // ≤2000 字符，按字符截断；全文在 child_conv 的账本里
+    pub child_conv: String,           // sub:<parent_conv>#<n>
+    pub child_run: String,
+    pub artifacts: Vec<String>,       // /ws 下的产物路径（P4.1 暂为空，路径写在 summary 里）
+    pub pending_actions: Vec<String>, // 需要父会话完成的动作（子 agent 无权做）
+    pub usage: UsageSnapshot,         // P4.1 为空，归属统计随 P4.2 落地
+}
+
+/// 角色来源：每次调用重新读盘，所以 `role` 工具写完即刻生效。
+pub trait RoleSource: Send + Sync {
+    fn all(&self) -> Vec<(String, RoleSpec)>;
+}
+
+#[async_trait]
+pub trait AgentSpawner: Send + Sync {
+    async fn spawn(&self, spec: AgentSpec, cancel: CancellationToken)
+        -> Result<Conclusion, AgentError>;
+    /// 后台任务（P4.3）：立刻返回任务号；结果之后推回原会话。
+    async fn enqueue(&self, spec: AgentSpec) -> Result<String, AgentError> {
+        Err(AgentError::Other("当前实现不支持后台任务".into()))
+    }
+}
+```
+
+- `ToolCtx.spawner: Option<&'a dyn AgentSpawner>`：**只有主会话 run 注入**。
+  `None` 表示该 run 不可派生——子 agent 自身与定时任务即此形态（结构性禁递归）。
+- `Tool::tier() -> u8`（`0` 通用 / `1` 父级专用；见 `tool.rs`）。**不是 `ToolSpec` 字段**——
+  `ToolSpec` 会原样进 wire，档位不能漏给模型。`ToolRegistry::specs_for(tier)` 按 `(tier, name)`
+  排序后取**前缀**；只削尾部才不破坏 prompt cache。
+- `Tool::lane() -> Lane`（`io` / `compile` / `external` / `agent`）。默认 `io`；
+  `run_skill` / `publish_skill` / `install_deps` 声明 `compile`（单槽，防编译饿死 TG）。
+  模型请求恒走 `external`（单槽），由 Runner 统一加锁。
+- `delegate` 工具恒为 `tier = 1`、effect `External`（子执行可能有副作用，崩溃不重跑）；
+  参数 `role` 只能点名配置里或 `roles_dir` 里的角色，未知角色 → `AgentError::Other("未知角色…")`。
+- `role` 工具（`tier=1`、`SelfModify`）：`list` / `add` / `remove`，写 `roles_dir/<name>.{toml,md}`。
+  提示词存独立 `.md`（不做 TOML 转义），注册后由 `RoleSource` 热加载。
+- 结论按三节约定：`结论` / `产物` / `[待父执行]`。内核用 `split_pending()` 把最后一节
+  切成 `pending_actions`（每行 `- ` 开头，最多 8 条，`- 无` 视为空），正文里不再重复；
+  `render()` 会单列一节交给父模型。**这是"子 agent 没有审批权"的补偿路径**：
+  需要人确认的动作（发布技能、装依赖、发消息、打印）由父会话在本轮完成。
+- 子 run 写自己的 conversation（`sub:<parent_conv>#<n>`）与 journal；父只写
+  `agent.spawned` / `agent.concluded` + 一条 `msg.tool_result`。
+- 子 run 不装配任何 `ask` 域工具：命中即 `ToolError`，**不进入审批流程**（子 agent 没有通道）。
+- 取消沿 `CancellationToken` 向下传；父崩溃 → 子 `run.finished(interrupted)`，重启不重放。
+- 后台任务落 doc `kind="agent_task"` / `scope="task"`：payload 带 `text/role/inputs/status/conv/chat/attempts`，
+  由 actor 的 30s tick 领取；`running` 在重启后标 `interrupted` 并通知，**不自动重跑**（D4）。
+
 ---
 
 ## 7. 组合约束
@@ -429,6 +514,8 @@ pub struct DocWrite { pub id: DocId, pub kind: DocKind, pub scope: Scope,
                       pub target: Option<DocId>, pub op: DocOp }
 pub enum DocOp { Upsert, Supersede, Expire }
 
+pub struct ArtifactRef { pub path: String, pub bytes: u64, pub sha256: String }
+
 pub struct MessagePage { pub msgs: Vec<Message>, pub next: Option<Seq>, pub truncated: bool }
 
 pub struct ExecOpts { pub timeout_ms: u64, pub cwd: Option<String>, pub env: Vec<(String, String)> }
@@ -443,3 +530,5 @@ pub struct ExecOutput { pub code: Option<i32>, pub stdout: String, pub stderr: S
 - **Channel**：caps 兑现；重复 `dedupe_key` 不重投；`NotModified`/`TooOld` 正确；取消能终止 `run()`。
 - **Retriever**：无越权；域内不丢。
 - **TurnDriver**：delta 顺序；`ToolStarted` 参数完整（无分片）；usage 提取；cancel 后 `step()` 返回 `Cancelled` 且无 pending。
+- **子 agent**：父上下文只增一条结论；`depth > 1` 拒绝；子工具集无 `delegate` 与 `tier=1`；
+  预算耗尽返回 `Conclusion{status=budget}` 而非 error/panic；父取消能终止子 run。

@@ -220,6 +220,8 @@ async fn service_tool_adds_mcp_at_runtime() {
     let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
     let env = harness_capabilities::NullEnv;
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,
@@ -284,6 +286,8 @@ async fn service_tool_rejects_token_outside_secrets() {
     let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
     let env = harness_capabilities::NullEnv;
     let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,

@@ -6,6 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 fn ctx<'a>(ws: &'a Workspace, env: &'a harness_capabilities::NullEnv) -> ToolCtx<'a> {
     ToolCtx {
+        system_prompt: "",
+        spawner: None,
         conv: harness_kernel::ConversationId("c".into()),
         actor: "42",
         outbox: &harness_kernel::NullOutbox,

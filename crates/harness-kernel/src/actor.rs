@@ -29,6 +29,53 @@ use crate::view::{Block, RenderAction, RenderEvent, Renderer, RunStatus, View};
 /// 审批等待上限：到点按拒绝处理，避免 run 永远挂着。
 const APPROVAL_TTL_S: u64 = 300;
 
+/// 1000 → `1.0k`。用量只求量级，不追求精确到个位。
+fn short_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// 按字符切成不超过 `n` 的片段（Telegram 单条上限 4096，留出格式余量）。
+fn shard_text(s: &str, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if cur.chars().count() >= n {
+            out.push(std::mem::take(&mut cur));
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// `/usage` 的一行。`cost_est` 为 0 时明说未配价目，别让人以为是免费；
+/// `limit > 0` 时把额度一起写出来，省得再去翻配置。
+fn usage_line(label: &str, u: &crate::record::UsageTotal, limit: u64) -> String {
+    let money = if u.cost_est > 0.0 {
+        format!("¥{:.4}", u.cost_est)
+    } else {
+        "金额未配 [pricing]".to_owned()
+    };
+    let quota = if limit > 0 {
+        format!(" · 额度 {}/{}", short_tokens(u.tokens()), short_tokens(limit))
+    } else {
+        String::new()
+    };
+    format!(
+        "{label}：{} in / {} out · {money}{quota}",
+        short_tokens(u.prompt_tokens),
+        short_tokens(u.completion_tokens)
+    )
+}
+
 #[derive(Clone)]
 pub struct ActorConfig {
     pub model: String,
@@ -41,6 +88,14 @@ pub struct ActorConfig {
     pub policy: crate::policy::ApprovalPolicy,
     /// 上下文预算（估算字符数）
     pub context_budget_chars: usize,
+    /// 并发车道（D11）。所有 run 共享同一组信号量。
+    pub lanes: crate::lanes::Lanes,
+    /// 子 agent 闸门与默认预算（D19/D20）
+    pub agents: crate::agent::AgentLimits,
+    /// token 预算（0 = 不限）。超限在 run 入口与 spawn 前直接拒绝。
+    pub budget: crate::budget::BudgetLimits,
+    /// 可热加载的角色目录（`[agents] roles_dir`）。`None` = 只有配置文件里的角色。
+    pub roles: Option<Arc<dyn crate::agent::RoleSource>>,
     /// 技能目录（内核不解析格式，只取一段文本）
     pub skill_source: Option<Arc<dyn crate::retriever::SkillSource>>,
     /// 工具目录（MCP 等外部工具清单），同样只取一段文本
@@ -71,6 +126,18 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
     locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// 子会话序号：`sub:<parent>#<n>`（按父会话单调递增）
+    agent_seq: Arc<Mutex<HashMap<String, u32>>>,
+    /// 每个 run 当前派出的子 agent 数（名额闸门）
+    agent_slots: Arc<Mutex<HashMap<String, usize>>>,
+    /// 运行中的子 agent：child_conv → 现场
+    agents_running: Arc<Mutex<HashMap<String, RunningAgent>>>,
+    /// 最近一次前台活动的时刻（后台任务据此让路）
+    last_active: Arc<Mutex<i64>>,
+    /// 运行中的后台任务：task_id → 取消令牌
+    bg_running: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// 后台任务编号
+    bg_seq: Arc<Mutex<u64>>,
 }
 
 impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
@@ -86,6 +153,12 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             runs: Arc::clone(&self.runs),
             approvals: Arc::clone(&self.approvals),
             locks: Arc::clone(&self.locks),
+            agent_seq: Arc::clone(&self.agent_seq),
+            agent_slots: Arc::clone(&self.agent_slots),
+            agents_running: Arc::clone(&self.agents_running),
+            last_active: Arc::clone(&self.last_active),
+            bg_running: Arc::clone(&self.bg_running),
+            bg_seq: Arc::clone(&self.bg_seq),
         }
     }
 }
@@ -176,6 +249,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             runs: Arc::new(Mutex::new(HashMap::new())),
             approvals: Arc::new(Mutex::new(HashMap::new())),
             locks: Arc::new(Mutex::new(HashMap::new())),
+            agent_seq: Arc::new(Mutex::new(HashMap::new())),
+            agent_slots: Arc::new(Mutex::new(HashMap::new())),
+            agents_running: Arc::new(Mutex::new(HashMap::new())),
+            last_active: Arc::new(Mutex::new(now_ms())),
+            bg_running: Arc::new(Mutex::new(HashMap::new())),
+            bg_seq: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -184,12 +263,18 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         mut inbound: mpsc::Receiver<Inbound>,
         cancel: CancellationToken,
     ) -> Result<(), ChannelError> {
+        // 重启收尾：上次 running 的后台任务只通知、不重跑（D4）。
+        let resumed = self.resume_agent_tasks().await;
+        if resumed > 0 {
+            tracing::warn!(tasks = resumed, "后台任务被重启打断，已通知主人");
+        }
         let mut tasks = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 msg = inbound.recv() => {
                     let Some(inb) = msg else { break };
+                    *self.last_active.lock().unwrap() = crate::ids::now_ms();
                     if inb.kind == InboundKind::Command {
                         if let Err(e) = self.handle_command(inb).await {
                             tracing::warn!(error = %e, "command failed");
@@ -227,6 +312,56 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         )
     }
 
+    /// 生效的角色：配置文件里的优先，目录里的补充（同名不覆盖，避免"改配置不生效"）。
+    fn effective_roles(&self) -> HashMap<String, crate::agent::RoleSpec> {
+        let mut map = self.cfg.agents.roles.clone();
+        if let Some(src) = &self.cfg.roles {
+            for (name, spec) in src.all() {
+                map.entry(name).or_insert(spec);
+            }
+        }
+        map
+    }
+
+    /// 角色目录：让父模型知道自己有几个"小弟"、各能做什么。
+    fn roles_catalog(&self) -> String {
+        let roles = self.effective_roles();
+        if roles.is_empty() {
+            return String::new();
+        }
+        let mut names: Vec<&String> = roles.keys().collect();
+        names.sort();
+        let mut out = String::from("\n\n可派子 agent 的角色（用 delegate(role=…) 指定）：\n");
+        for name in names {
+            let r = &roles[name];
+            let desc = r.description.as_deref().unwrap_or("（无说明）");
+            let tools = r
+                .tools
+                .as_ref()
+                .map(|t| t.join("/"))
+                .unwrap_or_else(|| "跟随默认白名单".into());
+            out.push_str(&format!("- `{name}`：{desc}（工具：{tools}）\n"));
+        }
+        out.push_str("不确定用哪个就不填 role。");
+        out
+    }
+
+    /// 预算闸门：返回 `Some(说明)` 表示已用完。
+    ///
+    /// 每次 run 入口查一次就够：预算的意义是"别让今天跑飞"，
+    /// 不是精确到每一轮；真要精确，P4.3 的 attempts 会补上。
+    async fn budget_exceeded(&self) -> Option<String> {
+        if self.cfg.budget.unlimited() {
+            return None;
+        }
+        let (day_start, month_start) = crate::budget::windows(crate::ids::now_ms(), self.cfg.tz_offset_min);
+        let mut rd = self.store.begin_read().await.ok()?;
+        let day = rd.usage_total(day_start).await.ok()?;
+        let month = rd.usage_total(month_start).await.ok()?;
+        let split = rd.usage_split(day_start).await.unwrap_or_default();
+        crate::budget::exceeded(&self.cfg.budget, &day, &month, &split)
+    }
+
     async fn epoch(&self, inb: &Inbound) -> u64 {
         let key = format!("conv.epoch:{}:{}", inb.channel.0, inb.conversation);
         self.store
@@ -259,7 +394,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                      /cancel — 取消当前任务\n\
                      /status — 查看状态\n\
                      /facts — 查看长期记忆\n\
-                     /reminders — 查看/取消定时任务
+                     /reminders — 查看/取消定时任务\n\
+                     /usage — 今日与本月用量\n\
+                     /prompt — 查看实际生效的 system 指令\n\
+                     /agents — 查看/取消运行中的子 agent\n\
+                     /tasks — 查看/取消后台任务\n\
                      /forget <id> — 删除一条记忆\n\
                      /help — 本说明\n\n\
                      直接发消息即可对话；改动过文件的任务终稿会带「沉淀为 Skill」按钮，\
@@ -405,7 +544,214 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let running = self.runs.lock().unwrap().contains_key(&inb.conversation);
                 let epoch = self.epoch(&inb).await;
                 let state = if running { "运行中" } else { "空闲" };
-                self.reply(&inb.conversation, &format!("{state} · 会话 epoch {epoch}")).await
+                let limits = self.cfg.lanes.limits();
+                let busy = format!(
+                    "io {}/{}, compile {}/{}, external {}/{}, agent {}/{}",
+                    limits.io - self.cfg.lanes.available(crate::lanes::Lane::Io),
+                    limits.io,
+                    limits.compile - self.cfg.lanes.available(crate::lanes::Lane::Compile),
+                    limits.compile,
+                    limits.external - self.cfg.lanes.available(crate::lanes::Lane::External),
+                    limits.external,
+                    limits.agent - self.cfg.lanes.available(crate::lanes::Lane::Agent),
+                    limits.agent,
+                );
+                self.reply(&inb.conversation, &format!("{state} · 会话 epoch {epoch}\n车道 {busy}")).await
+            }
+            "agents" => {
+                let rest = text.trim().trim_start_matches("/agents").trim().to_owned();
+                if let Some(id) = rest.strip_prefix("retry ") {
+                    let id = id.trim().to_owned();
+                    let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == id);
+                    let Some(doc) = doc else {
+                        return self.reply(&inb.conversation, &format!("没有这个任务：{id}")).await;
+                    };
+                    let p = &doc.payload;
+                    let spec = crate::agent::AgentSpec {
+                        parent_conv: p["conv"].as_str().unwrap_or_default().to_owned(),
+                        parent_run: RunId(format!("retry-{id}")),
+                        task: p["text"].as_str().unwrap_or_default().to_owned(),
+                        inputs: p["inputs"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        profile: crate::agent::AgentProfile {
+                            name: p["role"].as_str().unwrap_or("inherit").to_owned(),
+                            ..Default::default()
+                        },
+                        system_prompt: Some(self.cfg.system_prompt.clone()),
+                        max_turns: p["max_turns"].as_u64().unwrap_or(0) as u32,
+                        max_tokens: p["max_tokens"].as_u64().unwrap_or(0),
+                        wall_ms: p["wall_ms"].as_u64().unwrap_or(0),
+                        depth: 1,
+                        // 新任务 + 旧任务做来源：新子 agent 会拿到上次的结论摘要
+                        continue_from: Some(id.clone()),
+                        child_conv: None,
+                    };
+                    return match self.enqueue_agent_task(spec).await {
+                        Ok(new_id) => {
+                            self.reply(
+                                &inb.conversation,
+                                &format!("已重排为 `{new_id}`（接续 `{id}` 的进展，前台静默后开跑）。"),
+                            )
+                            .await
+                        }
+                        Err(e) => {
+                            self.reply(&inb.conversation, &format!("重排失败：{e}")).await
+                        }
+                    };
+                }
+                if let Some(id) = rest.strip_prefix("cancel ") {
+                    let id = id.trim().to_owned();
+                    let hit = self
+                        .agents_running
+                        .lock()
+                        .unwrap()
+                        .get(&id)
+                        .map(|a| a.cancel.clone());
+                    let msg = match hit {
+                        Some(t) => {
+                            t.cancel();
+                            format!("已请求取消 {id}")
+                        }
+                        None => format!("没有运行中的子 agent：{id}"),
+                    };
+                    return self.reply(&inb.conversation, &msg).await;
+                }
+                let me = format!("{}:{}", inb.channel.0, inb.conversation);
+                let now = crate::ids::now_ms();
+                let lines: Vec<String> = self
+                    .agents_running
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, a)| a.parent_conv.starts_with(&me))
+                    .map(|(id, a)| {
+                        let secs = (now.saturating_sub(a.started_ms)) / 1000;
+                        format!("- `{id}` · {secs}s · {}", a.task.lines().next().unwrap_or(""))
+                    })
+                    .collect();
+                let msg = if lines.is_empty() {
+                    "没有运行中的子 agent。".to_owned()
+                } else {
+                    format!("运行中的子 agent：\n{}\n\n取消：/agents cancel <id>", lines.join("\n"))
+                };
+                self.reply(&inb.conversation, &msg).await
+            }
+            "tasks" => {
+                let rest = text.trim().trim_start_matches("/tasks").trim().to_owned();
+                if let Some(id) = rest.strip_prefix("cancel ") {
+                    let id = id.trim().to_owned();
+                    let running = self.bg_running.lock().unwrap().get(&id).cloned();
+                    if let Some(t) = running {
+                        t.cancel();
+                        return self.reply(&inb.conversation, &format!("已请求取消 {id}")).await;
+                    }
+                    // 还没开跑：直接标 cancelled
+                    let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == id);
+                    let Some(doc) = doc else {
+                        return self.reply(&inb.conversation, &format!("没有这个任务：{id}")).await;
+                    };
+                    if doc.payload["status"] == "pending" {
+                        let mut p = doc.payload.clone();
+                        p["status"] = serde_json::json!("cancelled");
+                        p["finished_at"] = serde_json::json!(now_ms());
+                        self.put_task_doc(&id, doc.payload["conv"].as_str().unwrap_or_default(), p, doc.version + 1)
+                            .await;
+                        return self.reply(&inb.conversation, &format!("已取消 {id}")).await;
+                    }
+                    return self
+                        .reply(&inb.conversation, &format!("{id} 已经结束（{}）", doc.payload["status"]))
+                        .await;
+                }
+
+                let now = now_ms();
+                let docs = self.list_tasks().await;
+                let mut lines = Vec::new();
+                for d in docs.iter().filter(|d| {
+                    matches!(d.payload["status"].as_str().unwrap_or(""), "pending" | "running")
+                }) {
+                    let started = d.payload["started_at"].as_i64().unwrap_or(now);
+                    let secs = if d.payload["status"] == "running" {
+                        (now.saturating_sub(started)) / 1000
+                    } else {
+                        0
+                    };
+                    let cont = d.payload["continue_from"]
+                        .as_str()
+                        .map(|s| format!("（续 {s}）"))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "- `{}` · {} · {}s · {}{cont}",
+                        d.id.0,
+                        d.payload["status"].as_str().unwrap_or("?"),
+                        secs,
+                        d.payload["text"].as_str().unwrap_or("").lines().next().unwrap_or("")
+                    ));
+                }
+                let msg = if lines.is_empty() {
+                    "没有进行中的后台任务。\n派活时加 background=true 即可。".to_owned()
+                } else {
+                    format!("后台任务：\n{}\n\n取消：/tasks cancel <id>", lines.join("\n"))
+                };
+                self.reply(&inb.conversation, &msg).await
+            }
+            "prompt" => {
+                // 让主人能核对"你到底给模型喂了什么"。核心段写死，配置只能追加。
+                let text = self.cfg.system_prompt.clone();
+                let chunks = shard_text(&text, 3_000);
+                let total = text.chars().count();
+                for (i, part) in chunks.iter().enumerate() {
+                    let head = if i == 0 {
+                        format!("system 指令（{total} 字，分 {} 条）：\n\n", chunks.len())
+                    } else {
+                        String::new()
+                    };
+                    let _ = self.reply(&inb.conversation, &format!("{head}{part}")).await;
+                }
+                self.reply(
+                    &inb.conversation,
+                    "以上是配置文件与内置核心段。\n\
+                     另有每轮动态注入（不在这里）：技能目录、MCP 工具目录、角色清单、长期记忆、时间锚点。",
+                )
+                .await
+            }
+            "usage" => {
+                let now = crate::ids::now_ms();
+                let (day_start, month_start) =
+                    crate::budget::windows(now, self.cfg.tz_offset_min);
+                let zero = || crate::record::UsageTotal {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cost_est: 0.0,
+                };
+                let (day, month, split) = match self.store.begin_read().await {
+                    Ok(mut rd) => (
+                        rd.usage_total(day_start).await.unwrap_or_else(|_| zero()),
+                        rd.usage_total(month_start).await.unwrap_or_else(|_| zero()),
+                        rd.usage_split(day_start).await.unwrap_or_default(),
+                    ),
+                    Err(_) => (zero(), zero(), Default::default()),
+                };
+                let mut text = format!(
+                    "{}\n{}",
+                    usage_line("今日", &day, self.cfg.budget.daily_tokens),
+                    usage_line("本月", &month, self.cfg.budget.monthly_tokens)
+                );
+                let agent_tokens = split.agent.tokens();
+                if agent_tokens > 0 {
+                    text.push_str(&format!(
+                        "\n其中子 agent 今日 {}（{} in / {} out）",
+                        short_tokens(agent_tokens),
+                        short_tokens(split.agent.prompt_tokens),
+                        short_tokens(split.agent.completion_tokens)
+                    ));
+                }
+                self.reply(&inb.conversation, &text).await
             }
             other => {
                 self.reply(&inb.conversation, &format!("未知指令 /{other}，试试 /help")).await
@@ -414,6 +760,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     }
 
     async fn handle_run(&self, inb: Inbound) -> Result<(), ChannelError> {
+        if let Some(msg) = self.budget_exceeded().await {
+            self.reply(&inb.conversation, &format!("⛔ {msg}")).await?;
+            return Ok(());
+        }
         let key = inb.conversation.clone();
         let lock = self.lock_for(&key);
         let _guard = lock.lock().await;
@@ -491,6 +841,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 system.push_str("\n\n");
                 system.push_str(hint);
             }
+        }
+        let role_catalog = self.roles_catalog();
+        if !role_catalog.is_empty() {
+            system.push_str(&role_catalog);
         }
         if let Some(block) = &self.cfg.host_paths {
             if !block.trim().is_empty() {
@@ -579,6 +933,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             images,
             workspace: Workspace { run: run.clone(), root: self.cfg.workspace_root.clone() },
             context_budget_chars: self.cfg.context_budget_chars,
+            token_budget: None,
         };
 
         let outbox = RunOutbox { channel: &*self.channel, conversation: inb.conversation.clone() };
@@ -588,6 +943,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             driver: &*self.driver,
             tools: &self.tools,
             env: &*self.env,
+            lanes: &self.cfg.lanes,
+            spawner: Some(self as &dyn crate::agent::AgentSpawner),
             gate: Some(self),
             outbox: Some(&outbox),
             docs: Some(&docs),
@@ -797,6 +1154,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         let n = self.tick_reminders().await;
                         if n > 0 {
                             tracing::info!(fired = n, "reminders fired");
+                        }
+                        // 后台任务：前台静默且没有 run 在跑时才会真的启动。
+                        if self.tick_agent_tasks().await > 0 {
+                            tracing::info!("background agent task started");
                         }
                     }
                 }
@@ -1058,12 +1419,20 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             call: call.clone(),
             workspace: &ws,
             env: &*self.env,
+            system_prompt: "",
+            spawner: None,
             cancel: CancellationToken::new(),
         };
-        let body = match tool
-            .execute(serde_json::json!({ "name": name, "args": args }), &ctx)
-            .await
-        {
+        // 定时任务也是后台执行：同样过车道，否则两个 pinned 任务同时编译
+        // 会和前台 run 抢同一块 CPU。许可只罩住这次执行，不含后面的 polish run
+        // （否则 polish 里的 exec 会等一个永远不释放的 compile 名额）。
+        let executed = {
+            let never = CancellationToken::new();
+            let _lane = self.cfg.lanes.acquire(tool.lane(), &never).await;
+            tool.execute(serde_json::json!({ "name": name, "args": args }), &ctx)
+                .await
+        };
+        let body = match executed {
             Ok(out) => blocks_text(&out.content),
             Err(e) => {
                 let msg = e.message.clone();
@@ -1294,6 +1663,703 @@ fn summarize_args(args: &serde_json::Value) -> String {
         format!("{}…", one_line.chars().take(200).collect::<String>())
     } else {
         one_line
+    }
+}
+
+
+
+
+impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
+    /// 把"上一次做到哪里"压成一段可注入的简报。
+    ///
+    /// 原则：**只给结论与产物，不给过程**。子 agent 需要的是"已经有什么"，
+    /// 不是把上一个会话的历史重放一遍（那等于把 token 花在复述上）。
+    ///
+    /// 支持两种来源：
+    /// - `task-…`：后台任务 doc（跑完有 result.summary；没跑完就退回它的 child_conv）
+    /// - `sub:…#n`：子会话，取最后两段 assistant 正文
+    async fn prior_brief(&self, source: &str) -> Option<(String, String)> {
+        if source.starts_with("sub:") {
+            return self.brief_from_conv(source).await.map(|b| (source.to_owned(), b));
+        }
+        if !source.starts_with("task-") {
+            return None;
+        }
+        let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == source)?;
+        if let Some(s) = doc.payload["result"]["summary"].as_str() {
+            if !s.trim().is_empty() {
+                return Some((source.to_owned(), s.chars().take(1_600).collect()));
+            }
+        }
+        // 被打断/失败：退回它名下的子会话，看有没有中途产出的正文。
+        let child = doc.payload["child_conv"].as_str()?;
+        let brief = self.brief_from_conv(child).await?;
+        Some((format!("{source} → {child}"), brief))
+    }
+
+    async fn brief_from_conv(&self, conv: &str) -> Option<String> {
+        let mut rd = self.store.begin_read().await.ok()?;
+        let page = rd
+            .messages(ConversationId(conv.to_owned()), 0, 40)
+            .await
+            .ok()?;
+        let mut parts: Vec<String> = page
+            .msgs
+            .iter()
+            .filter(|m| m.role == crate::record::Role::Assistant)
+            .filter_map(|m| m.payload.get("text").and_then(|v| v.as_str()))
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| t.trim().chars().take(800).collect::<String>())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        // 只要最后两段：更早的多半已经被后续结论覆盖
+        let tail = parts.split_off(parts.len().saturating_sub(2));
+        Some(tail.join("\n---\n"))
+    }
+}
+
+/// 后台任务在 doc 容器里的种类与作用域（P4.3）。
+/// 与 `remind` 同一条路：版本号 CAS、`/forget` 类操作直接复用。
+const TASK_KIND: &str = "agent_task";
+const TASK_SCOPE: &str = "task";
+
+impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
+    /// 写/更新一条后台任务。失败只记日志：任务本身不该因为写账失败而卡住。
+    async fn put_task_doc(&self, doc_id: &str, conv: &str, payload: serde_json::Value, version: u64) {
+        let doc = crate::record::Doc {
+            id: crate::ids::DocId(doc_id.to_owned()),
+            kind: TASK_KIND.into(),
+            scope: TASK_SCOPE.into(),
+            payload,
+            version,
+            valid_from: now_ms(),
+            valid_to: None,
+        };
+        let run = RunId(format!("job-{doc_id}"));
+        let mut tx = match self.store.begin_write().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, task = doc_id, "后台任务：写账失败");
+                return;
+            }
+        };
+        if let Err(e) = tx.upsert_doc(ConversationId(conv.to_owned()), run, doc).await {
+            tracing::warn!(error = %e, task = doc_id, "后台任务：upsert 失败");
+            return;
+        }
+        if let Err(e) = tx.commit().await {
+            tracing::warn!(error = %e, task = doc_id, "后台任务：提交失败");
+        }
+    }
+
+    async fn list_tasks(&self) -> Vec<crate::record::Doc> {
+        match self.store.begin_read().await {
+            Ok(mut rd) => rd
+                .list_docs(crate::record::DocQuery {
+                    scopes: vec![TASK_SCOPE.into()],
+                    kinds: vec![TASK_KIND.into()],
+                    limit: 100,
+                })
+                .await
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 入队：立刻返回任务号。执行由 30s tick 在"前台静默"后领。
+    pub async fn enqueue_agent_task(&self, spec: crate::agent::AgentSpec) -> Result<String, crate::agent::AgentError> {
+        if !self.cfg.agents.enabled {
+            return Err(crate::agent::AgentError::Disabled);
+        }
+        if let Some(msg) = self.budget_exceeded().await {
+            return Err(crate::agent::AgentError::Other(msg));
+        }
+        let n = {
+            let mut s = self.bg_seq.lock().unwrap();
+            *s += 1;
+            *s
+        };
+        let id = format!("task-{}-{n}", now_ms());
+        let conv = spec.parent_conv.clone();
+        // 预分配子会话：打断后任务表才知道"上次干到哪个会话"，重派时能带上进展。
+        // 注意这只是**命名**，不是复跑原会话——重派仍是全新上下文 + 简报。
+        let child_conv = match spec.child_conv.clone() {
+            Some(c) => c,
+            None => {
+                let seq = {
+                    let mut m = self.agent_seq.lock().unwrap();
+                    let v = m.entry(conv.clone()).or_insert(0);
+                    *v += 1;
+                    *v
+                };
+                format!("sub:{conv}#{seq}")
+            }
+        };
+        // 推结果要知道"发到哪个 chat"：conv 形如 `telegram:<chat>:<epoch>`，
+        // 与审批卡取 chat 的规则一致。
+        let chat = conv.split(':').nth(1).unwrap_or_default().to_owned();
+        let payload = serde_json::json!({
+            "text": spec.task,
+            "role": if spec.profile.name.is_empty() { "inherit".to_string() } else { spec.profile.name },
+            "inputs": spec.inputs,
+            "status": "pending",
+            "conv": conv,
+            "chat": chat,
+            "attempts": 0,
+            "created_at": now_ms(),
+            "child_conv": child_conv,
+            "continue_from": spec.continue_from,
+            "max_turns": spec.max_turns,
+            "max_tokens": spec.max_tokens,
+            "wall_ms": spec.wall_ms,
+        });
+        self.put_task_doc(&id, &spec.parent_conv, payload, 1).await;
+        Ok(id)
+    }
+
+    /// 启动时收尾：上次 `running` 的任务只通知、不重跑（D4：External 永不自动重发）。
+    pub async fn resume_agent_tasks(self: &Arc<Self>) -> usize {
+        let mut n = 0;
+        for doc in self.list_tasks().await {
+            if doc.payload["status"] != "running" {
+                continue;
+            }
+            let chat = doc.payload["chat"].as_str().unwrap_or_default().to_owned();
+            let mut p = doc.payload.clone();
+            p["status"] = serde_json::json!("interrupted");
+            p["finished_at"] = serde_json::json!(now_ms());
+            self.put_task_doc(&doc.id.0, &doc.payload["conv"].as_str().unwrap_or_default(), p, doc.version + 1)
+                .await;
+            // 人看一条消息；模型也要能看见——写成 msg.synthetic 进父会话账本，
+            // 下一轮组装上下文时它就在历史里，不用等主人转述。
+            let body = format!(
+                "后台任务 `{}`（{}）被服务重启打断，结果未知。没有自动重跑（避免重复副作用）；                 需要继续时请重新派一次，或问主人要不要续。",
+                doc.id.0,
+                doc.payload["text"].as_str().unwrap_or("").lines().next().unwrap_or("")
+            );
+            let conv = doc.payload["conv"].as_str().unwrap_or_default().to_owned();
+            if !conv.is_empty() {
+                if let Ok(mut tx) = self.store.begin_write().await {
+                    let _ = tx
+                        .append(NewEvent {
+                            conv: ConversationId(conv),
+                            run: RunId(format!("job-{}", doc.id.0)),
+                            turn: None,
+                            kind: EventKind::MsgSynthetic,
+                            payload: serde_json::json!({
+                                "reason": "agent_task_interrupted",
+                                "content": body,
+                            }),
+                            dedupe_key: Some(format!("task-interrupted-{}", doc.id.0)),
+                        })
+                        .await;
+                    let _ = tx.commit().await;
+                }
+            }
+            if !chat.is_empty() {
+                let _ = self
+                    .reply(
+                        &chat,
+                        &format!(
+                            "⚠️ 后台任务 `{}` 被服务重启打断，结果未知（没有自动重跑，避免重复副作用）。\n需要的话说一声，我重新派一次。",
+                            doc.id.0
+                        ),
+                    )
+                    .await;
+            }
+            n += 1;
+        }
+        n
+    }
+
+    /// 30s tick：前台静默且没有 run 时，领一条 pending 开跑。
+    pub async fn tick_agent_tasks(self: &Arc<Self>) -> usize {
+        if !self.cfg.agents.enabled {
+            return 0;
+        }
+        let now = now_ms();
+        let idle_ms = (self.cfg.agents.background_idle_s as i64) * 1000;
+        if idle_ms > 0 && now.saturating_sub(*self.last_active.lock().unwrap()) < idle_ms {
+            return 0;
+        }
+        if !self.runs.lock().unwrap().is_empty() || !self.bg_running.lock().unwrap().is_empty() {
+            return 0;
+        }
+        let docs = self.list_tasks().await;
+        let Some(doc) = docs.iter().find(|d| d.payload["status"] == "pending").cloned() else {
+            return 0;
+        };
+
+        let mut p = doc.payload.clone();
+        p["status"] = serde_json::json!("running");
+        p["started_at"] = serde_json::json!(now);
+        p["attempts"] = serde_json::json!(doc.payload["attempts"].as_u64().unwrap_or(0) + 1);
+        self.put_task_doc(&doc.id.0, &doc.payload["conv"].as_str().unwrap_or_default(), p.clone(), doc.version + 1)
+            .await;
+
+        let token = CancellationToken::new();
+        self.bg_running.lock().unwrap().insert(doc.id.0.clone(), token.clone());
+        let me = Arc::clone(self);
+        let id = doc.id.0.clone();
+        tokio::spawn(async move {
+            me.run_agent_task(id, p, token).await;
+        });
+        1
+    }
+
+    async fn run_agent_task(self: Arc<Self>, id: String, payload: serde_json::Value, token: CancellationToken) {
+        let conv = payload["conv"].as_str().unwrap_or_default().to_owned();
+        let chat = payload["chat"].as_str().unwrap_or_default().to_owned();
+        let text = payload["text"].as_str().unwrap_or_default().to_owned();
+        let role = payload["role"].as_str().unwrap_or("inherit").to_owned();
+        let inputs: Vec<String> = payload["inputs"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_owned())).collect())
+            .unwrap_or_default();
+
+        let spec = crate::agent::AgentSpec {
+            parent_conv: conv.clone(),
+            parent_run: RunId(format!("job-{id}")),
+            task: text.clone(),
+            inputs,
+            profile: crate::agent::AgentProfile { name: role, ..Default::default() },
+            system_prompt: Some(self.cfg.system_prompt.clone()),
+            max_turns: payload["max_turns"].as_u64().unwrap_or(0) as u32,
+            max_tokens: payload["max_tokens"].as_u64().unwrap_or(0),
+            wall_ms: payload["wall_ms"].as_u64().unwrap_or(0),
+            depth: 1,
+            continue_from: payload["continue_from"].as_str().map(|s| s.to_owned()),
+            child_conv: payload["child_conv"].as_str().map(|s| s.to_owned()),
+        };
+
+        let res = <Self as crate::agent::AgentSpawner>::spawn(&*self, spec, token.clone()).await;
+        let status = match &res {
+            Ok(c) => c.status,
+            Err(_) => crate::agent::AgentStatus::Failed,
+        };
+        let mut p = payload.clone();
+        p["status"] = serde_json::json!(status.as_str());
+        p["finished_at"] = serde_json::json!(now_ms());
+        match &res {
+            Ok(c) => {
+                p["result"] = serde_json::json!({
+                    "summary": c.summary,
+                    "child_conv": c.child_conv,
+                    "pending_actions": c.pending_actions,
+                });
+            }
+            Err(e) => {
+                p["result"] = serde_json::json!({ "error": e.to_string() });
+            }
+        }
+        // 用当前版本 +1，别猜：并发 tick 或人工取消都会改版本号。
+        let version = self
+            .list_tasks()
+            .await
+            .into_iter()
+            .find(|d| d.id.0 == id)
+            .map(|d| d.version + 1)
+            .unwrap_or(2);
+        self.put_task_doc(&id, &conv, p, version).await;
+        self.bg_running.lock().unwrap().remove(&id);
+
+        // 结论不仅推给人，也写进父会话账本：否则主人问"刚才那个任务怎样了"，
+        // 模型完全不知道（它只看到过"已排入后台任务"那条）。
+        let notice = match &res {
+            Ok(c) => format!(
+                "后台任务 `{id}` 已结束（{}）：\n{}",
+                c.status.as_str(),
+                c.render()
+            ),
+            Err(e) => format!("后台任务 `{id}` 失败：{e}"),
+        };
+        if let Ok(mut tx) = self.store.begin_write().await {
+            let _ = tx
+                .append(NewEvent {
+                    conv: ConversationId(conv.clone()),
+                    run: RunId(format!("job-{id}")),
+                    turn: None,
+                    kind: EventKind::MsgSynthetic,
+                    payload: serde_json::json!({
+                        "reason": "agent_task_done",
+                        "content": notice,
+                    }),
+                    dedupe_key: Some(format!("task-done-{id}")),
+                })
+                .await;
+            let _ = tx.commit().await;
+        }
+
+        if chat.is_empty() {
+            return;
+        }
+        let first = text.lines().next().unwrap_or("后台任务");
+        let msg = match &res {
+            Ok(c) if c.status == crate::agent::AgentStatus::Done => {
+                format!("⏱ 后台任务完成 · {first}\n\n{}", c.render())
+            }
+            Ok(c) => format!("⚠️ 后台任务未完成（{}）· {first}\n\n{}", c.status.as_str(), c.render()),
+            Err(e) => format!("⚠️ 后台任务失败 · {first}\n{e}"),
+        };
+        let _ = self.reply(&chat, &msg).await;
+    }
+}
+
+/// 子 run 的审批门：**永不打扰人**。
+///
+/// 策略照旧生效，只是 `ask` 一律按拒绝处理——子 agent 没有通道，
+/// 让它弹审批等于绕过治理（D19）。拒绝会走 Runner 的 denied 分支，
+/// 子模型看到的是"已拒绝执行"，而不是一个挂住的 run。
+struct ChildGate<'a> {
+    tools: &'a ToolRegistry,
+    policy: &'a crate::policy::ApprovalPolicy,
+}
+
+#[async_trait::async_trait]
+impl crate::runner::ApprovalGate for ChildGate<'_> {
+    async fn ask(
+        &self,
+        _conv: &ConversationId,
+        _call: &CallId,
+        tool: &str,
+        _args: &serde_json::Value,
+    ) -> Result<bool, String> {
+        let domain = self
+            .tools
+            .get(tool)
+            .map(|t| t.domain())
+            .unwrap_or(crate::policy::Domain::Sandbox);
+        match self.policy.verdict(tool, domain) {
+            crate::policy::Verdict::Allow => Ok(true),
+            crate::policy::Verdict::Deny => Ok(false),
+            crate::policy::Verdict::Ask => {
+                tracing::info!(tool, "child agent cannot request approval; denied");
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// 运行中的子 agent（`/agents` 用）。只活在内存里：重启后子 run 已经由
+/// `run.finished(interrupted)` 收尾，不需要跨进程恢复这张表。
+struct RunningAgent {
+    parent_conv: String,
+    task: String,
+    started_ms: i64,
+    cancel: CancellationToken,
+}
+
+/// 派发名额的 RAII 计数：任何退出路径（含 `?`）都会减回去。
+struct SlotGuard {
+    map: Arc<Mutex<HashMap<String, usize>>>,
+    key: String,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.map.lock() {
+            if let Some(n) = m.get_mut(&self.key) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.key);
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S, D> {
+    async fn spawn(
+        &self,
+        spec: crate::agent::AgentSpec,
+        cancel: CancellationToken,
+    ) -> Result<crate::agent::Conclusion, crate::agent::AgentError> {
+        use crate::agent::{clip_summary, split_pending, AgentError, AgentStatus, Conclusion};
+
+        let limits = &self.cfg.agents;
+        if !limits.enabled {
+            return Err(AgentError::Disabled);
+        }
+        if let Some(msg) = self.budget_exceeded().await {
+            return Err(AgentError::Other(msg));
+        }
+        // 单层拓扑：只接受 1，其余一律拒绝（不在"再放松一点"上留口子）。
+        if spec.depth != 1 {
+            return Err(AgentError::Depth(spec.depth));
+        }
+
+        // 角色：只能从配置/角色目录取，模型只能点名。拼错就报错，不静默回退到 inherit。
+        let effective = self.effective_roles();
+        let role_name = spec.profile.name.trim();
+        let role = if role_name.is_empty() || role_name == "inherit" {
+            None
+        } else {
+            Some(effective.get(role_name).ok_or_else(|| {
+                AgentError::Other(format!(
+                    "未知角色：{role_name}（[agents.roles] 里没有配置）"
+                ))
+            })?)
+        };
+
+        // 名额：先占再减，任何早退都会经 SlotGuard 释放。
+        let _slot = {
+            let mut m = self.agent_slots.lock().unwrap();
+            let n = m.entry(spec.parent_run.0.clone()).or_insert(0);
+            if *n >= limits.max_per_run {
+                return Err(AgentError::Quota(limits.max_per_run));
+            }
+            *n += 1;
+            SlotGuard { map: Arc::clone(&self.agent_slots), key: spec.parent_run.0.clone() }
+        };
+
+        // agent 车道：同一时刻只跑一个子 agent（SBC 上 CPU 与模型连接都要让给前台）。
+        let _agent_lane = self
+            .cfg
+            .lanes
+            .acquire(crate::lanes::Lane::Agent, &cancel)
+            .await
+            .map_err(|_| AgentError::Cancelled)?;
+
+        // 子会话 id：可以用入队时预分配的，但必须确实是本父会话名下的，
+        // 否则等于让调用方指定任意会话（跨会话串数据）。
+        let prefix = format!("sub:{}#", spec.parent_conv);
+        let child_conv = match spec.child_conv.as_deref() {
+            Some(c) if c.starts_with(&prefix) => c.to_owned(),
+            _ => {
+                let seq = {
+                    let mut m = self.agent_seq.lock().unwrap();
+                    let n = m.entry(spec.parent_conv.clone()).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                format!("{prefix}{seq}")
+            }
+        };
+        let child_run = RunId(format!("{child_conv}-a{}", now_ms()));
+
+        // 父账本：先把"派出去了"写下来，崩溃时才能对上号（D3）。
+        {
+            let mut tx = self.store.begin_write().await.map_err(|e| AgentError::Other(e.to_string()))?;
+            tx.append(NewEvent {
+                conv: ConversationId(spec.parent_conv.clone()),
+                run: spec.parent_run.clone(),
+                turn: None,
+                kind: EventKind::AgentSpawned,
+                payload: serde_json::json!({
+                    "child_conv": child_conv,
+                    "child_run": child_run.0,
+                    "role": if role_name.is_empty() { "inherit" } else { role_name },
+                    "task": clip_summary(&spec.task),
+                    "depth": spec.depth,
+                }),
+                dedupe_key: Some(format!("agent-spawned-{}", child_run.0)),
+            })
+            .await
+            .map_err(|e| AgentError::Other(e.to_string()))?;
+            tx.commit().await.map_err(|e| AgentError::Other(e.to_string()))?;
+        }
+
+        // 工具集三层收窄：`[agents] tools` → 角色 → profile。只能更窄，不能更宽。
+        // `only()` 内部还会剔掉 tier ≥ 1（含 delegate），递归在工具集这层也不可能。
+        let mut allowed: Vec<String> = match role.and_then(|r| r.tools.as_ref()) {
+            Some(role_tools) => limits
+                .tools
+                .iter()
+                .filter(|n| role_tools.contains(n))
+                .cloned()
+                .collect(),
+            None => limits.tools.clone(),
+        };
+        if let Some(names) = &spec.profile.tools {
+            allowed.retain(|n| names.contains(n));
+        }
+        let child_tools = self.tools.only(&allowed);
+
+        let mut system = spec
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| self.cfg.system_prompt.clone());
+        // 接手背景：只给上次的结论与产物，不给整段历史——省 token，也不污染角色提示。
+        if let Some(src) = spec.continue_from.as_deref() {
+            if let Some((label, brief)) = self.prior_brief(src).await {
+                system.push_str(&format!(
+                    "\n\n【接手说明】这是继续之前的工作（来源：{label}），不要从零开始。\n\
+                     上次的进展（节选）：\n{brief}\n\
+                     先确认这些成果还在（/ws 下的文件、已落盘的产物），能复用就直接复用；\
+                     缺什么补什么，不要重复已经做完的步骤。"
+                ));
+            } else {
+                tracing::info!(source = src, "continue_from 找不到可复用的进展，按新任务处理");
+            }
+        }
+
+        // 角色段追加在父前缀之后：前缀字节不变，provider 的 prompt cache 还能命中。
+        if let Some(prompt) = role.and_then(|r| r.system_prompt.as_ref()) {
+            if !prompt.trim().is_empty() {
+                system.push_str("\n\n");
+                system.push_str(prompt.trim());
+            }
+        }
+        system.push_str(
+            "\n\n你现在是子 agent（depth 1），只做下面这一件事。\n\
+             - 你看不到父会话的历史：缺信息就写进结论，不要猜。\n\
+             - 需要用户确认、发消息、打印、装依赖、改配置的动作你做不到，也不要去试。\n\
+             - 最终回复只写结论，不要复述过程，固定这个形状：\n\
+             结论：<做了什么、查到什么，用户能直接读>\n\
+             产物：<路径，没有就写「无」>\n\
+             [待父执行]\n\
+             - <需要父会话替你完成的动作，如 publish_skill(name)；没有就写「- 无」>\n",
+        );
+        if !spec.inputs.is_empty() {
+            system.push_str("\n可用输入（/ws 下的文件）：\n");
+            for p in &spec.inputs {
+                system.push_str("- ");
+                system.push_str(p);
+                system.push('\n');
+            }
+        }
+
+        let pick = |explicit: u64, role: u64, default: u64| {
+            if explicit > 0 {
+                explicit
+            } else if role > 0 {
+                role
+            } else {
+                default
+            }
+        };
+        let max_turns = pick(
+            spec.max_turns as u64,
+            role.map(|r| r.max_turns).unwrap_or(0) as u64,
+            limits.max_turns as u64,
+        ) as u32;
+        let max_tokens = pick(
+            spec.max_tokens,
+            role.map(|r| r.max_tokens).unwrap_or(0),
+            limits.max_tokens,
+        );
+        let wall_ms = pick(spec.wall_ms, role.map(|r| r.wall_ms).unwrap_or(0), limits.wall_ms);
+        let model = spec
+            .profile
+            .model
+            .clone()
+            .or_else(|| role.and_then(|r| r.model.clone()))
+            .unwrap_or_else(|| self.cfg.model.clone());
+
+        let req = RunRequest {
+            conv: ConversationId(child_conv.clone()),
+            run: child_run.clone(),
+            text: spec.task.clone(),
+            model,
+            max_turns,
+            wall_clock_ms: wall_ms,
+            system_prompt: Some(system),
+            actor: "agent".into(),
+            images: Vec::new(),
+            workspace: Workspace { run: child_run.clone(), root: self.cfg.workspace_root.clone() },
+            context_budget_chars: self.cfg.context_budget_chars,
+            token_budget: Some(max_tokens),
+        };
+
+        let docs = StoreDocs { store: &*self.store };
+        let gate = ChildGate { tools: &child_tools, policy: &self.cfg.policy };
+        let runner = Runner {
+            store: &*self.store,
+            driver: &*self.driver,
+            tools: &child_tools,
+            env: &*self.env,
+            lanes: &self.cfg.lanes,
+            spawner: None, // 结构上禁止递归
+            gate: Some(&gate),
+            outbox: None, // 子 agent 不能直接发文件
+            docs: Some(&docs),
+        };
+
+        // 子 run 的进度进一个没人读的通道：View 是全量快照，丢事件不影响正确性。
+        let pair = EventSink::channel(64);
+        drop(pair.rx);
+
+        // 独立取消令牌：父取消照样联动（linker），但 `/agents cancel` 也能只杀子任务。
+        let child_cancel = CancellationToken::new();
+        let link = {
+            let parent = cancel.clone();
+            let child = child_cancel.clone();
+            tokio::spawn(async move {
+                parent.cancelled().await;
+                child.cancel();
+            })
+        };
+        self.agents_running.lock().unwrap().insert(
+            child_conv.clone(),
+            RunningAgent {
+                parent_conv: spec.parent_conv.clone(),
+                task: clip_summary(&spec.task),
+                started_ms: now_ms(),
+                cancel: child_cancel.clone(),
+            },
+        );
+
+        let res = runner.run(req, pair.sink, child_cancel).await;
+        self.agents_running.lock().unwrap().remove(&child_conv);
+        link.abort();
+        let (status, summary) = match res {
+            Ok(out) => {
+                let status = match out.status {
+                    RunStatus::Done => AgentStatus::Done,
+                    RunStatus::Cancelled => AgentStatus::Cancelled,
+                    RunStatus::Failed => AgentStatus::Failed,
+                };
+                (status, out.text)
+            }
+            Err(crate::runner::RunnerError::Budget(m)) => {
+                let status = if m.contains("wall clock") {
+                    AgentStatus::Timeout
+                } else {
+                    AgentStatus::Budget
+                };
+                (status, format!("子任务中止：{m}"))
+            }
+            Err(crate::runner::RunnerError::Engine(crate::error::EngineError::Cancelled)) => {
+                (AgentStatus::Cancelled, "子任务被取消".to_owned())
+            }
+            Err(e) => (AgentStatus::Failed, format!("子任务失败：{e}")),
+        };
+
+        let (body, pending) = split_pending(&summary);
+        let conclusion = Conclusion {
+            status,
+            summary: clip_summary(if body.trim().is_empty() { &summary } else { &body }),
+            child_conv: child_conv.clone(),
+            child_run: child_run.0.clone(),
+            artifacts: Vec::new(),
+            pending_actions: pending,
+            usage: crate::driver::UsageSnapshot::default(),
+        };
+
+        if let Ok(mut tx) = self.store.begin_write().await {
+            let _ = tx
+                .append(NewEvent {
+                    conv: ConversationId(spec.parent_conv.clone()),
+                    run: spec.parent_run.clone(),
+                    turn: None,
+                    kind: EventKind::AgentConcluded,
+                    payload: serde_json::json!({
+                        "child_conv": child_conv,
+                        "child_run": conclusion.child_run,
+                        "status": conclusion.status.as_str(),
+                        "summary": conclusion.summary,
+                        "pending_actions": conclusion.pending_actions,
+                    }),
+                    dedupe_key: Some(format!("agent-concluded-{}", conclusion.child_run)),
+                })
+                .await;
+            let _ = tx.commit().await;
+        }
+
+        Ok(conclusion)
     }
 }
 

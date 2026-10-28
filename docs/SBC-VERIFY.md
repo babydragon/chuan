@@ -19,7 +19,7 @@
       离线：`--unshare-all`
       联网：`--unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try`
       （⚠️ 0.11 若没有 `--unshare-cgroup-try`，联网 lane 要换写法）
-- [ ] cgroup v2 unified，`memory` / `pids` 控制器可写（systemd `Delegate=yes`）
+- [ ] cgroup v2 unified，`memory` / `pids` 控制器可写（systemd `Delegate=yes`）——**细则见 §10，触发式暂缓**
 - [x] `python3 -m venv` 可用（**2026-10-27 实测**：默认未装，`apt install python3-venv` 后可用）
 - [x] 沙盒冷启动耗时（**2026-10-27 实测**：`exec ls /home` 工具侧 39ms，含 `ls` 本身；开发机约 30ms）
 - [ ] （可选）`node` / `npm` 在 `/usr/bin` 下；否则 `install_deps(npm)` 会明确报"找不到"
@@ -146,6 +146,81 @@
 
 ---
 
+## 10. per-exec cgroup 限额（P4 前置 · 触发式暂缓）
+
+**现在不验，也不实现。** 触发条件（满足任一）：
+
+1. 需要在沙盒里**编译或安装带 C 扩展的 Python 模块**（`pip install numpy/scipy/pillow` 之类），
+   或跑 `cargo` / `npm` 构建；
+2. 出现过一次"某个 `exec` 把服务拖进 OOM"或 TG 在编译期间完全无响应；
+3. P4.3 后台任务上线之前（长任务无人盯，必须有硬限）。
+
+粒度为**一次 `exec` 一个 cgroup**（`exec-<call_id>/`），理由：
+
+- 与现有取消边界一致：`sandbox.rs` 的 `setsid()` + `kill(-pid)` + `--unshare-pid` 都是按单次 exec 切的；
+- 归因：`memory.events` 的 `oom_kill` 能直接记到对应 `tool.call_finished`；
+- 生命周期：exec 结束即可 `cgroup.kill` + `rmdir`，不留记账残渣；
+- 子 agent 不需要自己的 cgroup：它的每次 exec 天然各有一组，agent 级并发由 `agent` lane 管。
+
+**验证项**（做的时候逐条勾，记录实测值）：
+
+- [ ] unit 加 `Delegate=yes` 后，daemon 能在 `/sys/fs/cgroup/<service>/` 下建子组并写 `cgroup.subtree_control`
+- [ ] `cgroup.controllers` 含 `memory` `pids`；`memory.max` / `pids.max` / `memory.swap.max` 可写
+- [ ] `cgroup.kill` 可用（kernel ≥5.14）；不可用时降级为遍历 `cgroup.procs` 发 SIGKILL 并记录降级
+- [ ] 单次 exec 建 `exec-<call_id>/`：bwrap 启动后 `cgroup.procs` 有 PID，孙进程也在同一组
+      （**顺序**：spawn 前建组 → `sh -c 'echo $$ > <cg>/cgroup.procs; exec bwrap …'`；
+      不能 spawn 后再写，`--unshare-pid` 之后 fork 出来的会漏）
+- [ ] `memory.max=512M`：`python3 -c "x=bytearray(600*1024*1024)"` 被杀，服务不 OOM，
+      该次 `tool.call_finished` 里能看到 `oom_kill`
+- [ ] `/tmp` 的 256MB tmpfs **计入本组内存**：写满 `/tmp` 只限住本组，服务 `MemoryMax=1G` 不受影响
+- [ ] `pids.max=64`：fork 炸弹被截断，TG 仍能响应（不靠服务级 1G 兜底）
+- [ ] 编译 lane 的技能用 768M 跑一次 `pip install`（带 C 扩展）：成功并记录 `memory.peak`
+- [ ] 连续 50 次 exec 后 `/sys/fs/cgroup/<service>/` 下无 `exec-*` 残留
+- [ ] 取消/超时路径：`cgroup.kill` 后 `cgroup.procs` 为空，**包括 `setsid` 逃逸的孙进程**
+      （这是 `killpg` 唯一漏掉的形态）
+- [ ] 无 `memory` 控制器时进入降级：`/status` 可见，错误信息明说"无内存限额"，不静默放行
+
+**实现要点（做的时候照这个走）**
+
+1. 服务 cgroup 路径从 `/proc/self/cgroup` 读，不写死 `system.slice`。
+2. 组内限额：`memory.max=512M`、`pids.max=64`、`memory.swap.max=0`；编译 lane 单独 768M。
+3. `/tmp` tmpfs 与进程内存共用同一额度，512M 里要给那 256M 留位置。
+4. 收尾顺序：`cgroup.kill` → `kill_group(pid)` 兜底 → 读 `memory.peak` / `memory.events` 写账本 → `rmdir`。
+5. 降级必须**可见**（D5：沙盒降级必须收紧），不允许静默。
+
+---
+
+
+## 11. 子 agent 与后台任务（P4）
+
+**板上验证入口**：Telegram 对话 + 库里的账本（没有 CLI 通道）。
+查库：`sqlite3 /var/lib/chuan/chuan.db`（按你的 `[storage] db` 改）。
+
+- [ ] 前台委托：让它"派一个子 agent 读 /ws 下的大文件并给结论"
+      → 父回复是一条结论；`select conv_id,count(*) from journal where conv_id like 'sub:%' group by 1;` 有子会话
+- [ ] 子 agent 工具集：让它派子 agent 去"发布技能"或"调 http"
+      → 子 agent 应立刻收到"已拒绝执行"，**不弹审批卡**（`select name,status,preview from tool_calls where conv_id like 'sub:%';`）
+- [ ] 结论截断：让子 agent 写一段很长的结论 → 父上下文只看到 ≤2000 字 + 子会话引用
+- [ ] `[待父执行]`：子 agent 停在"需要发布技能"→ 父收到清单并能接着做（审批卡出现）
+- [ ] 角色注册：`role add coder …` → 审批卡上能看到**工具、模型、提示词开头**；批准后
+      `ls ~/.config/chuan/roles/` 有 `coder.toml` + `coder.md`；**不重启**再用 `role=coder` 能生效
+- [ ] 角色热加载：直接改 `roles/coder.md` → 下一次 delegate 就带新提示词（不用重启）
+- [ ] 角色越权：把 `publish_skill` 写进角色 tools → 实际工具集里没有它（三层收窄）
+- [ ] 后台任务：`background=true` → 立刻返回任务号；`/tasks` 可见；前台静默后开跑，完成后推结论
+- [ ] 不抢前台：后台任务 pending 时连续发消息 → 任务不启动（`background_idle_s`）
+- [ ] 重启打断：后台任务运行中 `systemctl restart chuan`
+      → 收到"被重启打断"；`/tasks retry <id>` 能带上次进展重排（新任务显示"续 task-xxx"）
+- [ ] 接手简报：retry 后子 agent 应复用 `/ws` 里已有产物，而不是从头再来（看它的第一轮工具调用）
+- [ ] 用量归属：`select agent,sum(prompt_tokens),sum(completion_tokens) from usage_rollup group by agent;`
+      → 有 `main` 与 `agent` 两行；`/usage` 出现"其中子 agent 今日 X"
+- [ ] token 预算：`daily_tokens` 设一个很小的值 → 下一条消息直接回"额度已用完"，不调模型
+- [ ] `nice 19`：pinned 任务或 `install_deps` 运行期间 `ps -o pid,ni,cmd -C python3` → `ni=19`
+- [ ] 派活判断（不滥派）：一句能答的问题（"现在几点"）**不应**派出子 agent
+      （`select count(*) from journal where kind='tool.call_started' and json_extract(payload,'$.name')='delegate';`）
+- [ ] 派活判断（该派就派）：让它读一个 50KB 的文件并总结 → 应派子 agent，而不是把全文读进主上下文
+- [ ] 后台任务期间问答：后台任务运行中继续发消息 → 能正常回复（首字可能被子 agent 当前这一轮挡住）
+- [ ] 完成后追问：后台任务完成后问"刚才那个任务结果" → 模型能复述（说明 `agent_task_done` 进了账本）
+
 ## 已在开发机验证、板上只需复核环境差异的项
 
 | 项 | 开发机结论 | 板上要看什么 |
@@ -185,10 +260,12 @@
 
 ### 待实现 / 已知缺口
 
-- ⚠️ **per-sandbox cgroup 限制未实现**：不变量 8 与 `docs/DESIGN.md` 写的是"cgroup 内存与 pids 硬限"，
+- ⚠️ **per-exec cgroup 限制未实现**：不变量 8 与 `docs/DESIGN.md` 写的是"cgroup 内存与 pids 硬限"，
   实际代码只有 systemd `MemoryMax=1G` 兜底 + 沙盒 `/tmp` 256MB 上限。缺单次 `exec` 的
-  `memory.max` / `pids.max`——一个 fork 炸弹仍能在 1G 内把服务拖垮。实现方式待定
-  （per-exec `systemd-run --scope` 需要 user manager；或直接写 cgroup v2）。
+  `memory.max` / `pids.max`——一个 fork 炸弹仍能在 1G 内把服务拖垮。
+  **粒度已定：一次 `exec`（一次 bwrap 进程树）一个 cgroup**，不是每个子 agent 一个、也不是每个 run 一个
+  （理由与做法见 §10）。**当前不实现**：pid namespace + `--die-with-parent` 已能保证"杀得干净"，
+  缺的是内存/pids 的**记账与归因**；等真遇到"沙盒里编译/装 Python 模块"这类大内存任务再上。
 - ⚠️ **`web_fetch` 遇 Cloudflare 挑战**：403 + `cf-mitigated: challenge` 时模型无从判断，
   会改用 `lan_exec` + `r.jina.ai` 兜底。可考虑在 403 且带该响应头时给一句"该站有反爬，可换源"。
 
@@ -205,4 +282,5 @@
 | **需要破坏性演练** | `kill -9` 恢复；备份/恢复到新库 |
 | **依赖你的设备/场景** | 实际打印与耗材；`network: true` 技能；视觉（当前 `[vision] enabled=false`）；`LoadCredentialEncrypted`（出厂用明文）；Telegram 是否经代理 |
 | **代码已测但没在板上单独验** | `cargo zigbuild`（CI 已跑，板上未本地编）；cgroup v2 可写；`node`/`npm`；Debian `dist-packages` 路径；`security: token_file` 校验；`rollback_skill` |
+| **触发式暂缓** | per-exec cgroup 全套（§10）：等"沙盒里编译/装带 C 扩展的 Python 模块"或 P4.3 后台任务上线前再做 |
 | **明确放弃** | 关机错过 3h 不补跑（见 §6） |

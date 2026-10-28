@@ -118,6 +118,20 @@ pub fn now_line(ts: Timestamp, tz_min: i32) -> String {
     )
 }
 
+/// 本地「今天 00:00」的时间戳（用于 `/usage` 的日统计）。
+pub fn local_day_start(now: Timestamp, tz_min: i32) -> Timestamp {
+    let tz = tz_min as i64 * 60_000;
+    local_day(now, tz) * DAY_MS - tz
+}
+
+/// 本地「本月 1 日 00:00」的时间戳。
+pub fn local_month_start(now: Timestamp, tz_min: i32) -> Timestamp {
+    let tz = tz_min as i64 * 60_000;
+    let day = local_day(now, tz);
+    let (y, m, _) = civil_from_days(day);
+    days_from_civil(y, m, 1) * DAY_MS - tz
+}
+
 /// 反查：`timestamp` → 本地 (年, 月, 日, 时, 分)
 pub fn format_local(ts: Timestamp, tz_min: i32) -> String {
     let tz = tz_min as i64 * 60_000;
@@ -298,5 +312,22 @@ mod tests {
         let t = at(2026, 10, 26, 9, 0);
         assert_eq!(fmt(t), "2026-10-26 09:00");
         assert_eq!(parse_local_dt("2026-10-26T09:00", 480).unwrap(), t);
+    }
+
+    #[test]
+    fn day_and_month_starts_are_local() {
+        let t = at(2026, 10, 28, 11, 20);
+        assert_eq!(format_local(local_day_start(t, 480), 480), "2026-10-28 00:00");
+        assert_eq!(format_local(local_month_start(t, 480), 480), "2026-10-01 00:00");
+
+        // 月初凌晨：跨月边界不能退到上个月
+        let t = at(2026, 11, 1, 0, 5);
+        assert_eq!(format_local(local_month_start(t, 480), 480), "2026-11-01 00:00");
+        // UTC 下 11-01 00:05+08:00 仍是 10-31
+        assert_eq!(format_local(local_day_start(t, 480), 480), "2026-11-01 00:00");
+        // 负偏移也要对（不做 DST，只验算术）：本地 2026-01-01 00:30（UTC-05:00）
+        let t = local_ts(days_from_civil(2026, 1, 1), 0, 30, -300 * 60_000);
+        assert_eq!(format_local(local_day_start(t, -300), -300), "2026-01-01 00:00");
+        assert_eq!(format_local(local_month_start(t, -300), -300), "2026-01-01 00:00");
     }
 }

@@ -347,11 +347,17 @@ impl ExecutionEnv for BwrapEnv {
             .stderr(Stdio::piped());
         cmd.kill_on_drop(true);
 
-        // 独立进程组，超时才能杀掉整棵树
+        // 独立进程组，超时才能杀掉整棵树；编译/装包类任务降优先级，
+        // 避免把 TG 长轮询与 timer 饿到秒级抖动（D11）。
+        let nice = opts.nice;
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 if libc::setsid() == -1 {
                     return Err(io::Error::last_os_error());
+                }
+                if nice {
+                    // 尽力而为：nice 失败（权限/平台）不该让任务跑不起来。
+                    libc::setpriority(libc::PRIO_PROCESS, 0, 19);
                 }
                 Ok(())
             });

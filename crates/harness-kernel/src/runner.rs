@@ -14,6 +14,7 @@ use crate::env::ExecutionEnv;
 use crate::error::StoreError;
 use crate::event::{EventKind, NewEvent};
 use crate::ids::{ConversationId, RunId, Timestamp, TurnId, now_ms};
+use crate::lanes::{Lane, Lanes};
 use crate::record::{Doc, DocWrite, ToolCallRecord, UsageRecord};
 use crate::store::Store;
 use crate::tool::{ToolCallRequest, ToolCtx};
@@ -37,6 +38,9 @@ pub struct RunRequest {
     pub images: Vec<crate::driver::ImagePart>,
     /// 历史裁剪预算（估算字符数）；超出后按"轮"整组丢弃旧内容
     pub context_budget_chars: usize,
+    /// token 预算（prompt+completion 累计）。None = 不限。
+    /// 子 agent 用它兜住"跑飞"（D20）。
+    pub token_budget: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -79,6 +83,10 @@ pub struct Runner<'a, S: Store, D: TurnDriver> {
     pub driver: &'a D,
     pub tools: &'a ToolRegistry,
     pub env: &'a dyn ExecutionEnv,
+    /// 并发车道（D11）。所有 run 共享同一组信号量。
+    pub lanes: &'a Lanes,
+    /// 子 agent 派生入口。`None` = 本 run 不能派生（子 agent 自身 / 定时任务）。
+    pub spawner: Option<&'a dyn crate::agent::AgentSpawner>,
     pub gate: Option<&'a dyn ApprovalGate>,
     pub outbox: Option<&'a dyn crate::tool::Outbox>,
     pub docs: Option<&'a dyn crate::tool::DocReader>,
@@ -157,6 +165,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             )
             .await?;
 
+        let system_prompt: &str = req.system_prompt.as_deref().unwrap_or("");
         let mut turn_no: u32 = 0;
         let mut recorded_usage: usize = 0;
 
@@ -191,8 +200,28 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             tx.commit().await?;
 
             turn_sink.emit(crate::driver::StreamEvent::TurnStarted { turn_no });
-            let step = turn.step().await;
+            // 模型请求走 external 车道：这是 provider 侧限流的第一道闸，
+            // 也保证一个长编译不会和三个 run 的推理抢同一张网卡。
+            let step = {
+                let permit = self.lanes.acquire(Lane::External, &cancel).await;
+                if permit.is_err() {
+                    return self.finish_interrupted(&conv, &run, turn_no, "cancelled").await;
+                }
+                turn.step().await
+            };
             self.record_usage(&mut *turn, &conv, &run, &mut recorded_usage).await?;
+            if let Some(limit) = req.token_budget {
+                let used: u64 = turn
+                    .usage()
+                    .records
+                    .iter()
+                    .map(|u| u.prompt_tokens as u64 + u.completion_tokens as u64)
+                    .sum();
+                if used > limit {
+                    self.finish_interrupted(&conv, &run, turn_no, "token_budget").await?;
+                    return Err(RunnerError::Budget(format!("tokens {used}/{limit}")));
+                }
+            }
 
             match step {
                 Err(EngineError::Cancelled) => {
@@ -238,7 +267,10 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                         run: run.clone(),
                         turn: Some(turn_id.clone()),
                         kind: EventKind::TurnFinished,
-                        payload: serde_json::json!({ "stop_reason": format!("{finish:?}") }),
+                        payload: serde_json::json!({
+                            "stop_reason": format!("{finish:?}"),
+                            "attempts": turn.attempts(),
+                        }),
                         dedupe_key: None,
                     })
                     .await?;
@@ -280,6 +312,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                             &cancel,
                             &mut deadline,
                             &req.actor,
+                            system_prompt,
                             &tool_sink,
                         )
                         .await?;
@@ -356,6 +389,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         run_cancel: &tokio_util::sync::CancellationToken,
         deadline: &mut Option<Instant>,
         actor: &str,
+        system_prompt: &str,
         sink: &crate::driver::EventSink,
     ) -> Result<(), RunnerError> {
         let tool = self.tools.get(&call.name).ok_or_else(|| RunnerError::ToolNotFound(call.name.clone()))?;
@@ -414,9 +448,13 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             call: call.call.clone(),
             workspace,
             env: self.env,
+            system_prompt,
+            spawner: self.spawner,
             cancel: run_cancel.clone(),
         };
-        // 工具若不理会取消令牌，这里也要能立刻退出
+        // 工具若不理会取消令牌，这里也要能立刻退出。
+        // 车道许可同理：排队期间被取消，token 已触发，直接走下面的取消分支。
+        let _lane_permit = self.lanes.acquire(tool.lane(), run_cancel).await.ok();
         let result = tokio::select! {
             r = tool.execute(call.args.clone(), &ctx) => r,
             _ = run_cancel.cancelled() => {

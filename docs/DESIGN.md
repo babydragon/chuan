@@ -47,7 +47,7 @@
 | 看图 / 文档 | 媒体下载、内容块、上下文预算 | L1 L4 L5 |
 | 打印 / 定时提醒 | 宿主特权工具、持久化调度、跨重启补跑 | L5 L9 |
 | 越用越强 | 技能扫描、渐进披露、沉淀闸门、回滚 | L4 L5 L7 |
-| 子 agent / 长任务 | 派生、上下文隔离、结论回传、后台任务（**未实现**） | L9 |
+| 子 agent / 长任务 | 派生、上下文隔离、结论回传、后台任务（**P4，设计见 D19/D20**） | L9 |
 | 单板无冗余机器 | 资源硬限、并发按 lane、降级模式 | L6 L10 |
 | 未来知识库 | 检索抽象、ACL 前置、可重建索引 | L4 L8 |
 
@@ -83,8 +83,9 @@
 | **Turn Loop** | 模型⇄工具循环；最大轮次/总时长/token 预算；中断即落库 | 不写"智能"重试 |
 | 状态恢复 | 崩溃点分级（`DECISIONS.md` D4）；lease 过期标 interrupted | 不追求逐 token 续写 |
 | 任务调度 | 持久化 sleep；到点触发；lease + attempts；错过补跑 | 不用系统 cron |
-| 子 agent | 派生独立会话；只回传结论；失败上抛；禁止递归 | 不做对等网状协作 |
-| 长任务 | 后台执行、进度、取消、重启续跑 | 不对脚本内部 checkpoint |
+| 子 agent | 派生独立会话（`sub:<parent>#<n>`）；工具集 `tier=0`、不含 `delegate`；只回传 `Conclusion`（≤2000 字）；不得请求审批 | 不共享父历史、不做对等网状协作、不递归 |
+| 长任务 | 后台执行、进度、取消、重启续跑；doc `agent_task` 队列 + tick 领取 | 不对脚本内部 checkpoint |
+| 并发闸门 | `io=2` / `compile=1` / `external=1` / `agent=1`；后台任务让前台 | 不按请求数放开并发 |
 
 ### ③ 上下文（L4）
 
@@ -127,7 +128,7 @@
 | 策略 | 白名单；owner/member；路径护栏；**授权轴=能力边界** | 不按命令黑名单放行 |
 | 审批 | 仅能力越界时触发（打印/发送/宿主取网/改自身）；会话级 allow/always；TTL；频率熔断；单次消费；幂等键 | `External` 类不提供 always |
 | 副作用 | `Pure`/`Idempotent(key)`/`External`；执行前后记账 | 不假设工具幂等 |
-| 预算 | attempts、token、金额上限；超限直接拒绝 | 不静默降级 |
+| 预算 | attempts、token、金额上限；超限直接拒绝；子 agent 计入父 run 汇总（D20） | 不静默降级 |
 
 ### ⑦ 状态与记忆（L2 / L8）
 
@@ -204,6 +205,20 @@ remind(时间, 内容) → 写任务行 → 调度器 sleep 到期
 | 工具执行中 | 按副作用等级处理 |
 | 终稿已生成、未送达 | 直接重发 + 去重按钮 |
 
+### 7.5 一次委托（P4）
+
+```
+父 turn 决定 delegate(task, inputs)
+  → 闸门：depth / max_per_run / agent lane / 日预算
+  → 建子会话 sub:<parent>#<n> + 子 run（agent.spawned）
+  → 子 run：独立上下文（同一 system 前缀 + 任务书 + 空历史）、tier=0 工具集
+       ├─ 正常结束 → Conclusion（≤2000 字 + 产物引用 + usage）
+       ├─ 预算/超时 → Conclusion{status=budget|timeout}，不重试
+       └─ 取消（父 /cancel 或崩溃）→ 子 run.finished(cancelled|interrupted)
+  → agent.concluded + 父 msg.tool_result（只这一条进父上下文）
+  → usage 计入子会话明细与父 run 汇总
+```
+
 ---
 
 ## 8. 非功能要求
@@ -249,7 +264,8 @@ apps/cs/      ...
 
 - 不做多租户权限体系（只有 owner / member）。
 - 不做向量检索（触发条件见 `INTERFACES.md §3.4`）。
-- 不做对等多 agent 网络（拓扑单层）。
+- 不做对等多 agent 网络（拓扑单层、`depth ≤ 1`，见 D19）。
+- 不做子 agent 递归派生、共享父历史、代其申请审批。
 - 不做动态库热加载（扩展只有技能目录、子进程、MCP）。
 - 不做 TUI。
 - 不引入需要运维的中间件。

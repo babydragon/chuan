@@ -80,6 +80,8 @@ pub trait ReadTx: Send {
     async fn get_doc(&mut self, id: DocId) -> Result<Option<Doc>, StoreError>;
     async fn list_docs(&mut self, q: DocQuery) -> Result<Vec<Doc>, StoreError>;
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError>;
+    /// 同一时间窗内按主体拆分（主会话 / 子 agent）。`/usage` 与预算闸门都用它。
+    async fn usage_split(&mut self, since: Timestamp) -> Result<UsageSplit, StoreError>;
     async fn task(&mut self, id: TaskId) -> Result<Option<TaskRecord>, StoreError>;
     /// 恢复用：该会话里尚未 finished/abandoned 的调用。
     async fn tool_calls(&mut self, conv: ConversationId) -> Result<Vec<ToolCallRow>, StoreError>;
