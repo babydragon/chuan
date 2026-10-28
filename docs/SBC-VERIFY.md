@@ -54,6 +54,10 @@
       `lpstat -v` 给的是 `ipp://BRW4CD577B1850A.local:631/ipp/print`）
 - [ ] `http://192.168.x.x` 被 `web_fetch` 拒绝并留痕
 
+- [x] 沙盒里读不到凭据：`/etc/chuan/secrets` 在沙盒内是空的只读 tmpfs
+      （**2026-10-28 实测**：`ls` 为空、`cat` 报文件不存在、`touch` 报只读；
+      宿主上仍是 0750 root:chuan + 各文件按用途 0400/0440）
+
 ## 3. 出网与审计
 
 - [ ] `web_fetch` 取公网页面成功（TLS 根证书齐全；需要代理时生效）

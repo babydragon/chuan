@@ -234,9 +234,10 @@ impl Tool for HttpServiceTool {
             name: "http".into(),
             description: format!(
                 "调用配置好的第三方 HTTP 服务（鉴权由宿主注入，你不用也不能碰 token）。\
-可用服务：{}。\n**先 `playbook(\"<服务名>-api\")` 取接口规范，再调**：\
+可用服务：{}。\n**如果存在 `<服务名>-api` 的 playbook，先取它**（取不到就跳过，别反复试）；\
 这类服务通常只有一个入口路径（例如 `/api/agent/gateway`）+ 请求体内指定 `api_name`，\
-不要凭直觉拼 REST 路径（会 404）。只给 path，不要自己拼域名。",
+不要凭直觉拼 REST 路径（会 404）。只给 path，不要自己拼域名。\
+注意：`kind = \"mcp\"` 的服务要用 `mcp(server=…, tool=…)`，不是这个工具。",
                 if self.names().is_empty() { "（未配置）".to_owned() } else { self.names().join("、") }
             ),
             parameters: serde_json::json!({
