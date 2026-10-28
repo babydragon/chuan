@@ -854,6 +854,42 @@ fn bg_spec(task: &str) -> harness_kernel::AgentSpec {
 }
 
 /// 后台任务：入队 → 空闲时启动 → 跑完把结论推回原会话。
+
+/// 回归：`background=true` 走的是 trait 的 `enqueue`。
+/// 之前只实现了 `spawn`，trait 默认实现直接回"不支持后台任务"（真实事故）。
+#[tokio::test]
+async fn background_delegate_enqueues_via_trait() {
+    use harness_kernel::AgentSpawner;
+
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = task_actor(Arc::clone(&store), Arc::clone(&driver), Arc::clone(&channel), 0);
+
+    let id = actor.enqueue(bg_spec("后台跑一下")).await.expect("不应再报'不支持后台任务'");
+    assert!(id.starts_with("task-"), "{id}");
+    assert!(driver.seen.lock().unwrap().is_empty(), "入队不该立刻跑");
+
+    let docs = {
+        let mut rd = store.begin_read().await.unwrap();
+        rd.list_docs(harness_kernel::DocQuery {
+            scopes: vec!["task".into()],
+            kinds: vec!["agent_task".into()],
+            limit: 10,
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].payload["status"], "pending");
+    let first_child = docs[0].payload["child_conv"].as_str().unwrap_or("").to_owned();
+    assert!(first_child.starts_with("sub:fake:1000:0#"), "{first_child}");
+
+    // 再排一个：子会话号要递增，不能撞
+    let id2 = actor.enqueue(bg_spec("再排一个")).await.unwrap();
+    assert_ne!(id, id2);
+}
+
 #[tokio::test]
 async fn background_task_runs_and_pushes_result() {
     let store = Arc::new(EphemeralStore::new());
@@ -1060,6 +1096,84 @@ async fn actor_answers_slash_agents() {
 
 
 /// `/prompt` 能看到写死的核心段（不只是配置文件）。
+
+/// 以 `/` 开头的路径不是指令：`/ws/demo 里那个脚本…` 必须当普通文本处理。
+#[tokio::test]
+async fn path_like_command_is_treated_as_text() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![Step::Done {
+        text: "收到，我来看看".into(),
+        finish: FinishReason::Stop,
+    }]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 2,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: "SYS".into(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            budget: Default::default(),
+            roles: None,
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Command,
+        text: Some("/ws/demo 里那个脚本遇到空行会崩，帮我修好".into()),
+        dedupe_key: "u-path".into(),
+        callback_id: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    // 真正的拼错指令仍要提示
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Command,
+        text: Some("/statsu".into()),
+        dedupe_key: "u-typo".into(),
+        callback_id: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let delivered = channel.delivered.lock().unwrap().clone();
+    let all = delivered.join("\n");
+    assert!(all.contains("我来看看"), "路径开头的消息应进模型: {all}");
+    assert!(all.contains("未知指令"), "拼错的指令仍要提示: {all}");
+    assert_eq!(driver.seen.lock().unwrap().len(), 1, "只该跑一次模型");
+}
+
 #[tokio::test]
 async fn actor_answers_slash_prompt() {
     let store = EphemeralStore::new();

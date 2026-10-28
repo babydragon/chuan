@@ -92,6 +92,15 @@ pub struct Runner<'a, S: Store, D: TurnDriver> {
     pub docs: Option<&'a dyn crate::tool::DocReader>,
 }
 
+/// 任务句柄随作用域结束一起中止（后台协程不该比 run 活得久）。
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// 把各轮正文拼成终稿：空段落丢掉，段落之间空一行。
 fn join_said(parts: &[String]) -> String {
     parts
@@ -166,6 +175,18 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             .await?;
 
         let system_prompt: &str = req.system_prompt.as_deref().unwrap_or("");
+        // `/cancel` 必须能打断**正在飞**的模型请求，而不只是下一个轮次边界。
+        // 之前只在 loop 顶部检查 token，于是一次 60s 的思考要等它自然结束才停，
+        // 用户看到的就是"一直输入中、取消没反应"。
+        let _turn_link = AbortOnDrop(tokio::spawn({
+            let run = cancel.clone();
+            let turn_token = turn.canceller();
+            async move {
+                run.cancelled().await;
+                turn_token.cancel();
+            }
+        }));
+
         let mut turn_no: u32 = 0;
         let mut recorded_usage: usize = 0;
 
@@ -411,7 +432,9 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                 sink.emit(crate::driver::StreamEvent::ToolStarted {
                     call: call.call.clone(),
                     name: call.name.clone(),
-                    preview: String::new(),
+                    // 有 approval_hint 就用它（人话），否则留空。delegate 用它显示任务首行，
+                    // 否则前台委托期间用户只看到"第 N 轮 · 执行 delegate"，不知道在跑什么。
+                    preview: tool.approval_hint(&call.args).unwrap_or_default(),
                 });
             }
             if !allowed {

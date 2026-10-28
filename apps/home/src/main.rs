@@ -307,7 +307,9 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // 子 agent 委托（D19）。tier=1：子 agent 的工具集里没有它。
     tools.register(Arc::new(DelegateTool));
     // 角色管理（SelfModify → 逐次审批）：agent 可以注册"小弟"，主人批过才生效。
-    tools.register(Arc::new(RoleTool::new(&cfg.roles_dir)));
+    tools.register(Arc::new(
+        RoleTool::new(&cfg.roles_dir).with_allowed(cfg.agents.tools.clone()),
+    ));
 
     let driver = any_driver::build(
         &cfg.provider,

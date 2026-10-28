@@ -129,4 +129,11 @@ async fn passes_parent_prompt_and_depth_one() {
     let text = format!("{:?}", out.content);
     assert!(text.contains("查到了 42"), "{text}");
     assert!(text.contains("sub:c#1"), "结论应指出完整过程在哪: {text}");
+
+    // 前台委托会跑几十秒：工具轨迹要显示"在跑什么"
+    let hint = DelegateTool
+        .approval_hint(&serde_json::json!({"task":"读 /ws/a.md 并给出三条结论"}))
+        .unwrap();
+    assert!(hint.contains("跑子任务"), "{hint}");
+    assert!(hint.contains("读 /ws/a.md"), "{hint}");
 }

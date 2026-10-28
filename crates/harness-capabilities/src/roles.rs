@@ -25,7 +25,7 @@ use serde::Deserialize;
 const MAX_PROMPT: usize = 8_000;
 const MAX_NAME: usize = 32;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct RoleFile {
     description: Option<String>,
     model: Option<String>,
@@ -55,9 +55,13 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-fn load_role(dir: &Path, name: &str) -> Option<(String, RoleSpec)> {
+fn load_file(dir: &Path, name: &str) -> Option<RoleFile> {
     let text = std::fs::read_to_string(dir.join(format!("{name}.toml"))).ok()?;
-    let file: RoleFile = toml::from_str(&text).ok()?;
+    toml::from_str(&text).ok()
+}
+
+fn load_role(dir: &Path, name: &str) -> Option<(String, RoleSpec)> {
+    let file = load_file(dir, name)?;
     let prompt = std::fs::read_to_string(dir.join(format!("{name}.md")))
         .ok()
         .map(|p| p.trim_end().to_owned())
@@ -114,11 +118,33 @@ impl RoleSource for RoleTool {
 /// `role`：列 / 加 / 删。域是 `SelfModify`，每次都要人批。
 pub struct RoleTool {
     dir: PathBuf,
+    /// `[agents] tools` 白名单。用来在注册时提示"这个工具其实不会生效"。
+    allowed: Vec<String>,
 }
 
 impl RoleTool {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self { dir: dir.into(), allowed: Vec::new() }
+    }
+
+    /// 传入 `[agents] tools`：角色工具最终要与之取交集，交集之外的要明说。
+    pub fn with_allowed(mut self, allowed: Vec<String>) -> Self {
+        self.allowed = allowed;
+        self
+    }
+
+    fn effective(&self, tools: &[String]) -> Vec<String> {
+        if self.allowed.is_empty() {
+            return tools.to_vec();
+        }
+        tools.iter().filter(|t| self.allowed.contains(t)).cloned().collect()
+    }
+
+    fn blocked(&self, tools: &[String]) -> Vec<String> {
+        if self.allowed.is_empty() {
+            return Vec::new();
+        }
+        tools.iter().filter(|t| !self.allowed.contains(t)).cloned().collect()
     }
 
     fn list(&self) -> String {
@@ -247,10 +273,39 @@ impl RoleTool {
         if prompt.chars().count() > MAX_PROMPT {
             return Err(ToolError::new(ErrorCode::InvalidArgs, "prompt 太长（>8000 字）", false));
         }
-        if prompt.is_empty() && args["description"].as_str().unwrap_or("").trim().is_empty() {
+
+        let existed = load_file(&self.dir, name);
+        // 合并而不是覆盖：只改一个字段时，不要把没提到的预算/模型清空。
+        let mut file = existed.clone().unwrap_or_default();
+        if let Some(d) = args["description"].as_str() {
+            file.description = Some(d.to_owned());
+        }
+        if let Some(m) = args["model"].as_str() {
+            file.model = Some(m.to_owned());
+        }
+        if let Some(t) = args["tools"].as_array() {
+            // 列表是**整体替换**：说了哪些就是哪些（删工具也靠这个）。
+            file.tools = Some(
+                t.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
+        }
+        if let Some(n) = args["max_turns"].as_u64() {
+            file.max_turns = Some(n as u32);
+        }
+        if let Some(n) = args["max_tokens"].as_u64() {
+            file.max_tokens = Some(n);
+        }
+        if let Some(n) = args["wall_ms"].as_u64() {
+            file.wall_ms = Some(n);
+        }
+        if file.description.is_none() && file.tools.is_none() && prompt.is_empty() {
             return Err(ToolError::new(
                 ErrorCode::InvalidArgs,
-                "至少要给 description 或 prompt，否则角色没有意义",
+                "至少要给 description、tools 或 prompt 之一，否则角色没有意义",
                 false,
             ));
         }
@@ -259,43 +314,51 @@ impl RoleTool {
             .map_err(|e| ToolError::new(ErrorCode::Unavailable, format!("建角色目录失败: {e}"), false))?;
 
         // 先写提示词，再写 toml：反过来会出现"角色存在但没提示词"的短暂状态。
+        // prompt 没给就保留原来的（只想改工具时不必重贴提示词）。
         if !prompt.is_empty() {
             std::fs::write(self.dir.join(format!("{name}.md")), format!("{prompt}\n")).map_err(
                 |e| ToolError::new(ErrorCode::Unavailable, format!("写 {name}.md 失败: {e}"), false),
             )?;
         }
-        let mut toml_text = String::new();
-        if let Some(d) = args["description"].as_str() {
-            toml_text.push_str(&format!("description = {}\n", toml_str(d)));
-        }
-        if let Some(m) = args["model"].as_str() {
-            toml_text.push_str(&format!("model = {}\n", toml_str(m)));
-        }
-        if let Some(t) = args["tools"].as_array() {
-            let list: Vec<String> = t.iter().filter_map(|v| v.as_str()).map(toml_str).collect();
-            toml_text.push_str(&format!("tools = [{}]\n", list.join(", ")));
-        }
-        for key in ["max_turns", "max_tokens", "wall_ms"] {
-            if let Some(n) = args[key].as_u64() {
-                toml_text.push_str(&format!("{key} = {n}\n"));
-            }
-        }
         let path = self.dir.join(format!("{name}.toml"));
-        std::fs::write(&path, toml_text).map_err(|e| {
+        std::fs::write(&path, render_toml(&file)).map_err(|e| {
             ToolError::new(ErrorCode::Unavailable, format!("写 {} 失败: {e}", path.display()), false)
         })?;
 
         // 自检：写出去的东西必须能被读回来，否则等于悄悄失败。
-        match load_role(&self.dir, name) {
-            Some(_) => Ok(format!(
-                "已注册角色 `{name}`。\n下一次 delegate(role=\"{name}\") 即可用；`/agents` 之外不需要重启。"
-            )),
-            None => Err(ToolError::new(
+        if load_role(&self.dir, name).is_none() {
+            return Err(ToolError::new(
                 ErrorCode::Internal,
                 "角色文件写成功但读不回来（格式错误），请检查",
                 false,
-            )),
+            ));
         }
+
+        let tools = file.tools.clone().unwrap_or_default();
+        let mut out = format!(
+            "{}角色 `{name}`。\n",
+            if existed.is_some() { "已更新" } else { "已注册" }
+        );
+        if !tools.is_empty() {
+            out.push_str(&format!("工具：{}\n", tools.join(" / ")));
+            let blocked = self.blocked(&tools);
+            if !blocked.is_empty() {
+                // 最要命的一种"以为生效"：角色写了 http，但白名单里没有。
+                out.push_str(&format!(
+                    "⚠️ 这些工具不在 `[agents] tools` 白名单里，实际不会生效：{}\n\
+                     （要放开只能改主配置——那是根信任，agent 改不了。）\n",
+                    blocked.join(" / ")
+                ));
+            }
+        }
+        let effective = self.effective(&tools);
+        if !effective.is_empty() && effective.len() != tools.len() {
+            out.push_str(&format!("实际可用：{}\n", effective.join(" / ")));
+        }
+        out.push_str(&format!(
+            "下一次 delegate(role=\"{name}\") 即可用，不需要重启；`/prompt` 里的角色清单会同步更新。"
+        ));
+        Ok(out)
     }
 
     fn remove(&self, args: &serde_json::Value) -> Result<String, ToolError> {
@@ -317,6 +380,31 @@ impl RoleTool {
         let _ = std::fs::remove_file(&md_path);
         Ok(format!("已删除角色 `{name}`。"))
     }
+}
+
+/// 把合并后的结构写回 TOML。只写有值的字段。
+fn render_toml(f: &RoleFile) -> String {
+    let mut out = String::new();
+    if let Some(d) = &f.description {
+        out.push_str(&format!("description = {}\n", toml_str(d)));
+    }
+    if let Some(m) = &f.model {
+        out.push_str(&format!("model = {}\n", toml_str(m)));
+    }
+    if let Some(t) = &f.tools {
+        let list: Vec<String> = t.iter().map(|s| toml_str(s)).collect();
+        out.push_str(&format!("tools = [{}]\n", list.join(", ")));
+    }
+    if let Some(n) = f.max_turns {
+        out.push_str(&format!("max_turns = {n}\n"));
+    }
+    if let Some(n) = f.max_tokens {
+        out.push_str(&format!("max_tokens = {n}\n"));
+    }
+    if let Some(n) = f.wall_ms {
+        out.push_str(&format!("wall_ms = {n}\n"));
+    }
+    out
 }
 
 /// TOML 基本字符串转义：引号、反斜杠、换行。

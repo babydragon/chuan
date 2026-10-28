@@ -40,6 +40,35 @@ fn short_tokens(n: u64) -> String {
     }
 }
 
+/// 已知指令（与 `telegram::command_specs` 保持一致；漏一个就只是"未知指令"提示，不会误执行）。
+fn is_known_command(name: &str) -> bool {
+    matches!(
+        name,
+        "start"
+            | "help"
+            | "new"
+            | "cancel"
+            | "status"
+            | "usage"
+            | "prompt"
+            | "agents"
+            | "tasks"
+            | "facts"
+            | "reminders"
+            | "forget"
+            | "approve"
+            | "deny"
+    )
+}
+
+/// `/ws/demo 里那个脚本…` 不是指令，是路径。
+///
+/// 只按"首字符是 /"判断会把所有以绝对路径开头的话都吞掉（真实事故：
+/// `/ws/demo` 被当成未知指令，用户以为机器人坏了）。
+fn looks_like_path(name: &str) -> bool {
+    name.contains('/') || name.starts_with('~')
+}
+
 /// 按字符切成不超过 `n` 的片段（Telegram 单条上限 4096，留出格式余量）。
 fn shard_text(s: &str, n: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -134,6 +163,8 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     agents_running: Arc<Mutex<HashMap<String, RunningAgent>>>,
     /// 最近一次前台活动的时刻（后台任务据此让路）
     last_active: Arc<Mutex<i64>>,
+    /// 当前的 typing 令牌：`/cancel` 要能立刻停掉"正在输入"
+    typing: Arc<Mutex<HashMap<String, CancellationToken>>>,
     /// 运行中的后台任务：task_id → 取消令牌
     bg_running: Arc<Mutex<HashMap<String, CancellationToken>>>,
     /// 后台任务编号
@@ -157,6 +188,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             agent_slots: Arc::clone(&self.agent_slots),
             agents_running: Arc::clone(&self.agents_running),
             last_active: Arc::clone(&self.last_active),
+            typing: Arc::clone(&self.typing),
             bg_running: Arc::clone(&self.bg_running),
             bg_seq: Arc::clone(&self.bg_seq),
         }
@@ -170,6 +202,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
 /// 一直说"运行中"，`/cancel` 取消的是空气）。
 struct RunScope {
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    typing_map: Arc<Mutex<HashMap<String, CancellationToken>>>,
     conversation: String,
     typing: CancellationToken,
     typing_task: Option<tokio::task::JoinHandle<()>>,
@@ -189,6 +222,7 @@ impl Drop for RunScope {
     fn drop(&mut self) {
         self.typing.cancel();
         self.runs.lock().unwrap().remove(&self.conversation);
+        self.typing_map.lock().unwrap().remove(&self.conversation);
         // JoinHandle 直接丢弃 = detach；typing 任务会在 stop.cancelled() 处自行退出
     }
 }
@@ -253,6 +287,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             agent_slots: Arc::new(Mutex::new(HashMap::new())),
             agents_running: Arc::new(Mutex::new(HashMap::new())),
             last_active: Arc::new(Mutex::new(now_ms())),
+            typing: Arc::new(Mutex::new(HashMap::new())),
             bg_running: Arc::new(Mutex::new(HashMap::new())),
             bg_seq: Arc::new(Mutex::new(0)),
         }
@@ -273,8 +308,18 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 msg = inbound.recv() => {
-                    let Some(inb) = msg else { break };
+                    let Some(mut inb) = msg else { break };
                     *self.last_active.lock().unwrap() = crate::ids::now_ms();
+                    if inb.kind == InboundKind::Command {
+                        // 以 `/` 开头但其实是路径的消息，按普通文本处理。
+                        if let Some(t) = inb.text.as_deref() {
+                            let first = t.trim().trim_start_matches('/');
+                            let name = first.split_whitespace().next().unwrap_or("");
+                            if !is_known_command(name) && looks_like_path(name) {
+                                inb.kind = InboundKind::Text;
+                            }
+                        }
+                    }
                     if inb.kind == InboundKind::Command {
                         if let Err(e) = self.handle_command(inb).await {
                             tracing::warn!(error = %e, "command failed");
@@ -321,6 +366,21 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             }
         }
         map
+    }
+
+    /// 本会话有没有子 agent 在跑（给状态行用）。
+    fn child_status(&self, parent_conv: &str) -> Option<String> {
+        let now = now_ms();
+        self.agents_running
+            .lock()
+            .unwrap()
+            .values()
+            .find(|a| a.parent_conv == parent_conv)
+            .map(|a| {
+                let secs = now.saturating_sub(a.started_ms) / 1000;
+                let head = a.task.lines().next().unwrap_or("");
+                format!("🤖 子 agent 运行中 · {secs}s · {head}")
+            })
     }
 
     /// 角色目录：让父模型知道自己有几个"小弟"、各能做什么。
@@ -416,7 +476,18 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 match token {
                     Some(t) => {
                         t.cancel();
-                        self.reply(&inb.conversation, "正在取消当前任务…").await
+                        // 立刻停掉"正在输入"，否则用户以为取消没生效
+                        if let Some(typing) =
+                            self.typing.lock().unwrap().get(&inb.conversation).cloned()
+                        {
+                            typing.cancel();
+                        }
+                        self.reply(
+                            &inb.conversation,
+                            "已请求取消。正在进行的模型请求会在这一步结束时停下（通常几秒）；\n\
+                             30 秒内还没有「⏹ 已取消」就再发一次 /cancel。",
+                        )
+                        .await
                     }
                     None => self.reply(&inb.conversation, "当前没有进行中的任务。").await,
                 }
@@ -694,7 +765,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     ));
                 }
                 let msg = if lines.is_empty() {
-                    "没有进行中的后台任务。\n派活时加 background=true 即可。".to_owned()
+                    "没有进行中的后台任务。\n要跑几分钟的活，跟我说「慢慢做，我一会儿回来看」就行。".to_owned()
                 } else {
                     format!("后台任务：\n{}\n\n取消：/tasks cancel <id>", lines.join("\n"))
                 };
@@ -799,10 +870,16 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         // 清理交给 RAII：`?` 早退 / panic 也必须停 typing、摘掉 runs 条目
         let mut scope = RunScope {
             runs: Arc::clone(&self.runs),
+            typing_map: Arc::clone(&self.typing),
             conversation: inb.conversation.clone(),
             typing: typing_cancel,
             typing_task: Some(typing_task),
         };
+        // 让 /cancel 能立刻停掉"正在输入"（与 run 令牌分开：取消后 run 还要收尾）
+        self.typing
+            .lock()
+            .unwrap()
+            .insert(inb.conversation.clone(), scope.typing.clone());
 
         tracing::info!(conv = %inb.conversation, "run: 已拿到会话锁，开始准备");
         // 前置步骤都加超时：卡在存储上不该让"正在输入"一直转
@@ -921,6 +998,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             inb.text.clone().unwrap_or_default(),
             attachment_lines(&inb.attachments)
         );
+        let conv_key = conv.0.clone();
         let req = RunRequest {
             conv,
             run: run.clone(),
@@ -965,6 +1043,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let mut last_progress = tokio::time::Instant::now();
         let stall = Duration::from_secs(180);
         let mut stalled = false;
+        let mut child_shown = false;
 
         let outcome = loop {
             tokio::select! {
@@ -981,6 +1060,15 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         stalled = true;
                         run_cancel.cancel();
                         break Err(crate::runner::RunnerError::Budget("stalled".into()));
+                    }
+                    // 前台委托期间用户只看到"执行 delegate"，不知道在跑什么——
+                    // 把子 agent 的任务与耗时顶到状态行。
+                    if let Some(s) = self.child_status(&conv_key) {
+                        renderer.push(RenderEvent::Status(s));
+                        child_shown = true;
+                    } else if child_shown {
+                        renderer.push(RenderEvent::Status(String::new()));
+                        child_shown = false;
                     }
                     let action = renderer.flush(now_ms());
                     if let Err(e) = apply_action(&*self.channel, &inb.conversation, &mut renderer, action).await {
@@ -2072,6 +2160,15 @@ impl Drop for SlotGuard {
 
 #[async_trait::async_trait]
 impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S, D> {
+    async fn enqueue(
+        &self,
+        spec: crate::agent::AgentSpec,
+    ) -> Result<String, crate::agent::AgentError> {
+        // 之前只实现了 spawn，delegate(background=true) 走 trait 默认实现 →
+        // 永远返回"当前实现不支持后台任务"（真实事故）。
+        self.enqueue_agent_task(spec).await
+    }
+
     async fn spawn(
         &self,
         spec: crate::agent::AgentSpec,
@@ -2473,6 +2570,7 @@ mod tests {
         {
             let _scope = RunScope {
                 runs: Arc::clone(&runs),
+                typing_map: Arc::new(Mutex::new(HashMap::new())),
                 conversation: "1000".to_owned(),
                 typing: typing.clone(),
                 typing_task: None,

@@ -208,7 +208,10 @@ impl Renderer for TurnRenderer {
                     self.status = Some(format!("第 {} 轮 · 继续思考", self.turn));
                 }
             },
-            RenderEvent::Status(s) => self.status = Some(s),
+            // 空串 = 清空状态（子 agent 跑完时用）
+            RenderEvent::Status(s) => {
+                self.status = if s.trim().is_empty() { None } else { Some(s) }
+            }
             RenderEvent::ToolRetry { call } => {
                 if let Some(t) = self.tools.iter_mut().find(|t| t.call == call) {
                     t.state = ToolState::Running;

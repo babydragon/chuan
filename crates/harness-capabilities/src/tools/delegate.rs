@@ -67,6 +67,15 @@ impl Tool for DelegateTool {
         EffectClass::External
     }
 
+    /// 渲染成"跑子任务：<任务首行>"：前台委托可能要跑几十秒，
+    /// 只显示 "delegate" 的话用户不知道在干什么（真实反馈）。
+    fn approval_hint(&self, args: &serde_json::Value) -> Option<String> {
+        let task = args["task"].as_str()?.trim();
+        let head: String = task.lines().next().unwrap_or("").chars().take(60).collect();
+        let bg = if args["background"].as_bool().unwrap_or(false) { "（后台）" } else { "" };
+        Some(format!("跑子任务{bg}：{head}"))
+    }
+
     /// 只在主会话出现；子 agent 的工具集里没有它 → 结构上禁止递归。
     fn tier(&self) -> u8 {
         1

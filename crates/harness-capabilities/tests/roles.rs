@@ -118,6 +118,82 @@ async fn rejects_bad_names_and_empty_roles() {
     assert_eq!(err.code, ErrorCode::NotFound);
 }
 
+
+/// 改角色：只改提到的那几项，别的不能被清空；白名单外要明说。
+#[tokio::test]
+async fn update_merges_fields_and_warns_blocked_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let roles_dir = dir.path().join("roles");
+    let tool = RoleTool::new(&roles_dir).with_allowed(vec![
+        "read".into(),
+        "write".into(),
+        "exec".into(),
+        "playbook".into(),
+        "web_fetch".into(),
+    ]);
+    let env = NullEnv;
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: "/tmp/ws".into() };
+    let c = ctx(&ws, &env);
+
+    tool.execute(
+        serde_json::json!({
+            "action": "add",
+            "name": "coder",
+            "description": "写代码",
+            "prompt": "旧提示词",
+            "tools": ["read", "write", "exec", "playbook"],
+            "max_turns": 10,
+            "max_tokens": 40000
+        }),
+        &c,
+    )
+    .await
+    .unwrap();
+
+    // 只改工具：预算、提示词都该保留
+    let out = tool
+        .execute(
+            serde_json::json!({
+                "action": "add",
+                "name": "coder",
+                "tools": ["read", "write", "web_fetch"]
+            }),
+            &c,
+        )
+        .await
+        .unwrap();
+    let text = format!("{:?}", out.content);
+    assert!(text.contains("已更新"), "{text}");
+
+    let spec = DiskRoles::new(&roles_dir).all().pop().unwrap().1;
+    assert_eq!(spec.max_turns, 10, "没提到的预算不能被清空");
+    assert_eq!(spec.max_tokens, 40000);
+    assert_eq!(spec.description.as_deref(), Some("写代码"));
+    assert_eq!(spec.system_prompt.as_deref(), Some("旧提示词"), "没给 prompt 就保留原文");
+    assert_eq!(
+        spec.tools.as_ref().unwrap(),
+        &vec!["read".to_owned(), "write".to_owned(), "web_fetch".to_owned()]
+    );
+    assert!(!spec.tools.as_ref().unwrap().contains(&"exec".to_owned()), "列表是整体替换");
+
+    // 写了白名单之外的工具：必须提示"不会生效"，而不是假装成功
+    let out = tool
+        .execute(
+            serde_json::json!({
+                "action": "add",
+                "name": "coder",
+                "tools": ["read", "http", "lan_exec"]
+            }),
+            &c,
+        )
+        .await
+        .unwrap();
+    let text = format!("{:?}", out.content);
+    assert!(text.contains("不会生效"), "{text}");
+    assert!(text.contains("http"), "{text}");
+    assert!(text.contains("实际可用"), "{text}");
+}
+
 #[tokio::test]
 async fn prompt_is_written_verbatim() {
     let dir = tempfile::tempdir().unwrap();

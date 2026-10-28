@@ -376,6 +376,10 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
             ("new".into(), "开启新会话（保留长期记忆）".into()),
             ("cancel".into(), "取消当前正在运行的任务".into()),
             ("status".into(), "查看运行状态".into()),
+            ("usage".into(), "今日/本月用量与额度".into()),
+            ("prompt".into(), "查看实际生效的 system 指令".into()),
+            ("agents".into(), "查看/取消运行中的子 agent".into()),
+            ("tasks".into(), "查看/取消后台任务".into()),
             ("facts".into(), "查看长期记忆".into()),
             ("reminders".into(), "查看/取消定时任务".into()),
             ("forget".into(), "删除一条记忆：/forget <id>".into()),
@@ -457,8 +461,8 @@ mod command_tests {
         let names: Vec<String> = ch.command_specs().into_iter().map(|(c, _)| c).collect();
         for expected in
             [
-                "new", "cancel", "status", "facts", "reminders", "forget", "approve", "deny",
-                "help",
+                "new", "cancel", "status", "usage", "prompt", "agents", "tasks", "facts",
+                "reminders", "forget", "approve", "deny", "help",
             ]
         {
             assert!(names.contains(&expected.to_string()), "缺少 /{expected}: {names:?}");
