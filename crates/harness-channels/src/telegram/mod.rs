@@ -86,7 +86,10 @@ impl<A: Api> TelegramChannel<A> {
                 buttons: true,
                 markdown: true,
                 max_text: 4096,
-                min_edit_interval_ms: 1000,
+                // 1s 的编辑间隔在长任务里会撞 Telegram 洪水控制：板上实测连续约 3 分钟
+                // 每秒一次 editMessageText，就被罚 retry_after 169s / 181s。
+                // 2.5s 把上限压到 24 次/分钟，加上"内容未变不发 edit"，实际远低于此。
+                min_edit_interval_ms: 2500,
             },
         }
     }
