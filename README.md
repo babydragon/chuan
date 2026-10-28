@@ -72,8 +72,10 @@ curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/ins
 | 对话 | 流式输出，同一条消息里原地更新，不是"处理中…" |
 | 工具 | `exec`（bwrap 沙盒）· `read` `write`（仅工作区）· `remind` · `web_fetch` · `send_file` · `keep` `files` · `playbook` · `install_deps` · `run_skill` `publish_skill` · `http` `mcp` `service` |
 | 过程可见 | 状态行显示 `第 N 轮 · 思考/执行`，工具轨迹带参数与耗时 |
+| 分工 | `delegate` 派子 agent（独立上下文、只回传结论、不能再派）；可按角色（`coder`/`tutor`…）派；
+  长活走后台任务，重启只通知不重跑；接手时带上次结论，不必从零开始 |
 | 安全 | 沙盒无网络、`/home` 与宿主 `/tmp` 不可见、`/tmp` 限 256MB、超时 killpg（服务级 `MemoryMax=1G` 兜底） |
-| 指令 | `/new` `/cancel` `/status` `/help`，已在 Telegram 注册可补全 |
+| 指令 | `/new` `/cancel` `/status` `/usage` `/prompt` `/agents` `/tasks` `/facts` `/reminders` `/help` |
 
 家庭成员默认只能会话级使用；宿主/提权执行需要主人显式授权并逐条审批（见 `docs/DECISIONS.md` D15）。
 
