@@ -73,7 +73,10 @@ impl Service {
         use crate::auth::Vars;
         let mut v = Vars::new(now_ms(), path);
         if let Some(f) = self.secret_file()? {
-            v.token = f.get(self.token_key.as_deref(), 0);
+            // 允许主人直接粘整条 Webhook URL：这里归一成 token 本身
+            v.token = f
+                .get(self.token_key.as_deref(), 0)
+                .map(|t| crate::auth::normalize_token(&t));
             if let Some(cfg) = &self.sign {
                 v.secret = f.get(cfg.secret_key.as_deref(), 1);
             }

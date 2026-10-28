@@ -43,8 +43,8 @@ http(service="dingtalk", method="POST", path="/robot/send",
 
 1. 主人操作：群 → 设置 → 群机器人 → 添加 → 自定义机器人 → 安全设置选「签名校验」，
    复制 Webhook（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/<hook id>`）与 secret。
-2. 凭据两行：第 1 行 **hook id**（路径最后那段，不是整条 URL），第 2 行 secret。
-   命令同钉钉，文件名换成 `feishu`。
+2. 凭据两行：第 1 行可以贴**整条 hook URL**（会自动取路径最后那段作为 hook id），
+   第 2 行 secret。命令同钉钉，文件名换成 `feishu`。
 3. 注册：
 
 ```

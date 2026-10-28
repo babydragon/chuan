@@ -67,6 +67,36 @@ impl SecretFile {
     }
 }
 
+/// 把"用户可能贴进来的东西"归一成真正的 token。
+///
+/// 人会直接粘整条 Webhook URL——那就别要求他裁。规则：
+/// - 带 `access_token=` 的：取该参数的值（钉钉）；
+/// - 是 URL 但没有该参数：取最后一段路径（飞书 hook id 就在路径里）；
+/// - `access_token=xxx` 这种裸参数：取等号右边；
+/// - 其它情况原样返回（裸 token、SEC 开头的密钥都不动）。
+pub fn normalize_token(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if let Some(pos) = s.find("access_token=") {
+        let rest = &s[pos + "access_token=".len()..];
+        let end = rest.find(['&', '#', ' ', '\n']).unwrap_or(rest.len());
+        let v = &rest[..end];
+        if !v.is_empty() {
+            return v.to_owned();
+        }
+    }
+    if s.starts_with("http://") || s.starts_with("https://") {
+        let no_q = s.split(['?', '#']).next().unwrap_or(s);
+        let seg = no_q.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+        if !seg.is_empty() {
+            return seg.to_owned();
+        }
+    }
+    s.to_owned()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encode {
     Base64,
@@ -260,5 +290,33 @@ mod tests {
         v.token = Some("abcdef123456".into());
         v.sign = Some("short".into()); // 太短，不参与
         assert_eq!(v.secrets(), vec!["abcdef123456".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_token;
+
+    #[test]
+    fn dingtalk_full_url_yields_access_token() {
+        let url = "https://oapi.dingtalk.com/robot/send?access_token=abc123def";
+        assert_eq!(normalize_token(url), "abc123def");
+        // 带额外参数也只取值本身
+        let url = "https://oapi.dingtalk.com/robot/send?access_token=abc123&x=1";
+        assert_eq!(normalize_token(url), "abc123");
+    }
+
+    #[test]
+    fn feishu_full_url_yields_hook_id() {
+        let url = "https://open.feishu.cn/open-apis/bot/v2/hook/1234-abcd";
+        assert_eq!(normalize_token(url), "1234-abcd");
+    }
+
+    #[test]
+    fn bare_values_stay_untouched() {
+        assert_eq!(normalize_token("abc123def"), "abc123def");
+        assert_eq!(normalize_token("SECdeadbeef"), "SECdeadbeef");
+        assert_eq!(normalize_token("access_token=abc"), "abc");
+        assert_eq!(normalize_token("  "), "");
     }
 }
