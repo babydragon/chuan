@@ -124,3 +124,6 @@ pub const SCHEDULE_JOB: &str = "\
 - 钉住的技能在运行时没有人再审，**审在安装那一刻**。所以 examples 必须覆盖真实输出，
   network 声明要准确，不要读 /inbox，不要依赖宿主机路径。
 - 别把「需要临场判断」的任务钉成脚本，它会失去应变能力。";
+
+/// 群机器人（钉钉/飞书）配置 SOP：随二进制发布，可用 `playbooks/webhook.md` 覆盖。
+pub const WEBHOOK: &str = include_str!("../playbooks/webhook.md");

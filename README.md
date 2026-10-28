@@ -388,6 +388,9 @@ http(service="dingtalk", method="POST", path="/robot/send", body_file="report.js
 
 这样复杂的取数/排版留在脚本里，凭据始终不落到沙盒。
 
+> 配置群机器人（钉钉/飞书）的完整步骤见 `playbook("webhook")`——包含「主人做哪几步、
+> 你怎么注册、怎么验证」；成功后让它记一条记忆，下次直接调。
+>
 > 设计取舍见 `docs/DECISIONS.md` D18：**不做通用出口代理**，也不支持 OAuth2 令牌交换
 > （需要缓存与过期刷新）——出现真实需求再单独设计。
 

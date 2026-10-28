@@ -122,6 +122,25 @@ fn valid_name(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
+/// 写服务片段时的 HTTP 专属字段（MCP 用不到，传默认值）。
+#[derive(Default)]
+struct HttpExtra<'a> {
+    token_key: Option<&'a str>,
+    query: Option<&'a std::collections::BTreeMap<String, String>>,
+    body: Option<&'a std::collections::BTreeMap<String, String>>,
+    sign: Option<&'a crate::auth::SignConfig>,
+}
+
+/// 用 JSON 的转义规则写 TOML 基本字符串：两者的 \\ \" \n 语义一致。
+fn q(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""))
+}
+
+fn inline_table(m: &std::collections::BTreeMap<String, String>) -> String {
+    let parts: Vec<String> = m.iter().map(|(k, v)| format!("{k} = {}", q(v))).collect();
+    format!("{{ {} }}", parts.join(", "))
+}
+
 fn write_fragment(
     dir: &Path,
     name: &str,
@@ -131,18 +150,45 @@ fn write_fragment(
     header: Option<&str>,
     tools: &[String],
     catalog: Option<&str>,
+    extra: HttpExtra<'_>,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut s = String::new();
     if kind == "mcp" {
         s.push_str("kind = \"mcp\"\n");
     }
-    s.push_str(&format!("base = \"{base}\"\n"));
+    s.push_str(&format!("base = {}\n", q(base)));
     if let Some(t) = token_file {
-        s.push_str(&format!("token_file = \"{t}\"\n"));
+        s.push_str(&format!("token_file = {}\n", q(t)));
     }
     if let Some(h) = header {
-        s.push_str(&format!("header = \"{h}\"\n"));
+        s.push_str(&format!("header = {}\n", q(h)));
+    }
+    if let Some(k) = extra.token_key {
+        s.push_str(&format!("token_key = {}\n", q(k)));
+    }
+    if let Some(m) = extra.query {
+        if !m.is_empty() {
+            s.push_str(&format!("query = {}\n", inline_table(m)));
+        }
+    }
+    if let Some(m) = extra.body {
+        if !m.is_empty() {
+            s.push_str(&format!("body = {}\n", inline_table(m)));
+        }
+    }
+    if let Some(sign) = extra.sign {
+        s.push_str("\n[sign]\n");
+        if let Some(k) = &sign.secret_key {
+            s.push_str(&format!("secret_key = {}\n", q(k)));
+        }
+        s.push_str(&format!("canonical = {}\n", q(&sign.canonical)));
+        let enc = match sign.encode {
+            crate::auth::Encode::Base64 => "base64",
+            crate::auth::Encode::Base64Url => "base64url",
+            crate::auth::Encode::Hex => "hex",
+        };
+        s.push_str(&format!("encode = \"{enc}\"\n"));
     }
     if !tools.is_empty() {
         let list: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
@@ -174,7 +220,30 @@ impl Tool for ServiceTool {
                     "kind": { "type": "string", "enum": ["http", "mcp"], "description": "默认 http" },
                     "base": { "type": "string", "description": "服务根地址，如 https://mcp.dida365.com" },
                     "token_file": { "type": "string", "description": "凭据文件路径（主人放好的）" },
-                    "header": { "type": "string", "description": "鉴权头模板，默认 `Authorization: Bearer {token}`" },
+                    "header": {
+                        "type": "string",
+                        "description": "鉴权头模板，默认 `Authorization: Bearer {token}`；传空串表示不放 header"
+                    },
+                    "token_key": { "type": "string", "description": "凭据文件里用哪个键（key = value 形式）" },
+                    "query": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "查询参数注入，值可用 {token} {sign} {ts_s} {ts_ms}，例如 {access_token=\"{token}\"}"
+                    },
+                    "body": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "请求体字段注入（飞书加签放这里），值可用同样的模板变量"
+                    },
+                    "sign": {
+                        "type": "object",
+                        "properties": {
+                            "secret_key": { "type": "string", "description": "secret 在凭据文件里的键名；默认取第 2 行" },
+                            "canonical": { "type": "string", "description": "待签串模板，钉钉 {ts_ms}\\n{secret}，飞书 {ts_s}\\n{secret}" },
+                            "encode": { "type": "string", "enum": ["base64", "base64url", "hex"] }
+                        },
+                        "description": "HMAC-SHA256 签名（webhook 加签）"
+                    },
                     "tools": {
                         "type": "array", "items": { "type": "string" },
                         "description": "MCP：只暴露这些工具（可选）"
@@ -262,6 +331,36 @@ impl Tool for ServiceTool {
                         .map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
                 }
                 let header = args.get("header").and_then(|v| v.as_str()).map(str::to_owned);
+                let token_key =
+                    args.get("token_key").and_then(|v| v.as_str()).map(str::to_owned);
+                let map_of = |key: &str| -> std::collections::BTreeMap<String, String> {
+                    args.get(key)
+                        .and_then(|v| v.as_object())
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let query = map_of("query");
+                let body = map_of("body");
+                let sign = args.get("sign").and_then(|v| v.as_object()).map(|o| {
+                    crate::auth::SignConfig {
+                        secret_key: o
+                            .get("secret_key")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned),
+                        canonical: o
+                            .get("canonical")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{ts_ms}\\n{secret}")
+                            .to_owned(),
+                        encode: crate::auth::Encode::parse(
+                            o.get("encode").and_then(|v| v.as_str()).unwrap_or("base64"),
+                        ),
+                    }
+                });
                 let tools: Vec<String> = args
                     .get("tools")
                     .and_then(|v| v.as_array())
@@ -306,6 +405,7 @@ impl Tool for ServiceTool {
                             header.as_deref(),
                             &tools,
                             catalog.as_deref(),
+                            HttpExtra::default(),
                         )
                         .map_err(|e| ToolError::new(ErrorCode::Internal, e, false))?;
                         Ok(ToolOutput {
@@ -329,10 +429,10 @@ impl Tool for ServiceTool {
                                 "Authorization: Bearer {token}".into()
                             }),
                             extra_headers: Vec::new(),
-                            token_key: None,
-                            query: Default::default(),
-                            body: Default::default(),
-                            sign: None,
+                            token_key: token_key.clone(),
+                            query: query.clone(),
+                            body: body.clone(),
+                            sign: sign.clone(),
                         };
                         // 探活：至少证明 DNS/TLS/端点能通（不看状态码，API 常对 HEAD/根路径回 404）
                         let probe = self.http.probe(&svc).await;
@@ -350,6 +450,12 @@ impl Tool for ServiceTool {
                             header.as_deref(),
                             &[],
                             None,
+                            HttpExtra {
+                                token_key: token_key.as_deref(),
+                                query: Some(&query),
+                                body: Some(&body),
+                                sign: sign.as_ref(),
+                            },
                         )
                         .map_err(|e| ToolError::new(ErrorCode::Internal, e, false))?;
                         Ok(ToolOutput {
@@ -409,6 +515,7 @@ mod tests {
             None,
             &["create_task".to_string()],
             Some("names"),
+            HttpExtra::default(),
         )
         .unwrap();
         let text = std::fs::read_to_string(&p).unwrap();

@@ -280,6 +280,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             ("import-skill", crate::system_prompt::IMPORT),
             ("distill", crate::system_prompt::DISTILL),
             ("schedule-job", crate::system_prompt::SCHEDULE_JOB),
+            ("webhook", crate::system_prompt::WEBHOOK),
         ],
     ));
     tools.register(Arc::new(
