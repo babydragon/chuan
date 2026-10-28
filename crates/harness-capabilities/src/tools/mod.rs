@@ -4,6 +4,7 @@ pub mod fs;
 pub mod memory;
 pub mod remind;
 pub mod send;
+pub mod task;
 
 pub use delegate::DelegateTool;
 pub use exec::ExecTool;

@@ -180,7 +180,10 @@ pub struct AgentLimits {
     pub max_turns: u32,
     pub max_tokens: u64,
     pub wall_ms: u64,
-    /// 前台静默多少秒后才启动后台任务（0 = 不等待）
+    /// 前台静默多少秒后才启动后台任务（0 = 不等待）。
+    ///
+    /// 原来的 30s 太保守：用户明确说了"慢慢做"，还要再等半分钟纯属浪费。
+    /// 5s 只用来错开"连着发两条消息"，真正的互斥由「没有 run 在跑」+ 车道保证。
     pub background_idle_s: u64,
     /// 可用角色（`[agents.roles.<name>]`）。空 = 只能用 `inherit`。
     pub roles: std::collections::HashMap<String, RoleSpec>,
@@ -195,10 +198,25 @@ impl Default for AgentLimits {
             max_turns: 6,
             max_tokens: 20_000,
             wall_ms: 120_000,
-            background_idle_s: 30,
+            background_idle_s: 5,
             roles: std::collections::HashMap::new(),
         }
     }
+}
+
+/// 一条后台任务的状态快照（给模型看的，不是给存储看的）。
+#[derive(Clone, Debug)]
+pub struct TaskInfo {
+    pub id: String,
+    /// `pending` / `running` / `done` / `failed` / `cancelled` / `interrupted`
+    pub status: String,
+    pub text: String,
+    pub created_ms: i64,
+    pub started_ms: Option<i64>,
+    /// 子会话 id：想知道"它到底干了什么"，用这个去查（`/agents show`）
+    pub child_conv: Option<String>,
+    /// 结论摘要（完成/失败时才有）
+    pub result: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -214,6 +232,17 @@ pub trait AgentSpawner: Send + Sync {
     async fn enqueue(&self, spec: AgentSpec) -> Result<String, AgentError> {
         let _ = spec;
         Err(AgentError::Other("当前实现不支持后台任务".into()))
+    }
+
+    /// 自己派出去的后台任务（父 agent 管理用；不要拿来轮询）。
+    async fn tasks(&self) -> Result<Vec<TaskInfo>, AgentError> {
+        Err(AgentError::Other("当前实现不支持任务查询".into()))
+    }
+
+    /// 取消一条后台任务（pending 直接作废，running 打断）。
+    async fn cancel_task(&self, id: &str) -> Result<String, AgentError> {
+        let _ = id;
+        Err(AgentError::Other("当前实现不支持任务取消".into()))
     }
 }
 

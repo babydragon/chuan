@@ -165,6 +165,8 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     last_active: Arc<Mutex<i64>>,
     /// 当前的 typing 令牌：`/cancel` 要能立刻停掉"正在输入"
     typing: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// 子 agent 的实时进度：child_conv → "第 3 轮 · 执行 web_fetch"
+    agent_progress: Arc<Mutex<HashMap<String, String>>>,
     /// 运行中的后台任务：task_id → 取消令牌
     bg_running: Arc<Mutex<HashMap<String, CancellationToken>>>,
     /// 后台任务编号
@@ -189,6 +191,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             agents_running: Arc::clone(&self.agents_running),
             last_active: Arc::clone(&self.last_active),
             typing: Arc::clone(&self.typing),
+            agent_progress: Arc::clone(&self.agent_progress),
             bg_running: Arc::clone(&self.bg_running),
             bg_seq: Arc::clone(&self.bg_seq),
         }
@@ -288,6 +291,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             agents_running: Arc::new(Mutex::new(HashMap::new())),
             last_active: Arc::new(Mutex::new(now_ms())),
             typing: Arc::new(Mutex::new(HashMap::new())),
+            agent_progress: Arc::new(Mutex::new(HashMap::new())),
             bg_running: Arc::new(Mutex::new(HashMap::new())),
             bg_seq: Arc::new(Mutex::new(0)),
         }
@@ -309,7 +313,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 _ = cancel.cancelled() => break,
                 msg = inbound.recv() => {
                     let Some(mut inb) = msg else { break };
-                    *self.last_active.lock().unwrap() = crate::ids::now_ms();
+                    // 只有"人在说话"才算前台活动。查状态、取消这类指令不该把后台任务饿死
+                    // （真实事故：用户每分钟 /tasks 一次，任务一直 pending）。
+                    if inb.kind == InboundKind::Text {
+                        *self.last_active.lock().unwrap() = crate::ids::now_ms();
+                    }
                     if inb.kind == InboundKind::Command {
                         // 以 `/` 开头但其实是路径的消息，按普通文本处理。
                         if let Some(t) = inb.text.as_deref() {
@@ -379,7 +387,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             .map(|a| {
                 let secs = now.saturating_sub(a.started_ms) / 1000;
                 let head = a.task.lines().next().unwrap_or("");
-                format!("🤖 子 agent 运行中 · {secs}s · {head}")
+                match self.agent_progress.lock().unwrap().get(parent_conv).cloned() {
+                    Some(p) => format!("🤖 子 agent 运行中 · {secs}s · {p} · {head}"),
+                    None => format!("🤖 子 agent 运行中 · {secs}s · {head}"),
+                }
             })
     }
 
@@ -472,25 +483,67 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     .await
             }
             "cancel" => {
-                let token = self.runs.lock().unwrap().get(&inb.conversation).cloned();
-                match token {
-                    Some(t) => {
-                        t.cancel();
-                        // 立刻停掉"正在输入"，否则用户以为取消没生效
-                        if let Some(typing) =
-                            self.typing.lock().unwrap().get(&inb.conversation).cloned()
-                        {
-                            typing.cancel();
-                        }
-                        self.reply(
-                            &inb.conversation,
-                            "已请求取消。正在进行的模型请求会在这一步结束时停下（通常几秒）；\n\
-                             30 秒内还没有「⏹ 已取消」就再发一次 /cancel。",
-                        )
-                        .await
+                // 统一入口：前台 run 与这个 chat 的后台任务一起停。
+                // 以前 /cancel 只认前台，用户对着 pending 的后台任务按 /cancel 会得到
+                // "当前没有进行中的任务"，只能再记一遍 /tasks cancel <id>。
+                let mut stopped_run = false;
+                if let Some(t) = self.runs.lock().unwrap().get(&inb.conversation).cloned() {
+                    t.cancel();
+                    stopped_run = true;
+                    if let Some(typing) =
+                        self.typing.lock().unwrap().get(&inb.conversation).cloned()
+                    {
+                        typing.cancel();
                     }
-                    None => self.reply(&inb.conversation, "当前没有进行中的任务。").await,
                 }
+                let mut stopped_tasks = 0usize;
+                for doc in self.list_tasks().await {
+                    let chat = doc.payload["chat"].as_str().unwrap_or_default();
+                    if chat != inb.conversation {
+                        continue;
+                    }
+                    match doc.payload["status"].as_str().unwrap_or("") {
+                        "pending" => {
+                            let mut p = doc.payload.clone();
+                            p["status"] = serde_json::json!("cancelled");
+                            p["finished_at"] = serde_json::json!(crate::ids::now_ms());
+                            self.put_task_doc(
+                                &doc.id.0,
+                                doc.payload["conv"].as_str().unwrap_or_default(),
+                                p,
+                                doc.version + 1,
+                            )
+                            .await;
+                            stopped_tasks += 1;
+                        }
+                        "running" => {
+                            if let Some(t) =
+                                self.bg_running.lock().unwrap().get(&doc.id.0).cloned()
+                            {
+                                t.cancel();
+                                stopped_tasks += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let msg = match (stopped_run, stopped_tasks) {
+                    (false, 0) => "当前没有进行中的任务（前台与后台都空）。".to_owned(),
+                    (true, 0) => "已请求取消前台任务。正在进行的模型请求会在这一步结束时停下（通常几秒）；\n\
+                                   30 秒内还没有「⏹ 已取消」就再发一次 /cancel。"
+                        .to_owned(),
+                    (run, n) => {
+                        let mut s = String::new();
+                        if run {
+                            s.push_str("已请求取消前台任务。");
+                        }
+                        if n > 0 {
+                            s.push_str(&format!("已取消 {n} 个后台任务。"));
+                        }
+                        s
+                    }
+                };
+                self.reply(&inb.conversation, &msg).await
             }
             "approve" | "deny" => {
                 let rest = text.trim().split_whitespace().nth(1).unwrap_or("");
@@ -676,6 +729,69 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         }
                     };
                 }
+                if let Some(id) = rest.strip_prefix("show ") {
+                    let id = id.trim().to_owned();
+                    if !id.starts_with("sub:") {
+                        return self
+                            .reply(&inb.conversation, "用法：/agents show <子会话 id>（列表里带 `sub:` 的那串）")
+                            .await;
+                    }
+                    let page = match self.store.begin_read().await {
+                        Ok(mut rd) => rd.messages(ConversationId(id.clone()), 0, 60).await.ok(),
+                        Err(_) => None,
+                    };
+                    let Some(page) = page.filter(|p| !p.msgs.is_empty()) else {
+                        return self
+                            .reply(&inb.conversation, &format!("没有这个子会话：{id}（可能已被清理）"))
+                            .await;
+                    };
+                    let mut out = format!("子会话 `{id}` 的最近记录：\n\n");
+                    let mut said: Vec<&crate::record::Message> = page
+                        .msgs
+                        .iter()
+                        .filter(|m| m.role == crate::record::Role::Assistant)
+                        .filter(|m| {
+                            m.payload
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .map(|t| !t.trim().is_empty())
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                    if said.len() > 2 {
+                        said.drain(..said.len() - 2);
+                    }
+                    for m in said {
+                        let text = m.payload["text"].as_str().unwrap_or("");
+                        out.push_str(&format!("🧠 {}\n\n", text.chars().take(800).collect::<String>()));
+                    }
+                    let mut tools: Vec<&crate::record::Message> = page
+                        .msgs
+                        .iter()
+                        .filter(|m| m.role == crate::record::Role::ToolResult)
+                        .collect();
+                    if tools.len() > 6 {
+                        tools.drain(..tools.len() - 6);
+                    }
+                    if !tools.is_empty() {
+                        out.push_str("工具轨迹（最后几条）：\n");
+                        for m in tools {
+                            let ok = m.payload["ok"].as_bool().unwrap_or(false);
+                            let preview = m.payload["preview"].as_str().unwrap_or("");
+                            out.push_str(&format!(
+                                "- {} {}\n",
+                                if ok { "✅" } else { "❌" },
+                                preview.chars().take(160).collect::<String>()
+                            ));
+                        }
+                        out.push('\n');
+                    }
+                    out.push_str("（推理/thinking 不落账本，只有正文与工具轨迹）");
+                    for part in shard_text(&out, 3_000) {
+                        let _ = self.reply(&inb.conversation, &part).await;
+                    }
+                    return Ok(());
+                }
                 if let Some(id) = rest.strip_prefix("cancel ") {
                     let id = id.trim().to_owned();
                     let hit = self
@@ -709,7 +825,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let msg = if lines.is_empty() {
                     "没有运行中的子 agent。".to_owned()
                 } else {
-                    format!("运行中的子 agent：\n{}\n\n取消：/agents cancel <id>", lines.join("\n"))
+                    format!("运行中的子 agent：\n{}\n\n取消：/agents cancel <id>　看详情：/agents show <id>", lines.join("\n"))
                 };
                 self.reply(&inb.conversation, &msg).await
             }
@@ -717,27 +833,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let rest = text.trim().trim_start_matches("/tasks").trim().to_owned();
                 if let Some(id) = rest.strip_prefix("cancel ") {
                     let id = id.trim().to_owned();
-                    let running = self.bg_running.lock().unwrap().get(&id).cloned();
-                    if let Some(t) = running {
-                        t.cancel();
-                        return self.reply(&inb.conversation, &format!("已请求取消 {id}")).await;
-                    }
-                    // 还没开跑：直接标 cancelled
-                    let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == id);
-                    let Some(doc) = doc else {
-                        return self.reply(&inb.conversation, &format!("没有这个任务：{id}")).await;
-                    };
-                    if doc.payload["status"] == "pending" {
-                        let mut p = doc.payload.clone();
-                        p["status"] = serde_json::json!("cancelled");
-                        p["finished_at"] = serde_json::json!(now_ms());
-                        self.put_task_doc(&id, doc.payload["conv"].as_str().unwrap_or_default(), p, doc.version + 1)
-                            .await;
-                        return self.reply(&inb.conversation, &format!("已取消 {id}")).await;
-                    }
-                    return self
-                        .reply(&inb.conversation, &format!("{id} 已经结束（{}）", doc.payload["status"]))
-                        .await;
+                    let msg = self
+                        .cancel_one_task(&id)
+                        .await
+                        .unwrap_or_else(|| format!("没有这个任务：{id}"));
+                    return self.reply(&inb.conversation, &msg).await;
                 }
 
                 let now = now_ms();
@@ -747,20 +847,21 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     matches!(d.payload["status"].as_str().unwrap_or(""), "pending" | "running")
                 }) {
                     let started = d.payload["started_at"].as_i64().unwrap_or(now);
-                    let secs = if d.payload["status"] == "running" {
-                        (now.saturating_sub(started)) / 1000
+                    let status = d.payload["status"].as_str().unwrap_or("?");
+                    let when = if status == "running" {
+                        format!("{}s", now.saturating_sub(started) / 1000)
                     } else {
-                        0
+                        "等待前台静默".to_owned()
                     };
                     let cont = d.payload["continue_from"]
                         .as_str()
                         .map(|s| format!("（续 {s}）"))
                         .unwrap_or_default();
                     lines.push(format!(
-                        "- `{}` · {} · {}s · {}{cont}",
+                        "- `{}` · {} · {} · {}{cont}",
                         d.id.0,
-                        d.payload["status"].as_str().unwrap_or("?"),
-                        secs,
+                        status,
+                        when,
                         d.payload["text"].as_str().unwrap_or("").lines().next().unwrap_or("")
                     ));
                 }
@@ -1233,17 +1334,22 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     /// 每 30 秒看一次有没有到点的提醒。
     pub fn spawn_scheduler(self: Arc<Self>, cancel: CancellationToken) {
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(30));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut reminders = tokio::time::interval(Duration::from_secs(30));
+            reminders.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // 后台任务单独用更密的 tick：30s 一次的话，任务最坏要等 30s 才被看见。
+            // 查询只扫 agent_task 那几条 doc，代价可以忽略。
+            let mut tasks = tokio::time::interval(Duration::from_secs(5));
+            tasks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
-                    _ = tick.tick() => {
+                    _ = reminders.tick() => {
                         let n = self.tick_reminders().await;
                         if n > 0 {
                             tracing::info!(fired = n, "reminders fired");
                         }
-                        // 后台任务：前台静默且没有 run 在跑时才会真的启动。
+                    }
+                    _ = tasks.tick() => {
                         if self.tick_agent_tasks().await > 0 {
                             tracing::info!("background agent task started");
                         }
@@ -1907,6 +2013,32 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         Ok(id)
     }
 
+    /// 取消一条任务：pending 直接作废，running 打断（与 `/tasks cancel` 同一条路）。
+    async fn cancel_one_task(&self, id: &str) -> Option<String> {
+        if let Some(t) = self.bg_running.lock().unwrap().get(id).cloned() {
+            t.cancel();
+            return Some(format!("已请求取消 {id}"));
+        }
+        let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == id)?;
+        if doc.payload["status"] == "pending" {
+            let mut p = doc.payload.clone();
+            p["status"] = serde_json::json!("cancelled");
+            p["finished_at"] = serde_json::json!(crate::ids::now_ms());
+            self.put_task_doc(
+                id,
+                doc.payload["conv"].as_str().unwrap_or_default(),
+                p,
+                doc.version + 1,
+            )
+            .await;
+            return Some(format!("已取消 {id}"));
+        }
+        Some(format!(
+            "{id} 已经结束（{}）",
+            doc.payload["status"].as_str().unwrap_or("?")
+        ))
+    }
+
     /// 启动时收尾：上次 `running` 的任务只通知、不重跑（D4：External 永不自动重发）。
     pub async fn resume_agent_tasks(self: &Arc<Self>) -> usize {
         let mut n = 0;
@@ -2169,6 +2301,29 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
         self.enqueue_agent_task(spec).await
     }
 
+    async fn tasks(&self) -> Result<Vec<crate::agent::TaskInfo>, crate::agent::AgentError> {
+        Ok(self
+            .list_tasks()
+            .await
+            .into_iter()
+            .map(|d| crate::agent::TaskInfo {
+                id: d.id.0.clone(),
+                status: d.payload["status"].as_str().unwrap_or("?").to_owned(),
+                text: d.payload["text"].as_str().unwrap_or_default().to_owned(),
+                created_ms: d.payload["created_at"].as_i64().unwrap_or(0),
+                started_ms: d.payload["started_at"].as_i64(),
+                child_conv: d.payload["child_conv"].as_str().map(|s| s.to_owned()),
+                result: d.payload["result"]["summary"].as_str().map(|s| s.to_owned()),
+            })
+            .collect())
+    }
+
+    async fn cancel_task(&self, id: &str) -> Result<String, crate::agent::AgentError> {
+        self.cancel_one_task(id)
+            .await
+            .ok_or_else(|| crate::agent::AgentError::Other(format!("没有这个任务：{id}")))
+    }
+
     async fn spawn(
         &self,
         spec: crate::agent::AgentSpec,
@@ -2300,6 +2455,14 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
                 system.push_str(prompt.trim());
             }
         }
+        let my_tools: Vec<String> =
+            child_tools.specs().into_iter().map(|s| s.name).collect();
+        system.push_str(&format!(
+            "\n\n你这次能用的工具只有：{}。\n\
+             不在这个列表里的能力（联网、发消息、装依赖、改配置…）就是没有——直接说明，\
+             不要反复尝试，也不要为了绕开它去写别的代码。\n",
+            my_tools.join(" / ")
+        ));
         system.push_str(
             "\n\n你现在是子 agent（depth 1），只做下面这一件事。\n\
              - 你看不到父会话的历史：缺信息就写进结论，不要猜。\n\
@@ -2339,6 +2502,14 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             limits.max_tokens,
         );
         let wall_ms = pick(spec.wall_ms, role.map(|r| r.wall_ms).unwrap_or(0), limits.wall_ms);
+        if wall_ms == 0 {
+            // 0 = 不限（只有**全局** [agents] wall_ms 能表达这个意思；角色里写 0 是"继承"）。
+            // 子 run 没有父那套卡死检测，所以这里明确提醒：卡住会一直占着 agent 车道。
+            tracing::warn!(
+                child = %child_conv,
+                "子 agent 墙钟不限（[agents] wall_ms=0）：卡住时会一直占着 agent 车道"
+            );
+        }
         let model = spec
             .profile
             .model
@@ -2375,9 +2546,34 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             docs: Some(&docs),
         };
 
-        // 子 run 的进度进一个没人读的通道：View 是全量快照，丢事件不影响正确性。
-        let pair = EventSink::channel(64);
-        drop(pair.rx);
+        // 子 run 的事件不渲染到父消息（会把界面和上下文搅乱），但也不能全丢：
+        // 抽干它，把"第几轮 / 在跑什么工具"记进进度表，父状态行和 /agents 用。
+        let pair = EventSink::channel(128);
+        let progress = Arc::clone(&self.agent_progress);
+        let pump_key = child_conv.clone();
+        let pump = tokio::spawn(async move {
+            let mut rx = pair.rx;
+            let mut turn = 0u32;
+            while let Some(ev) = rx.recv().await {
+                let text = match ev {
+                    crate::driver::StreamEvent::TurnStarted { turn_no } => {
+                        turn = turn_no;
+                        format!("第 {turn} 轮 · 思考中")
+                    }
+                    crate::driver::StreamEvent::ToolStarted { name, .. } => {
+                        format!("第 {turn} 轮 · 执行 {name}")
+                    }
+                    crate::driver::StreamEvent::ToolFinished { ok, .. } => {
+                        format!("第 {turn} 轮 · {} 完成", if ok { "工具" } else { "失败" })
+                    }
+                    crate::driver::StreamEvent::Restarted => {
+                        format!("第 {turn} 轮 · 重试中")
+                    }
+                    _ => continue,
+                };
+                progress.lock().unwrap().insert(pump_key.clone(), text);
+            }
+        });
 
         // 独立取消令牌：父取消照样联动（linker），但 `/agents cancel` 也能只杀子任务。
         let child_cancel = CancellationToken::new();
@@ -2401,6 +2597,8 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
 
         let res = runner.run(req, pair.sink, child_cancel).await;
         self.agents_running.lock().unwrap().remove(&child_conv);
+        self.agent_progress.lock().unwrap().remove(&child_conv);
+        pump.abort();
         link.abort();
         let (status, summary) = match res {
             Ok(out) => {

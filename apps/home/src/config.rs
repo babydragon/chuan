@@ -466,7 +466,7 @@ impl Default for AgentsFile {
             max_turns: 6,
             max_tokens: 20_000,
             wall_ms: 120_000,
-            background_idle_s: 30,
+            background_idle_s: 5,
             roles: std::collections::HashMap::new(),
             roles_dir: None,
         }
@@ -486,7 +486,7 @@ fn default_agent_wall() -> u64 {
     120_000
 }
 fn default_bg_idle() -> u64 {
-    30
+    5
 }
 
 /// token 预算（D20）。0 = 不限；金额口径等 `[pricing]` 落地后再加。

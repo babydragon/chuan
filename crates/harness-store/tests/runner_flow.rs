@@ -857,6 +857,51 @@ fn bg_spec(task: &str) -> harness_kernel::AgentSpec {
 
 /// 回归：`background=true` 走的是 trait 的 `enqueue`。
 /// 之前只实现了 `spawn`，trait 默认实现直接回"不支持后台任务"（真实事故）。
+
+/// `/cancel` 也要能停后台任务（pending 直接标 cancelled，running 取消令牌）。
+#[tokio::test]
+async fn cancel_stops_background_tasks() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = task_actor(Arc::clone(&store), Arc::clone(&driver), Arc::clone(&channel), 0);
+
+    let id = actor.enqueue_agent_task(bg_spec("后台的活")).await.unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Command,
+        text: Some("/cancel".into()),
+        dedupe_key: "u-cancel-bg".into(),
+        callback_id: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    Arc::clone(&actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    let all = channel.delivered.lock().unwrap().join("\n");
+    assert!(all.contains("已取消 1 个后台任务"), "{all}");
+
+    let docs = {
+        let mut rd = store.begin_read().await.unwrap();
+        rd.list_docs(harness_kernel::DocQuery {
+            scopes: vec!["task".into()],
+            kinds: vec!["agent_task".into()],
+            limit: 10,
+        })
+        .await
+        .unwrap()
+    };
+    assert_eq!(docs[0].id.0, id);
+    assert_eq!(docs[0].payload["status"], "cancelled");
+}
+
 #[tokio::test]
 async fn background_delegate_enqueues_via_trait() {
     use harness_kernel::AgentSpawner;
@@ -1035,6 +1080,88 @@ async fn restart_marks_running_task_interrupted() {
         .unwrap()
     };
     assert_eq!(docs[0].payload["status"], "interrupted");
+}
+
+
+/// `/agents show <id>`：能看到子会话正文与工具轨迹（thinking 不落账本，明说）。
+#[tokio::test]
+async fn agents_show_dumps_child_transcript() {
+    use harness_kernel::{EventKind, NewEvent};
+
+    let store = Arc::new(EphemeralStore::new());
+    {
+        let mut tx = store.begin_write().await.unwrap();
+        for (kind, payload) in [
+            (EventKind::MsgAssistant, serde_json::json!({"text":"我先看看 /ws/demo 的代码"})),
+            (EventKind::MsgToolResult, serde_json::json!({"call_id":"c1","ok":true,"preview":"ls: average.py test_average.py"})),
+            (EventKind::MsgAssistant, serde_json::json!({"text":"空行会让 row[0] 抛 IndexError，已修复"})),
+        ] {
+            tx.append(NewEvent {
+                conv: harness_kernel::ConversationId("sub:fake:1000:0#1".into()),
+                run: RunId::from("r-child"),
+                turn: None,
+                kind,
+                payload,
+                dedupe_key: None,
+            })
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    let driver = FakeDriver::new(vec![]);
+    let channel = Arc::new(FakeChannel::default());
+    let actor = ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 1,
+            wall_clock_ms: 1_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            budget: Default::default(),
+            roles: None,
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    );
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Command,
+        text: Some("/agents show sub:fake:1000:0#1".into()),
+        dedupe_key: "u-show".into(),
+        callback_id: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    Arc::new(actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    let all = channel.delivered.lock().unwrap().join("\n");
+    assert!(all.contains("IndexError"), "应带子会话正文: {all}");
+    assert!(all.contains("average.py"), "应带工具轨迹: {all}");
+    assert!(all.contains("thinking 不落账本"), "应说明推理不入账: {all}");
 }
 
 #[tokio::test]
@@ -1468,6 +1595,9 @@ async fn role_shapes_child_prompt_tools_and_model() {
     assert!(sys.starts_with("SYS-BASE"), "父前缀必须原样在前: {sys}");
     assert!(sys.contains("你是写代码的子 agent。"), "角色段应追加在后: {sys}");
     assert!(sys.contains("子 agent（depth 1）"), "子 agent 规则也要有: {sys}");
+    // 子 agent 必须知道自己这次有哪些工具，别去试没有的能力
+    assert!(sys.contains("你这次能用的工具只有"), "{sys}");
+    assert!(sys.contains("echo"), "应列出实际工具: {sys}");
 
     let tools = driver.tools_seen.lock().unwrap();
     assert_eq!(tools[0], vec!["echo".to_owned()], "角色只能收窄工具");

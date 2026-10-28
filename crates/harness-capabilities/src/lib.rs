@@ -30,6 +30,7 @@ pub use net::{NetLogTool, WebFetchTool};
 pub use roles::{DiskRoles, RoleTool};
 pub use tools::remind::RemindTool;
 pub use tools::send::SendFileTool;
+pub use tools::task::TaskTool;
 pub use playbook::PlaybookTool;
 pub use services::{HttpServiceTool, Service};
 pub use proxy::{Mode as ProxyMode, ProxyConfig};

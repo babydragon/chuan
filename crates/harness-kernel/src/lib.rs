@@ -32,7 +32,7 @@ pub use actor::{ActorConfig, ConversationActor};
 pub use budget::BudgetLimits;
 pub use agent::{
     clip_summary, AgentError, AgentLimits, AgentProfile, AgentSpec, AgentSpawner, AgentStatus,
-    Conclusion, RoleSource, RoleSpec,
+    Conclusion, RoleSource, RoleSpec, TaskInfo,
 };
 pub use effect::EffectClass;
 pub use env::{ExecOpts, ExecOutput, ExecutionEnv};

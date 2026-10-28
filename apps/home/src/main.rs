@@ -16,7 +16,7 @@ use std::sync::Arc;
 use harness_capabilities::{
     BwrapEnv, DelegateTool, DiskRoles, ExecTool, FilesTool, HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
     NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindTool, RoleTool,
-    RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, WebFetchTool,
+    RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, TaskTool, WebFetchTool,
     WriteTool,
 };
 use harness_channels::telegram::http::HttpApi;
@@ -306,6 +306,8 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     tools.register(Arc::new(RollbackSkillTool::new(Arc::clone(&skills))));
     // 子 agent 委托（D19）。tier=1：子 agent 的工具集里没有它。
     tools.register(Arc::new(DelegateTool));
+    // 父 agent 自己管理后台任务（查/停）；子 agent 拿不到（tier=1）。
+    tools.register(Arc::new(TaskTool));
     // 角色管理（SelfModify → 逐次审批）：agent 可以注册"小弟"，主人批过才生效。
     tools.register(Arc::new(
         RoleTool::new(&cfg.roles_dir).with_allowed(cfg.agents.tools.clone()),
