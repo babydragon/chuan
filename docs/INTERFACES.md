@@ -39,6 +39,8 @@ pub trait Channel: Send + Sync + 'static {
 1. 通道只收 `View`，不拼字符串；排版/分片/转义在 Renderer。
 2. `ActorRef ≠ 人`；跨通道合并靠应用层。
 3. `NotModified` 当成功、`TooOld` 让 Renderer 换新消息、`Rejected` 全局退避。
+   **`update` 的 429 必须返回 `Rejected`，不得上抛 `Err`**：上抛会终止整轮 run（板上事故：43s 的洪水控制把 run 打死，界面停在"正在输入"）。
+   `typing` 收到 429 同样按 `retry_after` 退避，否则打字提示每 4s 一次会把洪水控制一直续上。
 
 ---
 
@@ -238,6 +240,8 @@ pub trait Renderer: Send {
     fn push(&mut self, ev: RenderEvent);
     fn flush(&mut self, now: Timestamp) -> RenderAction;
     fn on_edit_result(&mut self, r: EditOutcome);
+    /// 发送失败（如 429）：重新置起待发送，并在此窗口内不再碰通道。
+    fn on_send_failed(&mut self, retry_after_ms: u32);
     /// 通道成功发出新消息后回填引用，后续才能原地编辑。
     fn on_sent(&mut self, msg: MsgRef);
     /// 用权威终稿替换累积文本（流式 delta 与最终文本可能不一致）。
@@ -250,6 +254,10 @@ pub trait Renderer: Send {
 - **View 是全量快照**（不是增量），所以丢事件只让某一帧稍旧，不会渲染错乱。
 - **驱动方**：`ConversationActor` 持 `tokio::time::interval(caps.min_edit_interval_ms)`，每 tick 调 `flush(now)`；工具静默期也能刷新"调用中"。
 - `TooOld` → `on_edit_result` 让 Renderer 下次返回 `Send`。
+- **内容未变不发 edit**：快照与上次成功发送的一致时 `flush` 返回 `None`。长任务里模型思考/等工具时快照是静止的，每秒一次编辑会点着 Telegram 的洪水控制（429 + 数十秒退避）。
+- 429 不是失败：`Rejected` 只推迟下一拍（`last_flush += retry_after_ms`）并让同一份快照稍后重发；进度刷新被限流时 run 继续跑。
+- 发送（`deliver`）被限流：`on_send_failed` 记下 `send_after`，窗口内一次都不发，恢复后自动补发。
+- 定稿（`finish`）被限流：run 已结束，按 `retry_after` 等窗口后重发，最多 3 次、单次上限 60s；仍失败只记日志，不改变 run 结论。
 - 分片：`View.shard` / `View.is_last`；**只有最后一片参与后续 edit**，按钮只挂最后一片。
 - 降级：`caps.markdown == false` → 纯文本；`caps.edit == false` → 只在 `finish` 时 `Send`。
 - **格式化归通道**：Renderer 只产出 `Block`，Telegram 通道负责 `markdown-lite → HTML`（`DECISIONS.md` D13）；长文本先按原始文本分片再逐片格式化，保证每片标签天然闭合。

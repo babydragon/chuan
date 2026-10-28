@@ -348,6 +348,8 @@ struct FakeChannel {
     acks: Mutex<Vec<String>>,
     buttons: Mutex<Vec<Vec<Vec<(String, String)>>>>,
     cleared: Mutex<Vec<String>>,
+    /// 接下来 N 次 deliver 返回 429（用来验证限流后仍能送达）
+    fail_deliver_times: Mutex<usize>,
 }
 
 fn view_text(v: &View) -> String {
@@ -377,6 +379,13 @@ impl harness_kernel::Channel for FakeChannel {
         Ok(())
     }
     async fn deliver(&self, _c: &str, view: View) -> Result<MsgRef, ChannelError> {
+        {
+            let mut left = self.fail_deliver_times.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(ChannelError::RateLimited { retry_after_ms: 10 });
+            }
+        }
         self.delivered.lock().unwrap().push(view_text(&view));
         self.buttons.lock().unwrap().push(
             view.buttons
@@ -476,6 +485,66 @@ async fn actor_turns_inbound_into_reply() {
     let sent = channel.delivered.lock().unwrap();
     assert!(!sent.is_empty());
     assert!(sent.iter().any(|t| t.contains("你好")), "{sent:?}");
+}
+
+#[tokio::test]
+async fn final_message_is_retried_after_rate_limit_window() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = FakeDriver::new(vec![Step::Done { text: "限流也要送到".into(), finish: FinishReason::Stop }]);
+    let registry = harness_kernel::ToolRegistry::new();
+    let env = NoopEnv;
+    let channel = Arc::new(FakeChannel::default());
+    // 3 次 = deliver_with_retry 的全部尝试次数：让它们统统失败，逼出"等窗口后重发"
+    *channel.fail_deliver_times.lock().unwrap() = 3;
+
+    let actor = ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(driver),
+        Arc::new(registry),
+        Arc::new(env),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Text,
+        text: Some("说点什么".into()),
+        dedupe_key: "u-rl".into(),
+        callback_id: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    Arc::new(actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    let sent = channel.delivered.lock().unwrap();
+    assert!(
+        sent.iter().any(|t| t.contains("限流也要送到")),
+        "退避窗口结束后必须补发终稿: {sent:?}"
+    );
 }
 
 #[tokio::test]

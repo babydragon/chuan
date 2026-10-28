@@ -17,6 +17,8 @@ pub struct FakeApi {
     pub deny_edit: Mutex<bool>,
     /// 下一次调用返回 429
     pub rate_limit_once: Mutex<Option<u32>>,
+    /// 下一次编辑返回 429
+    pub rate_limit_edit_once: Mutex<Option<u32>>,
     next_msg_id: AtomicI64,
 }
 
@@ -65,6 +67,9 @@ impl Api for FakeApi {
     ) -> Result<EditOutcome, ApiError> {
         if *self.deny_edit.lock().unwrap() {
             return Ok(EditOutcome::TooOld);
+        }
+        if let Some(ms) = self.rate_limit_edit_once.lock().unwrap().take() {
+            return Err(ApiError::RetryAfter(ms));
         }
         self.edited.lock().unwrap().push((chat, text.to_owned()));
         Ok(EditOutcome::Edited)

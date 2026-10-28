@@ -41,4 +41,4 @@ pub use tool::{DocReader, NullDocReader, NullOutbox, Outbox, Tool, ToolCallReque
 pub use tool_registry::ToolRegistry;
 pub use runner::{RunOutcome, RunRequest, Runner, RunnerError};
 pub use view::{Block, Button, Caps, Choice, EditOutcome, Prompt, RenderAction, RenderEvent, Renderer, RunStatus, ToolState, View};
-pub use render::{TurnRenderer, apply_action};
+pub use render::{ActionOutcome, TurnRenderer, apply_action};

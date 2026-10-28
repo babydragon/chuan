@@ -1,4 +1,7 @@
-//! 能力层：沙盒、内置工具、技能、打印。P0 待实现 `BwrapEnv` 与 `exec`。
+//! 能力层：沙盒（bwrap）、内置工具、命名服务（http/mcp）、技能、playbook、凭据注入。
+//!
+//! 边界：这里只放"通用传输与执行"，领域能力（打印、某家 API 的语义）归技能与 playbook（D17）；
+//! 凭据的值只在宿主侧使用，永远不进沙盒（D18）。
 
 use async_trait::async_trait;
 use harness_kernel::{env::{ExecOpts, ExecOutput}, EnvError, ExecutionEnv};

@@ -3,6 +3,9 @@
 > 开发与联调都在 x86_64 开发机上完成；这份清单只记录**只能在目标板确认**的项。
 > 每项做完改成 `[x]`，并写下实测结论（版本 / 耗时 / 报错原文）。
 > 原则：**实测优先于推断**；没测过的一律留空，不写"应该可以"。
+>
+> **口径**：本文件是板上状态的唯一权威。`README.md` / `ROADMAP.md` 里的概览若与此冲突，
+> 以本文件为准——概览只允许写这里已勾的结论。
 
 参考硬件：RISC-V SBC（riscv64，8GB 内存，Debian 系发行版，systemd）。
 数值阈值按这块板定：常驻内存目标 <150MB，沙盒冷启动 <60ms。
@@ -60,9 +63,10 @@
 
 ## 3. 出网与审计
 
-- [ ] `web_fetch` 取公网页面成功（TLS 根证书齐全；需要代理时生效）
-      （**2026-10-27 部分**：`openai.com` 返回 403 —— 响应头 `server: cloudflare` +
-      `cf-mitigated: challenge`，换浏览器 UA 同样 403，是源站反爬而非代理/请求头问题）
+- [x] `web_fetch` 出网与 TLS 通（**2026-10-27 实测**：对 `openai.com` 拿到 403 响应，
+      证明 DNS/TLS/代理链路可用）
+- [ ] `web_fetch` 真正取到页面正文（同上一条的 403 来自源站 Cloudflare：
+      `server: cloudflare` + `cf-mitigated: challenge`，换浏览器 UA 同样 403；未换源验证）
 - [ ] 大响应（>12KB JSON）变成"结构 + 预览"，全文落 `/ws/.tool-results/`
 - [ ] `net-access.jsonl` 落盘、权限 `600`、达到上限后轮转
       （**2026-10-27 部分**：`tail` 能读到 403 那条记录，字段齐全；权限与轮转未验）
@@ -70,28 +74,38 @@
 
 ## 4. 通道与部署
 
-- [ ] systemd 启动、`flock` 单实例、重启后 offset 不丢
-- [ ] `LoadCredentialEncrypted` 注入密钥；`env -i` 的宿主执行看不到密钥
-- [ ] Telegram 走代理可用
-- [ ] 时区 / `[app] utc_offset` 与系统一致
-- [ ] 中文与表格渲染（CJK 双宽对齐、`<pre>` 块）
+- [x] systemd 启动（**2026-10-27 实测**：`enable --now`、多次 `restart` 均正常；
+      rc.4 之前还验过 243/CREDENTIALS 的失败路径）
+- [ ] `flock` 单实例（未验：并发启动第二个实例应被拒；装脚本后没做过这个实验）
+- [ ] 重启后 offset 不丢（**部分**：多次重启后未出现重复回复，但没做"发消息→立刻重启"的对照）
+- [ ] `LoadCredentialEncrypted` 注入密钥（未验；出厂 unit 用的是明文 `LoadCredential=`
+      + `0400 root:root`，加密路径需要自己改 unit 才启用）
+- [ ] `env -i` 的宿主执行看不到密钥（未验；`host_exec` 默认 deny，没跑过提权命令）
+- [ ] Telegram 走代理可用（**部分**：收发一直正常；但没单独验证"是否经过代理"——
+      `[proxy] url` 已配置，Telegram 也可能直连可达，两者无法区分）
+- [x] 时区 / `[app] utc_offset` 与系统一致（**2026-10-27 实测**：16:30 / 16:45 定时任务
+      按本地时间准点投递；09:00 的一次性提醒在停服后 09:09 补跑，说明按 +08:00 计算）
+- [x] 中文与表格渲染（**2026-10-27/28 实测**：整轮对话与工具轨迹的中文、列表、
+      代码块均正常；未单独构造 CJK 双宽对齐的边界用例）
 
 ## 5. 技能
 
-- [ ] `publish_skill` 在板上 dry-run（examples 跑通才落盘）
-- [ ] 安装后**无需重启**即可被模型调用
+- [x] `publish_skill` 在板上 dry-run（**2026-10-27 实测**：`machine-info` 技能发布成功，
+      examples 通过后才落盘）
+- [x] 安装后**无需重启**即可被模型调用（同上：发布后直接被定时任务调用，中间没有重启）
 - [ ] `rollback_skill` 回到上一版
 - [ ] `network: true` 的技能真的有网；同一脚本在离线 lane 里失败
 - [ ] 导入外部技能：`playbook(import-skill)` → 改写 → 安装
-- [ ] 打印技能：`lpstat` 查状态、`ipptool` 取 `marker-levels`、`lp -H hold` 后 `cancel` 不浪费纸
+- [ ] 打印技能：`ipptool` 取 `marker-levels`、`lp -H hold` 后 `cancel` 不浪费纸
+      （**部分**：`lpstat -r/-e/-p -d` 与 mDNS 解析已验证，见 §2；耗材与挂起/取消没做完）
 
 ## 6. 定时任务
 
 - [x] 建一条 `weekdays 09:00` 静态提醒，重启后仍在
       （**2026-10-27 实测**：建好后立即 `systemctl restart chuan`，到点自行投递）
 - [x] 错过 1 小时内补跑一次（**2026-10-27 实测**：stop 后过了触发点再 start，立刻补投）
-- [ ] ~~关机错过 3 小时不补跑~~（**按设计放弃验证**：>2h 的补跑窗口只用于防"断电一周后
-      开机被过期提醒刷屏"，家里长时间断电不是常态；代码路径与 2h 内的补跑共用，风险低）
+- ⏭️ **按设计放弃验证**：关机错过 3 小时不补跑。>2h 的补跑窗口只用于防"断电一周后
+  开机被过期提醒刷屏"，家里长时间断电不是常态；这条路径与 2h 内的补跑共用代码。
 - [x] pinned（跑技能）任务能投递，且**不经过模型**
       （**2026-10-27 实测**：16:30:12 投递，`usage_rollup` 该时刻**无任何记录**；
       输出为技能 stdout 原样排版、整秒投递、无「第 N 轮」状态行）
@@ -110,8 +124,10 @@
 
 ## 8. 服务与视觉
 
-- [ ] MCP 服务（`kind = "mcp"`）握手成功，`tools/list` 数量与远端一致
-- [ ] `mcp(server, tool, args)` 真实调用一次（读操作）
+- [x] MCP 服务（`kind = "mcp"`）握手成功（**2026-10-27 实测**：dida 握手通过并注册成功）
+- [x] `mcp(server, tool, args)` 真实调用一次（**2026-10-27 实测**：
+      `mcp(server="dida", tool="get_user_preference")` 正常返回，鉴权由宿主注入）
+- [ ] `tools/list` 数量与远端一致（开发机对 dida 见过 57 个；板上未逐项核对）
 - [x] `service(action="add")` 运行期加服务，**不重启**即可用；配置落到 `services.d/`
       （**2026-10-27 实测**：dida MCP 通过 `service add` 握手成功并写入片段；
       **2026-10-28 补**：`services.d/*.toml` 启动时会被加载——本机用 `demo` 片段验证过，
@@ -121,9 +137,12 @@
 
 ## 9. 性能
 
-- [ ] 首字延迟（目标 < 4s，直连模型）
-- [ ] 单轮完整耗时 / `exec` 调用耗时
-- [ ] 常驻内存 RSS（`ps_mem` 或 `/proc/<pid>/status`）
+- [ ] 首字延迟（目标 < 4s，直连模型）——未测；需要"发消息到出现第一个字"的端到端计时
+- [ ] 单轮完整耗时——未测；现有数据只有工具侧耗时（见下条），不含模型往返
+- [x] `exec` 调用耗时 / 沙盒冷启动（**2026-10-27 实测**：`exec ls /home` 工具侧 39ms，
+      `exec uname -m` 505ms 含首次启动；开发机约 30ms）
+- [x] 常驻内存 RSS（**2026-10-27 实测**：`ps aux` → RSS 7.1MB / VSZ 92MB，
+      远低于 <150MB 目标；未做长跑观察，`VmHWM` 峰值待补）
 
 ---
 
@@ -172,3 +191,18 @@
   （per-exec `systemd-run --scope` 需要 user manager；或直接写 cgroup v2）。
 - ⚠️ **`web_fetch` 遇 Cloudflare 挑战**：403 + `cf-mitigated: challenge` 时模型无从判断，
   会改用 `lan_exec` + `r.jina.ai` 兜底。可考虑在 403 且带该响应头时给一句"该站有反爬，可换源"。
+
+---
+
+## 未验项分组（2026-10-28 复核）
+
+按"为什么还没验"分组（条数以本文勾选为准，这里是归类不是计数）：
+
+| 原因 | 条目 |
+|---|---|
+| **需要你在板上跑** | `flock` 单实例；offset 对照实验；`env -i` 提权执行；`http://192.168.x.x` 拒绝留痕；大响应落盘；`net-access.jsonl` 权限/轮转；`/py` `/node` 只读；`install_deps(pip)` 与探测拦截；`remember`→重启→命中；`keep`→`send_file` 链路 |
+| **需要时间观察** | 首字延迟；单轮完整耗时；`VmHWM` 长跑峰值；`/ws` 清理（要造旧文件） |
+| **需要破坏性演练** | `kill -9` 恢复；备份/恢复到新库 |
+| **依赖你的设备/场景** | 实际打印与耗材；`network: true` 技能；视觉（当前 `[vision] enabled=false`）；`LoadCredentialEncrypted`（出厂用明文）；Telegram 是否经代理 |
+| **代码已测但没在板上单独验** | `cargo zigbuild`（CI 已跑，板上未本地编）；cgroup v2 可写；`node`/`npm`；Debian `dist-packages` 路径；`security: token_file` 校验；`rollback_skill` |
+| **明确放弃** | 关机错过 3h 不补跑（见 §6） |

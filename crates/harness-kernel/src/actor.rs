@@ -19,12 +19,12 @@ use crate::effect::EffectClass;
 use crate::event::{EventKind, NewEvent};
 use crate::record::{NewApproval, ToolCallRecord};
 use crate::identity::Directory;
-use crate::render::{TurnRenderer, apply_action};
+use crate::render::{ActionOutcome, TurnRenderer, apply_action};
 use crate::runner::{ApprovalGate, RunRequest, Runner};
 use crate::store::Store;
 use crate::tool::Workspace;
 use crate::tool_registry::ToolRegistry;
-use crate::view::{Block, RenderEvent, Renderer, RunStatus, View};
+use crate::view::{Block, RenderAction, RenderEvent, Renderer, RunStatus, View};
 
 /// 审批等待上限：到点按拒绝处理，避免 run 永远挂着。
 const APPROVAL_TTL_S: u64 = 300;
@@ -86,6 +86,71 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             runs: Arc::clone(&self.runs),
             approvals: Arc::clone(&self.approvals),
             locks: Arc::clone(&self.locks),
+        }
+    }
+}
+
+/// 一次 run 的执行现场：**任何**退出路径（含 `?` 早退、panic）都必须清理。
+///
+/// 之前清理写在函数末尾，被 429 的 `?` 跳过，导致：typing 循环继续每 4s 发一次
+/// `sendChatAction`（看起来永远"正在输入"），`runs` 里留着一个死 token（`/status`
+/// 一直说"运行中"，`/cancel` 取消的是空气）。
+struct RunScope {
+    runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    conversation: String,
+    typing: CancellationToken,
+    typing_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RunScope {
+    /// 正常收尾：先停 typing 并等它退出，避免脱离任务多活一拍
+    async fn shutdown(&mut self) {
+        self.typing.cancel();
+        if let Some(t) = self.typing_task.take() {
+            let _ = t.await;
+        }
+    }
+}
+
+impl Drop for RunScope {
+    fn drop(&mut self) {
+        self.typing.cancel();
+        self.runs.lock().unwrap().remove(&self.conversation);
+        // JoinHandle 直接丢弃 = detach；typing 任务会在 stop.cancelled() 处自行退出
+    }
+}
+
+/// 终稿重发预算：run 已经结束，等满 retry_after 不会拖累 run（与流式刷新不同）。
+const FINAL_ATTEMPTS: usize = 3;
+const FINAL_WAIT_CAP_MS: u64 = 60_000;
+
+impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
+    /// 终稿必须尽量送达：被限流就按 retry_after 等窗口再发，而不是丢掉。
+    async fn apply_final(
+        &self,
+        conversation: &str,
+        renderer: &mut TurnRenderer,
+        action: RenderAction,
+    ) -> bool {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match apply_action(&*self.channel, conversation, renderer, action.clone()).await {
+                Ok(ActionOutcome::Done) => return true,
+                Ok(ActionOutcome::Deferred { retry_after_ms }) => {
+                    if attempt >= FINAL_ATTEMPTS {
+                        tracing::error!(retry_after_ms, attempt, "终稿仍被限流，放弃发送");
+                        return false;
+                    }
+                    let wait = (retry_after_ms as u64).min(FINAL_WAIT_CAP_MS);
+                    tracing::warn!(retry_after_ms, wait, attempt, "终稿被限流，等窗口后重发");
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "终稿发送失败");
+                    return false;
+                }
+            }
         }
     }
 }
@@ -363,9 +428,15 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 // 兜底：最多转 20 分钟，避免异常情况下永远"正在输入"
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(1200);
                 loop {
-                    let _ = channel.typing(&conv_key).await;
+                    // 被限流时不要再每 4s 添一次乱：按 retry_after 等，否则洪水控制会一直被续上
+                    let wait = match channel.typing(&conv_key).await {
+                        Err(crate::channel::ChannelError::RateLimited { retry_after_ms }) => {
+                            (retry_after_ms as u64).min(30_000)
+                        }
+                        _ => 4_000,
+                    };
                     tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                        _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
                         _ = stop.cancelled() => break,
                     }
                     if tokio::time::Instant::now() > deadline {
@@ -375,6 +446,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 }
             })
         };
+        // 清理交给 RAII：`?` 早退 / panic 也必须停 typing、摘掉 runs 条目
+        let mut scope = RunScope {
+            runs: Arc::clone(&self.runs),
+            conversation: inb.conversation.clone(),
+            typing: typing_cancel,
+            typing_task: Some(typing_task),
+        };
 
         tracing::info!(conv = %inb.conversation, "run: 已拿到会话锁，开始准备");
         // 前置步骤都加超时：卡在存储上不该让"正在输入"一直转
@@ -382,7 +460,6 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Ok(e) => e,
             Err(_) => {
                 tracing::warn!(conv = %inb.conversation, "epoch 读取超时");
-                typing_cancel.cancel();
                 let _ = self.reply(&inb.conversation, "⏱ 读取会话状态超时，请稍后再试（已取消）。").await;
                 return Ok(());
             }
@@ -549,15 +626,20 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         break Err(crate::runner::RunnerError::Budget("stalled".into()));
                     }
                     let action = renderer.flush(now_ms());
-                    apply_action(&*self.channel, &inb.conversation, &mut renderer, action).await?;
+                    if let Err(e) = apply_action(&*self.channel, &inb.conversation, &mut renderer, action).await {
+                        if matches!(e, ChannelError::RateLimited { .. }) {
+                            // 进度刷新发不出去不是失败：跳过这一拍，run 继续跑
+                            tracing::warn!(error = %e, "进度刷新被限流，跳过本轮");
+                        } else {
+                            return Err(e);
+                        }
+                    }
                 }
             }
         };
         let _ = stalled;
 
-        self.runs.lock().unwrap().remove(&key);
-        typing_cancel.cancel();
-        let _ = typing_task.await;
+        scope.shutdown().await;
 
         while let Ok(ev) = events.try_recv() {
             renderer.push(RenderEvent::Stream(ev));
@@ -588,7 +670,9 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             }
         }
         for action in renderer.finish(status) {
-            apply_action(&*self.channel, &inb.conversation, &mut renderer, action).await?;
+            if !self.apply_final(&inb.conversation, &mut renderer, action).await {
+                break;
+            }
         }
         // 记住按钮挂在哪条消息上：点击后要把它撤掉，别让过期按钮留在对话里
         if !from_skill_button && wrote_files {
@@ -1306,7 +1390,32 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::{attachment_lines, summarize_args};
+    use super::{RunScope, attachment_lines, summarize_args};
+
+    /// 早退（`?` / panic）时也必须停 typing、摘掉 runs 条目，
+    /// 否则：界面一直"正在输入"、`/status` 永远"运行中"。
+    #[test]
+    fn run_scope_cleans_up_on_drop() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use tokio_util::sync::CancellationToken;
+
+        let runs = Arc::new(Mutex::new(HashMap::new()));
+        let token = CancellationToken::new();
+        runs.lock().unwrap().insert("1000".to_owned(), token.clone());
+        let typing = CancellationToken::new();
+        {
+            let _scope = RunScope {
+                runs: Arc::clone(&runs),
+                conversation: "1000".to_owned(),
+                typing: typing.clone(),
+                typing_task: None,
+            };
+        }
+        assert!(runs.lock().unwrap().is_empty(), "drop 后 runs 条目应被摘掉");
+        assert!(typing.is_cancelled(), "drop 后 typing 应停止");
+        assert!(!token.is_cancelled(), "不该动 run 自己的取消令牌");
+    }
 
     #[test]
     fn attachments_are_listed_with_sandbox_paths() {

@@ -163,6 +163,43 @@ async fn delivers_html_and_edits_in_place() {
     assert!(matches!(action, RenderAction::Send(_)), "TooOld 后应发新消息");
 }
 
+/// 编辑被 429 时：这一拍放弃，但绝不能把整轮 run 打死；退避结束后同一份快照能再发出去。
+#[tokio::test]
+async fn edit_rate_limit_defers_instead_of_failing() {
+    let api = Arc::new(FakeApi::new());
+    let offsets = Arc::new(MemoryOffsets::default());
+    let ch = TelegramChannel::new(Arc::clone(&api), offsets as _, TelegramConfig::default());
+    let mut renderer = TurnRenderer::new(Caps {
+        edit: true,
+        buttons: true,
+        markdown: true,
+        max_text: 4096,
+        min_edit_interval_ms: 1000,
+    });
+
+    renderer.push(harness_kernel::RenderEvent::Stream(StreamEvent::TextDelta("第一段".into())));
+    let action = renderer.flush(0);
+    harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+
+    *api.rate_limit_edit_once.lock().unwrap() = Some(43_000);
+    renderer.push(harness_kernel::RenderEvent::Stream(StreamEvent::TextDelta("第二段".into())));
+    let action = renderer.flush(2000);
+    assert!(matches!(action, RenderAction::Edit(_)));
+    // 关键：这里必须是 Ok + Deferred，历史上 429 从这里冒到 actor，把整轮 run 干掉并留下永久"正在输入"
+    let outcome = harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+    assert_eq!(
+        outcome,
+        harness_kernel::ActionOutcome::Deferred { retry_after_ms: 43_000 },
+        "429 应报告 Deferred 并带上窗口"
+    );
+    assert!(api.edited.lock().unwrap().is_empty(), "429 不该被当成编辑成功");
+
+    let action = renderer.flush(2000 + 43_000 + 1000);
+    assert!(matches!(action, RenderAction::Edit(_)), "退避结束后应重发同一份快照");
+    harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+    assert_eq!(api.edited.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn long_final_text_is_split() {
     let api = Arc::new(FakeApi::new());

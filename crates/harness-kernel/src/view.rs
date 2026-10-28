@@ -96,6 +96,10 @@ pub trait Renderer: Send {
     fn on_edit_result(&mut self, outcome: EditOutcome);
     /// 通道成功发出新消息后回填引用，后续才能原地编辑。
     fn on_sent(&mut self, msg: MsgRef);
+    /// 发消息失败（如 429）：重新置起"待发送"，并在此时间点之前不再碰通道。
+    fn on_send_failed(&mut self, retry_after_ms: u32) {
+        let _ = retry_after_ms;
+    }
     /// 用权威终稿替换累积文本（流式 delta 可能与最终文本有差异）。
     fn replace_text(&mut self, text: String) {
         let _ = text;

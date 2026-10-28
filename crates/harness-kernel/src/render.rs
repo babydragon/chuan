@@ -12,6 +12,8 @@ use crate::view::{
 
 const MAX_TOOL_LINES: usize = 8;
 const REASONING_TAIL: usize = 120;
+/// 被限流时最多挡多久：窗口再长也不该让渲染永远停摆，终稿另有兜底重发
+const MAX_SEND_DEFER_MS: i64 = 60_000;
 
 #[derive(Clone, Debug)]
 struct ToolEntry {
@@ -34,6 +36,10 @@ pub struct TurnRenderer {
     last_flush: Timestamp,
     msg: Option<MsgRef>,
     need_send: bool,
+    /// 上次真正发出去的内容签名；内容没变就不发 edit（否则长任务每秒一次编辑会被限流）
+    last_sent: Option<String>,
+    /// 通道刚拒绝过（429）：这个时刻之前不再发起任何发送/编辑
+    send_after: Timestamp,
     /// 定稿最后一条消息上的按钮（如「沉淀为 Skill」）
     trailing: Vec<Vec<Button>>,
 }
@@ -50,6 +56,8 @@ impl TurnRenderer {
             last_flush: 0,
             msg: None,
             need_send: true,
+            last_sent: None,
+            send_after: 0,
             trailing: Vec::new(),
         }
     }
@@ -115,6 +123,11 @@ impl TurnRenderer {
     fn view(&self, shard: u16, is_last: bool) -> View {
         View { shard, is_last, blocks: self.compose(true), status: None, buttons: Vec::new() }
     }
+}
+
+fn view_signature(v: &View) -> String {
+    // 快照本身不大（正文已截断到一屏），存 debug 串比另做一套哈希结构更不易错
+    format!("{v:?}")
 }
 
 fn format_duration(ms: u64) -> String {
@@ -207,20 +220,31 @@ impl Renderer for TurnRenderer {
     }
 
     fn flush(&mut self, now: Timestamp) -> RenderAction {
+        // 通道刚给过 429：窗口内一次都别发，否则等于自己把洪水控制续上
+        if now < self.send_after {
+            return RenderAction::None;
+        }
         if !self.need_send && now - self.last_flush < self.caps.min_edit_interval_ms as i64 {
             return RenderAction::None;
         }
         if self.text.is_empty() && self.status.is_none() && self.tools.is_empty() && self.reasoning.is_empty() {
             return RenderAction::None;
         }
-        self.last_flush = now;
         let view = self.view(0, true);
+        self.last_flush = now;
+        let sig = view_signature(&view);
         if self.need_send {
             self.need_send = false;
-            RenderAction::Send(view)
-        } else {
-            RenderAction::Edit(view)
+            self.last_sent = Some(sig);
+            return RenderAction::Send(view);
         }
+        // 内容没变就不要 edit：等模型思考、等工具、等审批时快照是静止的，
+        // 每秒一次 editMessageText 会把 Telegram 的洪水控制点着（429 retry_after 动辄 30s+）。
+        if self.last_sent.as_deref() == Some(sig.as_str()) {
+            return RenderAction::None;
+        }
+        self.last_sent = Some(sig);
+        RenderAction::Edit(view)
     }
 
     fn on_edit_result(&mut self, outcome: EditOutcome) {
@@ -228,9 +252,12 @@ impl Renderer for TurnRenderer {
             EditOutcome::TooOld => {
                 self.need_send = true;
                 self.msg = None;
+                self.last_sent = None;
             }
             EditOutcome::Rejected { retry_after_ms } => {
+                // 没发出去：推迟下一拍，并把签名清掉，恢复后重发同一份快照
                 self.last_flush += retry_after_ms as i64;
+                self.last_sent = None;
             }
             EditOutcome::Edited | EditOutcome::NotModified => {}
         }
@@ -238,6 +265,13 @@ impl Renderer for TurnRenderer {
 
     fn on_sent(&mut self, msg: MsgRef) {
         self.msg = Some(msg);
+    }
+
+    fn on_send_failed(&mut self, retry_after_ms: u32) {
+        // 没发出去：下一拍继续尝试，但在洪水窗口内不要再碰通道
+        self.need_send = true;
+        self.last_sent = None;
+        self.send_after = now_ms() + (retry_after_ms as i64).min(MAX_SEND_DEFER_MS);
     }
 
     fn replace_text(&mut self, text: String) {
@@ -339,29 +373,95 @@ fn split_text(text: &str, cap: usize) -> Vec<String> {
     out
 }
 
+/// 一次落地的结果：`Deferred` 表示"这一拍没送到，稍后按 `retry_after_ms` 再来"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionOutcome {
+    Done,
+    Deferred { retry_after_ms: u32 },
+}
+
 /// 把渲染动作落到通道：Send → deliver，Edit → update，并把结果回填 Renderer。
+///
+/// 限流（429）不是致命错误：发不出去就报告 `Deferred`，绝不会把整轮 run 打死
+/// ——那会让界面停在半截且没有任何终态。
 pub async fn apply_action<C: Channel + ?Sized>(
     channel: &C,
     conversation: &str,
     renderer: &mut dyn Renderer,
     action: RenderAction,
-) -> Result<(), ChannelError> {
+) -> Result<ActionOutcome, ChannelError> {
     match action {
-        RenderAction::None => Ok(()),
-        RenderAction::Send(view) => {
-            let msg = channel.deliver(conversation, view).await?;
-            renderer.on_sent(msg);
-            Ok(())
-        }
+        RenderAction::None => Ok(ActionOutcome::Done),
+        RenderAction::Send(view) => match deliver_with_retry(channel, conversation, view).await {
+            Ok(msg) => {
+                renderer.on_sent(msg);
+                Ok(ActionOutcome::Done)
+            }
+            Err(ChannelError::RateLimited { retry_after_ms }) => {
+                renderer.on_send_failed(retry_after_ms);
+                Ok(ActionOutcome::Deferred { retry_after_ms })
+            }
+            Err(e) => Err(e),
+        },
         RenderAction::Edit(view) => {
             let Some(msg) = renderer.msg_ref().cloned() else {
-                let m = channel.deliver(conversation, view).await?;
-                renderer.on_sent(m);
-                return Ok(());
+                return match deliver_with_retry(channel, conversation, view).await {
+                    Ok(m) => {
+                        renderer.on_sent(m);
+                        Ok(ActionOutcome::Done)
+                    }
+                    Err(ChannelError::RateLimited { retry_after_ms }) => {
+                        renderer.on_send_failed(retry_after_ms);
+                        Ok(ActionOutcome::Deferred { retry_after_ms })
+                    }
+                    Err(e) => Err(e),
+                };
             };
-            let outcome = channel.update(conversation, &msg, view).await?;
-            renderer.on_edit_result(outcome);
-            Ok(())
+            match channel.update(conversation, &msg, view).await {
+                Ok(outcome) => {
+                    let deferred = match outcome {
+                        EditOutcome::Rejected { retry_after_ms } => {
+                            Some(ActionOutcome::Deferred { retry_after_ms })
+                        }
+                        _ => None,
+                    };
+                    renderer.on_edit_result(outcome);
+                    Ok(deferred.unwrap_or(ActionOutcome::Done))
+                }
+                Err(ChannelError::RateLimited { retry_after_ms }) => {
+                    // 退化成"这一拍没发出去"，交给 Renderer 的退避窗口
+                    renderer.on_edit_result(EditOutcome::Rejected { retry_after_ms });
+                    Ok(ActionOutcome::Deferred { retry_after_ms })
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+/// 限流退避上限：Telegram 的 retry_after 可能是 60s，等满会把正在跑的 run 冻住，
+/// 所以流式过程中只做短退避，剩下的交给下一拍。
+const RATE_LIMIT_BACKOFF_CAP_MS: u64 = 2_000;
+const DELIVER_ATTEMPTS: usize = 3;
+
+/// 发消息（不是编辑）时有界重试；仍然被限流就返回 `RateLimited`，
+/// 由调用方决定是"下一拍再来"还是"等够窗口再发"。
+async fn deliver_with_retry<C: Channel + ?Sized>(
+    channel: &C,
+    conversation: &str,
+    view: View,
+) -> Result<MsgRef, ChannelError> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match channel.deliver(conversation, view.clone()).await {
+            Ok(m) => return Ok(m),
+            Err(ChannelError::RateLimited { retry_after_ms }) if attempt < DELIVER_ATTEMPTS => {
+                let backoff = (retry_after_ms as u64).min(RATE_LIMIT_BACKOFF_CAP_MS);
+                tracing::warn!(retry_after_ms, backoff, attempt, "发消息被限流，退避后重试");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -381,8 +481,34 @@ mod tests {
         let mut r = TurnRenderer::new(caps());
         r.push(RenderEvent::Stream(StreamEvent::TurnStarted { turn_no: 1 }));
         assert!(matches!(r.flush(0), RenderAction::Send(_)));
+        r.push(RenderEvent::Stream(StreamEvent::TextDelta("x".into())));
         assert!(matches!(r.flush(500), RenderAction::None));
         assert!(matches!(r.flush(1000), RenderAction::Edit(_)));
+    }
+
+    /// 内容静止时不要一直 edit：板上实测每秒一次 editMessageText 会被 Telegram 洪水控制，
+    /// 一次 429(retry_after=43s) 就曾把整轮 run 打死。
+    #[test]
+    fn skips_edit_when_nothing_changed() {
+        let mut r = TurnRenderer::new(caps());
+        r.push(RenderEvent::Stream(StreamEvent::TurnStarted { turn_no: 1 }));
+        assert!(matches!(r.flush(0), RenderAction::Send(_)));
+        assert!(matches!(r.flush(1000), RenderAction::None), "内容没变不该 edit");
+        assert!(matches!(r.flush(60_000), RenderAction::None), "一直没变就一直不 edit");
+    }
+
+    /// 429 退避之后，同一份快照要能再发出去（不能因为签名已记录就永远丢掉）。
+    #[test]
+    fn retries_after_rate_limit_backoff() {
+        let mut r = TurnRenderer::new(caps());
+        r.push(RenderEvent::Stream(StreamEvent::TextDelta("x".into())));
+        assert!(matches!(r.flush(0), RenderAction::Send(_)));
+        r.on_sent(MsgRef("m1".into()));
+        r.push(RenderEvent::Stream(StreamEvent::TextDelta("y".into())));
+        assert!(matches!(r.flush(1000), RenderAction::Edit(_)));
+        r.on_edit_result(EditOutcome::Rejected { retry_after_ms: 5000 });
+        assert!(matches!(r.flush(2000), RenderAction::None), "退避窗口内不该再发");
+        assert!(matches!(r.flush(7000), RenderAction::Edit(_)), "退避结束后重发同一份快照");
     }
 
     #[test]

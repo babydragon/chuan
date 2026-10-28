@@ -41,7 +41,8 @@ impl Default for TelegramConfig {
     }
 }
 
-/// offset 持久化；SQLite 实现后续接入，P0 用内存。
+/// offset 持久化：接口在通道层，持久化实现由应用层提供
+/// （`apps/home/src/offsets.rs` 写 store 的 kv；测试/独立通道可用内存实现）。
 #[async_trait]
 pub trait OffsetStore: Send + Sync {
     async fn get(&self, key: &str) -> Option<i64>;
@@ -260,23 +261,24 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
     ) -> Result<EditOutcome, ChannelError> {
         let chat: i64 = conversation.parse().map_err(|_| ChannelError::BadRequest("bad chat".into()))?;
         let body = if self.caps.markdown { to_html(&render_plain(&view)) } else { render_plain(&view) };
-        if !view.buttons.is_empty() {
+        let res = if !view.buttons.is_empty() {
             let rows: Vec<Vec<(String, String)>> = view
                 .buttons
                 .iter()
                 .map(|row| row.iter().map(|b| (b.label.clone(), b.data.clone())).collect())
                 .collect();
-            return self
-                .api
+            self.api
                 .edit_message_with_buttons(chat, msg, &body, &rows)
                 .await
                 .map(|_| EditOutcome::Edited)
-                .map_err(map_err);
-        }
-        match self.api.edit_message(chat, msg, &body, self.caps.markdown).await {
+        } else {
+            self.api.edit_message(chat, msg, &body, self.caps.markdown).await
+        };
+        match res {
             Ok(o) => Ok(o),
             Err(ApiError::NotModified) => Ok(EditOutcome::NotModified),
-            Err(ApiError::RetryAfter(ms)) => Err(ChannelError::RateLimited { retry_after_ms: ms }),
+            // 429 不是错误：交给渲染器按 retry_after 推迟下一拍，别把整轮 run 打死
+            Err(ApiError::RetryAfter(ms)) => Ok(EditOutcome::Rejected { retry_after_ms: ms }),
             Err(e) => Err(map_err(e)),
         }
     }
