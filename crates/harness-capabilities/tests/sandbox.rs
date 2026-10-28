@@ -180,6 +180,18 @@ async fn masked_dir_is_empty_in_sandbox() {
         .unwrap();
     assert!(out.stdout.contains("0"), "遮掉后应为空目录: {}", out.stdout);
     assert!(out.stdout.contains("READ-FAILED"), "不该读到内容: {}", out.stdout);
+
+    // 也不能往里写：否则看起来像个"可写的空目录"，会误导模型
+    let out = env
+        .exec(
+            &["sh".into(), "-lc".into(),
+              "touch /opt/secretbox/x 2>/dev/null && echo WRITABLE || echo READONLY".into()],
+            opts(8000),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.stdout.contains("READONLY"), "遮蔽目录应只读: {}", out.stdout);
 }
 
 /// `/tmp` 是 tmpfs，必须限大小：不限制时它会长到内存的一半，脚本写满会把

@@ -197,7 +197,10 @@ impl BwrapEnv {
         // 靠权限位分不开。挂空 tmpfs 后沙盒里看到的是空目录。
         for dir in &self.masked {
             if dir.exists() {
+                // 空 tmpfs 盖住，并**重挂成只读**：沙盒里既看不到内容，也不能往这块
+                // 内存里写东西——避免出现"看起来是个可写空目录"的误导。
                 cmd.arg("--tmpfs").arg(dir);
+                cmd.arg("--remount-ro").arg(dir);
             }
         }
 
