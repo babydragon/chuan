@@ -122,6 +122,17 @@ fn valid_name(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
+/// 把"落盘结果"翻译成人话：成功给出路径，失败**明确说重启会丢**。
+fn save_line(r: &Result<PathBuf, String>) -> String {
+    match r {
+        Ok(p) => format!("配置已写入 {}", p.display()),
+        Err(e) => format!(
+            "⚠️ 已在本进程生效，但**写入配置失败，重启后会丢失**：{e}\n\
+             → 让主人在宿主上执行：sudo install -d -m 0770 -o root -g chuan <配置目录>/services.d"
+        ),
+    }
+}
+
 /// 写服务片段时的 HTTP 专属字段（MCP 用不到，传默认值）。
 #[derive(Default)]
 struct HttpExtra<'a> {
@@ -396,7 +407,7 @@ impl Tool for ServiceTool {
                                 false,
                             )
                         })?;
-                        let path = write_fragment(
+                        let saved = write_fragment(
                             &self.dir,
                             &name,
                             "mcp",
@@ -406,13 +417,12 @@ impl Tool for ServiceTool {
                             &tools,
                             catalog.as_deref(),
                             HttpExtra::default(),
-                        )
-                        .map_err(|e| ToolError::new(ErrorCode::Internal, e, false))?;
+                        );
                         Ok(ToolOutput {
                             content: vec![Block::Paragraph(format!(
-                                "已接入 MCP 服务 `{name}`：握手成功，{count} 个工具可用。\n\
-                                 配置：{}\n现在就能用：`mcp(server=\"{name}\", tool=\"__list__\")` 看清单。",
-                                path.display()
+                                "已接入 MCP 服务 `{name}`：握手成功，{count} 个工具可用。\n{}
+现在就能用：`mcp(server=\"{name}\", tool=\"__list__\")` 看清单。",
+                                save_line(&saved)
                             ))],
                             doc_writes: Vec::new(),
                             artifacts: Vec::new(),
@@ -441,7 +451,7 @@ impl Tool for ServiceTool {
                             base: base.clone(),
                             ..svc
                         });
-                        let path = write_fragment(
+                        let saved = write_fragment(
                             &self.dir,
                             &name,
                             "http",
@@ -456,13 +466,12 @@ impl Tool for ServiceTool {
                                 body: Some(&body),
                                 sign: sign.as_ref(),
                             },
-                        )
-                        .map_err(|e| ToolError::new(ErrorCode::Internal, e, false))?;
+                        );
                         Ok(ToolOutput {
                             content: vec![Block::Paragraph(format!(
-                                "已接入 HTTP 服务 `{name}`：{probe}；配置 {}\n调用：`http(service=\"{name}\", method=\"GET\", path=\"/…\")`\n\
+                                "已接入 HTTP 服务 `{name}`：{probe}；{}\n调用：`http(service=\"{name}\", method=\"GET\", path=\"/…\")`\n\
                                  如果接口文档还没写，把 API 说明整理成 playbook，下次就能直接查。",
-                                path.display()
+                                save_line(&saved)
                             ))],
                             doc_writes: Vec::new(),
                             artifacts: Vec::new(),

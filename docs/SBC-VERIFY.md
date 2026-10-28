@@ -108,7 +108,10 @@
 
 - [ ] MCP 服务（`kind = "mcp"`）握手成功，`tools/list` 数量与远端一致
 - [ ] `mcp(server, tool, args)` 真实调用一次（读操作）
-- [ ] `service(action="add")` 运行期加服务，**不重启**即可用；配置落到 `services.d/`
+- [x] `service(action="add")` 运行期加服务，**不重启**即可用；配置落到 `services.d/`
+      （**2026-10-27 实测**：dida MCP 通过 `service add` 握手成功并写入片段；
+      **2026-10-28 补**：`services.d/*.toml` 启动时会被加载——本机用 `demo` 片段验证过，
+      且 `services.d` 必须是 `0770 root:chuan`，否则重启会丢）
 - [ ] `service` 拒绝 `secrets/` 之外的 `token_file`
 - [ ] 视觉：发一张带文字的截图，模型能读出内容；`[vision] enabled` 关闭时明确说"看不到"
 

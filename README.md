@@ -346,6 +346,10 @@ token_file = "~/.config/chuan/secrets/weread_token"
 http(service="dida", method="POST", path="/open/v1/task", body={...})
 ```
 
+运行期也可以让 agent 自己接：`service(action="add", …)` 会当场生效并写入
+`<config>/services.d/<name>.toml`，**重启后仍加载**。该目录由安装脚本建成
+`0770 root:chuan`；写不进去时工具会明确提示"重启会丢失"，不会静默。
+
 - 只能访问该服务配置的 host（path 里出现协议/域名直接拒绝），不跟重定向；
 - 审计日志记服务名、方法、路径、状态、耗时，**不记 header、不记 body**；日志与错误里的凭据值会打码；
 - 服务本身的 API 说明放 `playbook`（例如 `playbook("dida-api")`），不进内核。

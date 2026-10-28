@@ -130,7 +130,7 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 |---|---|---|
 | 凭据（token/key） | `<config>/secrets/<name>`，目录 `0750 root:chuan`，文件见下 | **主人**（agent 只使用，永不读取内容） |
 | 主配置 | `<config>/chuan.toml` | 主人 |
-| 运行期新增服务 | `<config>/services.d/<name>.toml` | agent 通过 `service` 工具写 |
+| 运行期新增服务 | `<config>/services.d/<name>.toml`（目录 `0770 root:chuan`） | agent 通过 `service` 工具写；安装脚本预建，缺了会导致"本进程可用、重启丢失" |
 | playbook（SOP/API 说明） | `<config>/playbooks/<topic>.md` | agent 或主人 |
 | 技能 | `<skills>/<name>/` | agent 通过 `publish_skill` |
 | 文件库（长期） | `<library>/<digest>/<name>` | agent 通过 `keep` |

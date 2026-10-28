@@ -141,6 +141,8 @@ run install -d -m 0750 -o root -g chuan /etc/chuan/secrets
 run install -d -m 0750 -o root -g chuan /etc/chuan/playbooks
 # 调教用的追加 prompt / 自定义 SOP 都放这里
 run install -d -m 0750 -o root -g chuan /etc/chuan/prompts
+# 运行期新增的服务（service 工具）要写到这里；必须让 chuan 可写，否则重启就丢
+run install -d -m 0770 -o root -g chuan /etc/chuan/services.d
 run install -d -m 0750 -o chuan -g chuan /var/lib/chuan
 run install -d -m 0750 -o chuan -g chuan /var/lib/chuan/backups
 
