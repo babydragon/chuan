@@ -94,15 +94,46 @@ channels = ["telegram:123456789"]
 #   sandbox      沙盒内（/ws 可写、宿主不可见、无网络）→ 问也没用
 #   self_modify  改自身（装/回滚技能、改配置）        → 该问
 #   outbound     出网：真正的闸是域名白名单          → 白名单内免问
-#   host_exec    宿主执行/提权                      → 默认关闭
+#   host         宿主执行（L1，chuan 身份）           → 默认逐条问
+#   host_elevated 宿主提权（L2，经 chuan hostd）      → 默认关闭
+#   host_observe 宿主只读观测（/proc、systemctl）      → 免问
 sandbox = "allow"
 self_modify = "ask"
 outbound = "allow"
 lan = "ask"        # 内网调试（有网卡）：局域网与公网都可达，靠审批兜底
 install = "ask"    # 装依赖（pip/npm）
-host_exec = "deny"
-# 额外加严的工具名（只能加严，不能放松 host_exec = "deny"）
+# P4.6 实现前，下面三项只是占位（未知键会被忽略），不会放宽任何东西
+host_observe = "allow"
+host = "ask"
+host_elevated = "deny"
+# 额外加严的工具名（只能加严，不能放松 host_elevated = "deny"）
 require_approval = []
+
+# ---- 宿主执行（D22）----
+# 缺省 approval = "always"：写进表 = 默认挂载 + 免问；"once" = 默认不挂、每次点名（只读）。
+# 改这个文件后**不用重启**：按 mtime 热加载。
+[host]
+net = "host"                 # 共享宿主 netns（systemctl --user / 本机代理都要）
+
+[host.path]
+"/usr"                = { mode = "ro" }   # 二进制与库；merged-usr 上 /bin /lib 由程序补软链
+"/etc"                = { mode = "ro" }   # 读配置；secrets / services.d / chuan.toml 会被强制遮蔽
+"/proc"               = { mode = "ro" }   # 宿主进程视图（不换 pid namespace）
+"/sys"                = { mode = "ro" }   # 温度、频率、cgroup
+"/var/log/journal"    = { mode = "ro" }   # journalctl（需 systemd-journal 组）
+"/run/systemd/system" = { mode = "ro" }   # sd_booted()；缺了 systemctl 会报 "not booted"
+"/run/dbus"           = { mode = "ro" }   # 系统总线（systemctl 用）
+"/run/user/%U"        = { mode = "rw" }   # systemctl --user 的控制 socket
+"/var/lib/chuan/.config" = { mode = "rw" }  # user unit 文件
+"/var/lib/chuan/timers"  = { mode = "rw" }  # 监控脚本
+# 要读别的目录就点名（只读、弹卡）：host(grant=["/home/you/report.csv"])
+# "/home" = { mode = "ro", approval = "once" }
+
+# 提权命令（hostd 实现前无效）：argv 前缀匹配，没有 shell
+# [[host_elevated.grant]]
+# argv = ["/usr/bin/apt-get", "install"]
+# approval = "once"
+# snapshot = "dpkg"
 
 # 命名服务（可选）。kind = "http"（默认）或 "mcp"；token 只放凭据文件，权限 0600
 # 运行时新增的服务由 agent 通过 service 工具写到 <config>/services.d/<name>.toml，

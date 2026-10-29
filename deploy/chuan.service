@@ -10,7 +10,7 @@ StartLimitBurst=5
 Type=simple
 User=chuan
 Group=chuan
-SupplementaryGroups=lp
+SupplementaryGroups=lp systemd-journal
 WorkingDirectory=/var/lib/chuan
 ExecStart=/usr/local/bin/chuan --config /etc/chuan/chuan.toml
 Restart=always
@@ -47,6 +47,9 @@ ProtectClock=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/chuan
+# 宿主 lane（D22）：/run/user 在 ProtectHome=read-only 之下是只读的，而 bwrap 的 --bind
+# 不会清除继承的 MS_RDONLY（实测）。这里由 systemd 先重挂成 rw，user timer 才能落盘。
+ReadWritePaths=/run/user/%U
 MemoryMax=1G
 
 [Install]

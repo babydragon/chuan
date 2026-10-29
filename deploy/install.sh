@@ -199,9 +199,13 @@ ensure_dir "$ETC/prompts"    0750 root "$SVC_GROUP"
 ensure_dir "$ETC/services.d" 0770 root "$SVC_GROUP"
 # 角色目录：agent 的 role 工具会往里写，必须让服务用户可写（与 services.d 同理）
 ensure_dir "$ETC/roles"      0770 root "$SVC_GROUP"
+# 权限申请草稿（capability 工具只写这里，不改配置）
+ensure_dir "$ETC/capabilities" 0770 root "$SVC_GROUP"
 ensure_dir "$STATE"          0750 "$SVC_USER" "$SVC_GROUP"
 ensure_dir "$STATE/backups"  0750 "$SVC_USER" "$SVC_GROUP"
 # daemon 运行期自建的目录：存在就顺手校正
+# timers：宿主 lane 里 agent 放监控脚本的地方（[host.path] 默认已授权）
+ensure_dir "$STATE/timers" 0750 "$SVC_USER" "$SVC_GROUP"
 for d in workspaces inbox skills media files rt; do
   [[ -d "$STATE/$d" ]] && ensure_dir "$STATE/$d" 0750 "$SVC_USER" "$SVC_GROUP"
 done
@@ -254,6 +258,13 @@ for u in chuan.service chuan-backup.service chuan-backup.timer; do
 done
 if [[ -z $R ]]; then
   run systemctl daemon-reload
+  # 宿主执行（D22 L1）：`systemctl --user` 需要 user manager；journalctl 需要 journal 组。
+  # 两者都只在真实系统上做，--root 安装（打包/交叉）时跳过。
+  if command -v loginctl >/dev/null 2>&1; then
+    run loginctl enable-linger "$SVC_USER"
+  else
+    say "没有 loginctl：跳过 enable-linger（宿主 lane 的 user systemd 将不可用）"
+  fi
 fi
 
 cat <<NEXT
@@ -271,12 +282,20 @@ cat <<NEXT
   4) 看日志： journalctl -u chuan -f
 
 目录与权限（本脚本会建好并校正已有安装）：
-  /etc/chuan              0750 root:$SVC_GROUP
-  /etc/chuan/secrets      0750 root:$SVC_GROUP   （文件见上）
-  /etc/chuan/services.d   0770 root:$SVC_GROUP   （运行期加的服务写这里）
-  /etc/chuan/roles        0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
-  /etc/chuan/playbooks    0750 root:$SVC_GROUP
-  /var/lib/chuan          0750 $SVC_USER:$SVC_GROUP
+  /etc/chuan                0750 root:$SVC_GROUP
+  /etc/chuan/secrets        0750 root:$SVC_GROUP   （文件见上）
+  /etc/chuan/services.d     0770 root:$SVC_GROUP   （运行期加的服务写这里）
+  /etc/chuan/roles          0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
+  /etc/chuan/capabilities   0770 root:$SVC_GROUP   （权限申请草稿，agent 只写这里）
+  /etc/chuan/playbooks      0750 root:$SVC_GROUP
+  /var/lib/chuan            0750 $SVC_USER:$SVC_GROUP
+  /var/lib/chuan/timers     0750 $SVC_USER:$SVC_GROUP  （宿主 lane 的监控脚本；[host.path] 已授权）
+
+宿主执行（D22，P4.6-A）：
+  - 本脚本已 enable-linger：`systemctl --user` 才能用（user timer 跑在独立 slice，
+    不吃 chuan.service 的 MemoryMax）
+  - unit 里已加 SupplementaryGroups=systemd-journal（journalctl 要读系统日志）
+  - 授权表就在本配置文件（改完热加载，不用重启）；默认表见 chuan.toml 的 [host] 段
 
 代理说明：
   - 下载/安装阶段：--proxy 或 CHUAN_PROXY / https_proxy
