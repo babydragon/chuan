@@ -136,6 +136,9 @@ pub const SCHEDULE_JOB: &str = "\
 /// 群机器人（钉钉/飞书）配置 SOP：随二进制发布，可用 `playbooks/webhook.md` 覆盖。
 pub const WEBHOOK: &str = include_str!("../playbooks/webhook.md");
 
+/// 申请宿主权限的 SOP（D22）。随二进制发布，可用 `playbooks/capability.md` 覆盖。
+pub const CAPABILITY: &str = include_str!("../playbooks/capability.md");
+
 #[cfg(test)]
 mod tests {
     use super::*;

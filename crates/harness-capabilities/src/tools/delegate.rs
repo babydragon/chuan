@@ -7,7 +7,7 @@
 //! 三个结构性保证（不靠提示词）：
 //! - `tier = 1`：子 agent 的工具集里没有它，递归不可能发生；
 //! - `ctx.spawner` 为 `None` 时直接报错（定时任务、子 agent 自身的 run）；
-//! - 子 run 的审批门对 `ask` 一律拒绝，所以它拿不到 self_modify/install/host_exec。
+//! - 子 run 的审批门对 `ask` 一律拒绝，所以它拿不到 self_modify/install/host_elevated。
 
 use async_trait::async_trait;
 use harness_kernel::{

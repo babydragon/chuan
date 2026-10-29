@@ -70,6 +70,9 @@ pub struct BwrapEnv {
     network: bool,
     /// 运行时目录（venv / node_modules）：只读挂 `/py`、`/node`；装包时整块可写挂 `/rt`
     runtime: Option<(PathBuf, bool)>,
+    /// 宿主 lane（D22 的 L1）：Some 时走完全不同的挂载路径——
+    /// 只挂授权表给的路径，不挂 `/usr` `/etc` 默认集，`/proc` 用宿主视图。
+    host: Option<HostMounts>,
     /// 要在沙盒里**遮掉**的宿主目录（挂一个空 tmpfs 盖上去）。
     /// 典型用途：`/etc` 是整块只读挂进来的，凭据目录就在它下面——
     /// 不遮的话，沙盒里的脚本能直接读到 token（我们和 daemon 同 uid，权限位挡不住）。
@@ -87,6 +90,31 @@ impl BwrapEnv {
             mounts: Vec::new(),
             network: false,
             runtime: None,
+            host: None,
+            masked: Vec::new(),
+        }
+    }
+
+    /// 宿主 lane：按授权表挂载，宿主 netns 可选，**不换 pid namespace**。
+    ///
+    /// 与 `new()` 的区别（每一条都是 D22 的边界）：
+    /// - 不做 `--unshare-pid` / `--unshare-net`：要的是宿主进程表与宿主网络；
+    /// - `/proc` 用 `--ro-bind`（`--proc` 会挂一份**新** procfs，看谁都只有自己）；
+    /// - `/usr` `/etc` 等**不隐式挂**：装什么由授权表决定，漏了就该报 `NotGranted`。
+    ///
+    /// `mounts` 由调用方从 `grants` 生成，已经过 `PROTECTED` 校验；这里不再走
+    /// `validate_mount`（它保留 `/usr` `/etc` `/proc`，那是普通沙盒的规则）。
+    pub fn host(workspace: impl Into<PathBuf>, mounts: Vec<Mount>, net: bool) -> Self {
+        Self {
+            workspace: workspace.into(),
+            default_timeout: Duration::from_secs(15),
+            inbox: None,
+            skills: None,
+            media: None,
+            mounts: Vec::new(),
+            network: false,
+            runtime: None,
+            host: Some(HostMounts { mounts, net }),
             masked: Vec::new(),
         }
     }
@@ -162,6 +190,9 @@ impl BwrapEnv {
     }
 
     fn build_command(&self, argv: &[String], opts: &ExecOpts) -> Command {
+        if let Some(h) = &self.host {
+            return self.build_host_command(h, argv, opts);
+        }
         let mut cmd = Command::new("bwrap");
         cmd.args(Self::isolation_args(self.network));
         cmd.args([
@@ -282,6 +313,86 @@ impl BwrapEnv {
             "--setenv",
             "HOME",
             "/ws",
+            "--setenv",
+            "LANG",
+            "C.UTF-8",
+            "--setenv",
+            "TMPDIR",
+            "/tmp",
+        ]);
+        for (k, v) in &opts.env {
+            cmd.arg("--setenv").arg(k).arg(v);
+        }
+        cmd.args(argv);
+        cmd
+    }
+}
+
+/// 宿主 lane 的挂载集（由授权表生成）
+pub struct HostMounts {
+    pub mounts: Vec<Mount>,
+    pub net: bool,
+}
+
+impl BwrapEnv {
+    fn build_host_command(&self, h: &HostMounts, argv: &[String], opts: &ExecOpts) -> Command {
+        let mut cmd = Command::new("bwrap");
+        // 与普通沙盒共用 userns/ipc/uts/cgroup，但**不** unshare pid 与 net
+        cmd.args([
+            "--die-with-parent",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
+            "--unshare-user",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup-try",
+        ]);
+        if !h.net {
+            cmd.arg("--unshare-net");
+        }
+        for m in &h.mounts {
+            cmd.arg(if m.ro { "--ro-bind" } else { "--bind" }).arg(&m.src).arg(&m.dst);
+        }
+        // 合并 usr 的系统上 /bin /lib 是符号链接：只挂 /usr 时，缺了它们连动态链接器
+        // 都找不到，表现是 execvp 返回 ENOENT（看着像"命令不存在"，其实是 /lib64/ld-linux 缺了）。
+        if h.mounts.iter().any(|m| m.dst == Path::new("/usr")) {
+            for d in ["/lib", "/lib64", "/bin", "/sbin"] {
+                if let Ok(target) = std::fs::read_link(d) {
+                    let t = target.to_string_lossy();
+                    // 只补指向 usr/ 的链接；别的目标不在授权范围内，补了也是断链
+                    if t.starts_with("usr/") || t.starts_with("/usr/") {
+                        cmd.arg("--symlink").arg(target).arg(d);
+                    }
+                }
+            }
+        }
+        // 宿主进程视图：这是 L3 能读到别的进程的前提
+        if !h.mounts.iter().any(|m| m.dst == Path::new("/proc")) {
+            cmd.args(["--ro-bind", "/proc", "/proc"]);
+        }
+        // 遮蔽必须在挂载之后：/etc 整块挂进来时，凭据目录就在它下面
+        for dir in &self.masked {
+            if dir.exists() {
+                cmd.arg("--tmpfs").arg(dir);
+                cmd.arg("--remount-ro").arg(dir);
+            }
+        }
+        cmd.args(["--dev", "/dev", "--size", TMP_MAX_BYTES]);
+        cmd.arg("--tmpfs").arg("/tmp");
+        // /ws 仍是 agent 自己的地盘（脚本可以先写这里，再让 timer 从 /var/lib/chuan/timers 跑）
+        let _ = std::fs::create_dir_all(&self.workspace);
+        cmd.arg("--dir").arg("/ws");
+        cmd.arg("--bind").arg(&self.workspace).arg("/ws");
+        cmd.arg("--chdir").arg(opts.cwd.clone().unwrap_or_else(|| "/ws".into()));
+        cmd.args([
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/usr/local/bin:/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/var/lib/chuan",
             "--setenv",
             "LANG",
             "C.UTF-8",

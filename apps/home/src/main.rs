@@ -14,10 +14,13 @@ mod workspace_gc;
 use std::sync::Arc;
 
 use harness_capabilities::{
-    BwrapEnv, DelegateTool, DiskRoles, ExecTool, FilesTool, HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
+    BwrapEnv, CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache,
+    HostEnv, HostTool,
+    HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
     NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
     RoleTool,
-    RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, TaskTool, WebFetchTool,
+    RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, SysTool, TaskTool,
+    WebFetchTool,
     WriteTool,
 };
 use harness_channels::telegram::http::HttpApi;
@@ -286,6 +289,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             ("distill", crate::system_prompt::DISTILL),
             ("schedule-job", crate::system_prompt::SCHEDULE_JOB),
             ("webhook", crate::system_prompt::WEBHOOK),
+            ("capability", crate::system_prompt::CAPABILITY),
         ],
     ));
     tools.register(Arc::new(
@@ -313,6 +317,23 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     tools.register(Arc::new(DelegateTool));
     // 父 agent 自己管理后台任务（查/停）；子 agent 拿不到（tier=1）。
     tools.register(Arc::new(TaskTool));
+    // 宿主只读观测（D22 L3）：/proc、/sys 进程内读；units/journal 走固定命令直连（不经 bwrap）
+    tools.register(Arc::new(SysTool));
+    // 宿主执行（D22 L1）：可见范围由 [host.path] 定，按 mtime 热加载，改完不用重启
+    let grants = Arc::new(GrantsCache::new(
+        cfg.config_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("/etc/chuan/chuan.toml")),
+    ));
+    tools.register(Arc::new(HostTool::new(
+        Arc::new(HostEnv::new(&cfg.workspace, Arc::clone(&grants))),
+        Arc::clone(&grants),
+    )));
+    // 权限申请（只写草稿，不改配置）：agent 被卡住时的唯一出口
+    tools.register(Arc::new(CapabilityTool::new(
+        cfg.config_dir.join("capabilities"),
+        Arc::clone(&grants),
+    )));
     // 角色管理（SelfModify → 逐次审批）：agent 可以注册"小弟"，主人批过才生效。
     tools.register(Arc::new(
         RoleTool::new(&cfg.roles_dir).with_allowed(cfg.agents.tools.clone()),
