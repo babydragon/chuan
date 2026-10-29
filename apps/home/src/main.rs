@@ -42,6 +42,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
 
+    // 子命令：`chuan hostd ...`（root 单元，D22 的 L2）。它不是应用主流程，
+    // 只做「argv 授权表 + env -i + 审计」，见 capabilities::hostd。
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(|s| s.as_str()) == Some("hostd") {
+        let rest = &argv[2..];
+        let cfg = match harness_capabilities::hostd::config_from_args(rest) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("hostd 参数错误：{e}");
+                std::process::exit(2);
+            }
+        };
+        return match harness_capabilities::hostd::serve(cfg).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("hostd 启动失败：{e}");
+                std::process::exit(1);
+            }
+        };
+    }
+
     let cli = match config::Cli::parse(std::env::args()) {
         Ok(c) => c,
         Err(e) => {

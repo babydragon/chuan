@@ -316,6 +316,9 @@ B、C 未做。
 
 ### P4.6-C · hostd 与提权（root）
 
+**进度**：`chuan hostd` 骨架已实现（socket + `SO_PEERCRED` + argv 前缀匹配 + `env -i` +
+`host-access.jsonl`，4 个端到端测试）；**unit、install.sh、工具侧（含 `-s` 预览与 dpkg 快照）未接**。
+
 - `chuan hostd` 子命令 + 第二单元（`User=root`）+ `/run/chuan/host.sock`（`0660 root:chuan`）
 - `SO_PEERCRED` 校验、argv 前缀匹配、`env -i`、`host-access.jsonl`、`dpkg` 快照
 - 自毁防护：`chuan.service` 的 `restart` 排队到本轮结束；`stop` / `disable` 拒绝

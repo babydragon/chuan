@@ -10,6 +10,7 @@ pub mod admin;
 pub mod auth;
 pub mod grants;
 pub mod host;
+pub mod hostd;
 pub mod install;
 pub mod library;
 pub mod mcp;
