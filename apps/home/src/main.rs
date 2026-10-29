@@ -290,6 +290,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             ("schedule-job", crate::system_prompt::SCHEDULE_JOB),
             ("webhook", crate::system_prompt::WEBHOOK),
             ("capability", crate::system_prompt::CAPABILITY),
+            ("timer", crate::system_prompt::TIMER),
         ],
     ));
     tools.register(Arc::new(

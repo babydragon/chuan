@@ -139,6 +139,9 @@ pub const WEBHOOK: &str = include_str!("../playbooks/webhook.md");
 /// 申请宿主权限的 SOP（D22）。随二进制发布，可用 `playbooks/capability.md` 覆盖。
 pub const CAPABILITY: &str = include_str!("../playbooks/capability.md");
 
+/// 建/管 user timer 的 SOP（P4.6-B）。随二进制发布，可用 `playbooks/timer.md` 覆盖。
+pub const TIMER: &str = include_str!("../playbooks/timer.md");
+
 #[cfg(test)]
 mod tests {
     use super::*;
