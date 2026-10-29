@@ -355,7 +355,8 @@ pub struct ToolOutput {
 | `read` / `list` | `Pure` | 只读 |
 | `write` | `Idempotent { key: hash(path, content) }` | 同内容重写无害 |
 | `exec` | `External` | 任意命令，**默认不重跑**；技能可在 manifest 声明更弱的等级 |
-| `remind` | `Idempotent { key: hash(chat, due_at, text) }` | 重复入队被去重 |
+| `remind` | `External` | 建/改/取消定时任务；`update`/`del` 不在幂等集合里，崩溃后不重放 |
+| `reminders` | `Pure` | 只读列出/查看定时任务（含技能参数） |
 | `remember` | `Idempotent { key: hash(subject, predicate) }` | upsert 语义 |
 | `run_skill` | `External` | 脚本可能有副作用，失败不自动重发 |
 | `publish_skill` / `rollback_skill` | `External` | 改技能目录属于"改自身"，重放无意义 |

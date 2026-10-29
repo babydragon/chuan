@@ -70,7 +70,7 @@ curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/ins
 | 能力 | 说明 |
 |---|---|
 | 对话 | 流式输出，同一条消息里原地更新，不是"处理中…" |
-| 工具 | `exec`（bwrap 沙盒）· `read` `write`（仅工作区）· `remind` · `web_fetch` · `send_file` · `keep` `files` · `playbook` · `install_deps` · `run_skill` `publish_skill` · `http` `mcp` `service` · `delegate` `role` `task`（编排） |
+| 工具 | `exec`（bwrap 沙盒）· `read` `write`（仅工作区）· `remind` `reminders` · `web_fetch` · `send_file` · `keep` `files` · `playbook` · `install_deps` · `run_skill` `publish_skill` · `http` `mcp` `service` · `delegate` `role` `task`（编排） |
 | 过程可见 | 状态行显示 `第 N 轮 · 思考/执行`，工具轨迹带参数与耗时 |
 | 分工 | `delegate` 派子 agent（独立上下文、只回传结论、不能再派）；可按角色（`coder`/`tutor`…）派；
   长活走后台任务，重启只通知不重跑；接手时带上次结论，不必从零开始。配置与日常话术见 [`docs/ROLES.md`](docs/ROLES.md) |
@@ -539,6 +539,7 @@ channels = ["telegram:123456789"]      # 以后再加 "webui:u1"、"feishu:ou_xx
 - 只支持**固定时区偏移**（`[app] utc_offset`，默认 `+08:00`），不做夏令时；
 - 关机错过的任务：2 小时内补跑一次，超过就跳过，只排下一次；
 - 创建要确认（`self_modify = "ask"`）；查看/取消：`/reminders`、`/reminders del <id>`。
+- 模型侧现在也能自己管：`reminders`（list/get，只读不审批）看得到**技能与参数**，`remind(action="update")` 只改给定字段（改技能参数别删了重建——重建会因 id 哈希变了变成两条任务）。
 
 ### 装依赖（install_deps）
 

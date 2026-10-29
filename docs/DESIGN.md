@@ -102,7 +102,7 @@
 | 模块 | 功能点 | 不做 |
 |---|---|---|
 | 工具注册表 | 运行时装配；角色裁剪；同名覆盖；延迟加载 | 不编译期写死 |
-| 内置工具 | `read` `write` `exec` `lan_exec` `remember` `remind` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
+| 内置工具 | `read` `write` `exec` `lan_exec` `remember` `remind` `reminders` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
 | 编排工具 | `delegate`（派子 agent，tier=1）/ `role`（注册角色，SelfModify）/ `task`（查/停后台任务，tier=1） | 不做 workflow DSL |
 | 技能工具 | `run_skill` / `publish_skill` / `rollback_skill` | — |
 | 服务工具 | `http`（命名服务，支持 header/query/body/path 注入与 HMAC 签名）/ `mcp`（远端工具）/ `service`（运行期热加，写 `services.d/`） | token 不进上下文，也不进沙盒（D18） |

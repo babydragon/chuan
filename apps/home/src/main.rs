@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use harness_capabilities::{
     BwrapEnv, DelegateTool, DiskRoles, ExecTool, FilesTool, HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
-    NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindTool, RoleTool,
+    NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
+    RoleTool,
     RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, TaskTool, WebFetchTool,
     WriteTool,
 };
@@ -248,6 +249,10 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         RemindTool::new(cfg.tz_offset_min)
             .with_skills(Arc::clone(&skills))
             .with_identity(Arc::clone(&cfg.identity)),
+    ));
+    // 只读的查看入口：与 remind 拆开，查一眼不该弹审批卡
+    tools.register(Arc::new(
+        RemindersTool::new(cfg.tz_offset_min).with_identity(Arc::clone(&cfg.identity)),
     ));
     tools.register(WebFetchTool::with_proxy(&cfg.net_log, &cfg.proxy)?);
     // http / mcp / service 三个工具常驻：agent 才能在运行时自己接新服务

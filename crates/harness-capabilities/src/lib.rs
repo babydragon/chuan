@@ -28,7 +28,7 @@ pub use library::{FilesTool, KeepTool};
 pub use mcp::{McpCallTool, McpHub, McpServer};
 pub use net::{NetLogTool, WebFetchTool};
 pub use roles::{DiskRoles, RoleTool};
-pub use tools::remind::RemindTool;
+pub use tools::remind::{RemindersTool, RemindTool};
 pub use tools::send::SendFileTool;
 pub use tools::task::TaskTool;
 pub use playbook::PlaybookTool;

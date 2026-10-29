@@ -69,6 +69,12 @@ fn looks_like_path(name: &str) -> bool {
     name.contains('/') || name.starts_with('~')
 }
 
+/// 单行截断：列表里只显示第一行，避免多行内容把 /reminders 刷屏。
+fn truncate_line(s: &str, n: usize) -> String {
+    let one: String = s.lines().next().unwrap_or("").chars().take(n).collect();
+    one
+}
+
 /// 按字符切成不超过 `n` 的片段（Telegram 单条上限 4096，留出格式余量）。
 fn shard_text(s: &str, n: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -657,10 +663,20 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         .map(|s| s.describe())
                         .unwrap_or_else(|_| "?".into());
                     out.push_str(&format!(
-                        "- `{}` · {desc} · 下次 {}\n  {text}\n",
+                        "- `{}` · {desc} · 下次 {}\n",
                         d.id.0,
                         crate::schedule::format_local(next, self.cfg.tz_offset_min)
                     ));
+                    // 技能参数必须显示：否则"技能升级了、任务还用旧参数"根本看不出来
+                    if let Some(name) = d.payload["skill"]["name"].as_str() {
+                        let args = &d.payload["skill"]["args"];
+                        let args = if args.is_null() { "{}".to_owned() } else { args.to_string() };
+                        out.push_str(&format!("  技能 `{name}` · 参数 {args}\n"));
+                    }
+                    if let Some(p) = d.payload["polish"].as_str() {
+                        out.push_str(&format!("  加工：{}\n", truncate_line(p, 120)));
+                    }
+                    out.push_str(&format!("  {text}\n"));
                 }
                 out.push_str("\n取消：/reminders del <id>");
                 self.reply(&inb.conversation, &out).await
