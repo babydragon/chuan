@@ -344,9 +344,13 @@ pub struct ToolOutput {
 | `Outbound` | 出网：`web_fetch` / `http` / `mcp` | `allow`（白名单未做，靠审计） |
 | `Lan` | 内网调试 lane（有网卡） | `ask` |
 | `Install` | 装依赖（pip/npm，供应链） | `ask` |
-| `HostExec` | 宿主/提权执行 | `deny` |
+| `Host` | 宿主执行（L1，服务账号身份，路径白名单） | `ask` |
+| `HostElevated` | 宿主提权（L2，经 `chuan hostd`，argv 授权表） | `deny` |
+| `HostObserve` | 宿主只读观测（L3：`/proc`、`/sys`、`systemctl status`） | `allow` |
 
 `[policy] require_approval` 只能把 `allow` 提成 `ask`，不能放开 `deny`。
+`host` / `host_elevated` 是 L1 / L2 的**天花板**：置 `deny` 时授权表里所有条目一并失效。
+旧键 `host_exec` 从未实现过（只有枚举与配置位），直接改名为上面两个；读到旧键打 warning 并忽略。
 
 内置工具的副作用等级（P0 验收要用）：
 
@@ -367,10 +371,15 @@ pub struct ToolOutput {
 | `keep` | `Idempotent { key: "keep" }` | 内容寻址，重复保存等价 |
 | `files` | `External` | 导出/删除有副作用 |
 | `install_deps` | `External` | 拉外部代码、改运行时 |
+| `host` | `External` | L1 宿主执行；命令任意，**默认不重跑** |
+| `sys` | `Pure` | L3 只读 `/proc` / `/sys` |
+| `capability` | `Idempotent { key: hash(request) }` | 只写草稿文件并通知；不改任何权限 |
 | `playbook` | `Pure` | 只读文本 |
 
 域声明：`publish_skill` / `rollback_skill` = `SelfModify`，其余内置工具 = `Sandbox`
-（`web_fetch` = `Outbound`；未来的 `send` = `SelfModify`、`host_exec` = `HostExec`；打印等由技能实现，不占域）。
+（`web_fetch` = `Outbound`；`host` = `Host`、`hostd` 通道 = `HostElevated`、`sys` = `HostObserve`；
+`capability` 只写草稿、不改变权限，按 `Sandbox` 域免问；未来的 `send` = `SelfModify`；
+打印等由技能实现，不占域）。
 
 ```rust
 #[async_trait]
@@ -488,6 +497,73 @@ pub trait AgentSpawner: Send + Sync {
   前台委托是阻塞的，模型在等结果时无法调用工具，所以"管理前台"只能靠 `/cancel` 或 `wall_ms`。
 - 后台任务落 doc `kind="agent_task"` / `scope="task"`：payload 带 `text/role/inputs/status/conv/chat/attempts`，
   由 actor 的 5s tick 领取（提醒仍 30s）；`running` 在重启后标 `interrupted` 并通知，**不自动重跑**（D4）。
+
+---
+
+### 6.4 宿主执行（L1 / L2 / L3）
+
+设计理由见 `DECISIONS.md` D22。这里只写契约。
+
+| 边界 | 实现 | 关键参数 |
+|---|---|---|
+| L1 `Host` | `BwrapEnv` 的宿主变体 | 去掉 `--unshare-pid` 与 `--unshare-net`；**`--ro-bind /proc /proc`**（不能沿用 `--proc /proc`，那是新 procfs，看不到宿主进程）；路径按 `[host.path]` 逐条挂；`env -i` |
+| L2 `HostElevated` | 独立单元 `chuan hostd`（`User=root`） | unix socket `/run/chuan/host.sock`（`0660 root:chuan`）；`SO_PEERCRED` 校验对端 uid；只接受 JSON 请求；`env -i` |
+| L3 `HostObserve` | 进程内读文件 | `/proc`、`/sys`；零子进程，不占 lane |
+
+**授权表**（两份，均为数据；按 mtime 热加载，解析失败 fail-closed）：
+
+```toml
+[host]
+net = "host"                     # 共享宿主 netns
+[host.path]
+"/usr"  = { mode = "ro" }                        # 免问
+"/home" = { mode = "ro", approval = "once" }     # 默认不挂；每次在 grant[] 里点名（只读）
+"/var/log/journal" = { mode = "ro" }
+"/run/systemd/system" = { mode = "ro" }   # sd_booted()
+"/run/dbus" = { mode = "ro" }
+"/var/lib/chuan/timers" = { mode = "rw", approval = "always" }
+
+[[host_elevated.grant]]
+argv = ["/usr/bin/apt-get", "install"]   # 前缀匹配，无 shell
+approval = "once"
+snapshot = "dpkg"
+```
+
+**三档 scope**（实现上只有两个来源：调用参数，或授权表）：
+
+| scope | 来源 | 权限 | 生命周期 |
+|---|---|---|---|
+| 本次调用（临时挂载） | `host(grant=[…])` | **只 ro**，≤ 8 条 | 一次 exec，不落盘 |
+| 本对话 | 审批卡勾选「本对话有效」 | ro | 1800s，重启失效 |
+| 持久 | `[host.path]`，缺省 `always` | ro / rw | `always` 默认挂载且免问；`once` 默认不挂、点名才给（只读） |
+
+**结构化拒绝**（模型据此写申请单；申请单第 2 节直接抄这里的字段）：
+
+```rust
+EnvError::NotGranted { kind: Path | Argv | Root, item: String, hint: String }
+```
+
+```
+permission denied: /opt/foo 不在 [host.path] 里
+已授权（ro）：/usr /lib /etc /proc /sys
+需要：path = "/opt/foo"  mode = "ro"
+下一步：capability(kind="host_path", item="/opt/foo", mode="ro", why="…")
+```
+
+**工具面**：
+
+- `host`（`tier=1`，`Host` 域）：`argv | script`、`timeout_ms`、`grant[]`。
+  命中 `approval="once"` 的条目或带 `grant[]` 时，审批卡必须列出：规范化路径 / argv 前缀、
+  第几条授权、模型给的理由；目录类授权额外显示**文件数与总大小**（人靠这个分辨"一个文件"和"整个家目录"）。
+- `sys`（`tier=1`，`HostObserve`）：`metric`（`load` / `mem` / `stat` / `psi` / `cgroup` / `units` / `journal`）+ 可选 `pid`。
+  `journal` 走只读宿主 exec（`journalctl`），需要 `systemd-journal` 组。
+- `capability`（`tier=1`）：`list` / `check` / `request`。**只有 `request` 落盘，且只写草稿**：
+  `capabilities/<ts>-<slug>.md`，同时回一条消息。**不修改任何授权表**（D22 已定：暂时不自动生效）。
+
+**申请单 8 节**（缺节拒绝写入，防止模型糊一段话）：现场 / 最小请求 / 必要性 / 可见范围 /
+更小选项 / 副作用 / 回滚 / 自验。SOP 五条硬规则（先 `list`、一次只申请一类、同一失败只申请一次、
+申请后停下、改完自验）随二进制发布为 `playbook("capability")`，可用
+`~/.config/chuan/playbooks/capability.md` 覆盖。
 
 ---
 

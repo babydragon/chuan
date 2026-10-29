@@ -126,14 +126,18 @@ channels = ["telegram:123456789"]
 #   sandbox      沙盒内（/ws 可写、宿主不可见、无网络）→ 问也没用
 #   self_modify  改自身（装/回滚技能、改配置）        → 该问
 #   outbound     出网：真正的闸是域名白名单          → 白名单内免问
-#   host_exec    宿主执行/提权                      → 默认关闭
+#   host         宿主执行（L1，chuan 身份）           → 默认逐条问
+#   host_elevated 宿主提权（L2，经 chuan hostd）      → 默认关闭
+#   host_observe 宿主只读观测（/proc、systemctl status）→ 免问
 sandbox = "allow"
 self_modify = "ask"
 outbound = "allow"
 lan = "ask"        # 内网调试（有网卡，局域网+公网都可达）
 install = "ask"    # 装依赖（pip/npm，供应链动作）
-host_exec = "deny"
-# 额外加严的工具名（只能加严，不能放松 host_exec = "deny"）
+host_observe = "allow"
+host = "ask"
+host_elevated = "deny"
+# 额外加严的工具名（只能加严，不能放松 host_elevated = "deny"）
 require_approval = []
 
 # 命名服务（可选）。kind = "http"（默认）或 "mcp"。
@@ -272,6 +276,117 @@ chuan backup                             # 备份 + 按策略清理
 
 **密钥不写进 TOML**：只允许 `token_file` / `api_key_file` 引用（CLI 与环境变量中的明文仅用于临时调试）。
 
+## 宿主执行与授权（P4.6）
+
+> **现状**：P4.6-A 已实现（`host` / `sys` / `capability` 三个工具 + 授权表热加载）；
+> **P4.6-B（user timer 上板验证）与 P4.6-C（`chuan hostd` 提权）未做**。
+> 设计见 `DECISIONS.md` D22、`INTERFACES.md §6.4`。
+
+三条边界，都不含领域语义：
+
+| 边界 | 身份 | 用途 |
+|---|---|---|
+| L1 `host` | `chuan` | 宿主上的普通命令：`systemctl --user`、读日志、跑 timer 脚本 |
+| L2 `hostd` | `root` | 极少数需要 root 的动作：`apt-get`、系统 unit 生命周期 |
+| L3 `sys` | 进程内 | 只读 `/proc`、`/sys`：load、内存、进程、cgroup |
+
+```toml
+# 路径按实际安装位置替换（`<state>` 默认 /var/lib/chuan；`/run/user/<uid>` 用 `id -u chuan`）
+[host]
+net = "host"        # 共享宿主 netns：能连 127.0.0.1 的代理与 D-Bus
+# 默认「极小」——要新目录就加一行，不用改代码、不用重启（按 mtime 热加载）
+[host.path]
+"/usr"   = { mode = "ro" }
+"/lib"   = { mode = "ro" }
+"/lib64" = { mode = "ro" }
+"/bin"   = { mode = "ro" }
+"/sbin"  = { mode = "ro" }
+"/etc"   = { mode = "ro" }
+"/proc"  = { mode = "ro" }
+"/sys"   = { mode = "ro" }
+"/var/log/journal"     = { mode = "ro" }   # journalctl 读日志（配合 systemd-journal 组）
+"/run/systemd/system"  = { mode = "ro" }   # sd_booted() 就看这个目录；缺了 systemctl 直接报 "not booted with systemd"
+"/run/dbus"            = { mode = "ro" }   # 系统总线（systemctl 用）
+"/run/dbus/system_bus_socket" = { mode = "ro" }
+"/run/user/1000"              = { mode = "rw" }   # systemctl --user 的控制 socket
+"/var/lib/chuan/.config"      = { mode = "rw" }   # user unit 文件（XDG_CONFIG_HOME）
+"/var/lib/chuan/timers"       = { mode = "rw" }   # timer 要跑的脚本
+
+# 默认 approval = "always"：写进这张表就是"默认挂载 + 免问"。
+# 写 "once" 表示**默认不挂**、必须每次在 host(grant=[...]) 里点名（只读、弹审批卡）：
+# "/home" = { mode = "ro", approval = "once" }
+# rw 只能配 always（临时挂载永远只读）：
+# "/var/lib/chuan/share" = { mode = "rw" }
+
+# 提权授权（argv 前缀，无 shell）。被 /etc/sudoers 取代的是这张表，不是脚本。
+[[host_elevated.grant]]
+argv     = ["/usr/bin/apt-get", "install"]
+approval = "once"
+snapshot = "dpkg"
+note     = "装系统包，替代 pip 编译"
+
+[host.conversation]
+ttl_s = 1800        # 审批卡勾「本对话有效」时的上限
+[host.ephemeral]
+max = 8             # 单次调用最多带几条临时挂载（只读）
+```
+
+**强制遮蔽（写死在代码里，配置改不动）**：
+
+| 路径 | 为什么 |
+|---|---|
+| `/etc/chuan/secrets` | token 就是 chuan 自己读的（`0440 root:chuan`），不遮等于白做 D18 |
+| `/etc/chuan/services.d` | 里面写着 `token_file` 的宿主路径 |
+| `/etc/chuan/chuan.toml` | 完整策略与 allowed_users |
+
+`roles/`、`playbooks/` 保留可见（agent 自己要读）。`$CREDENTIALS_DIRECTORY` 永不可见（D15）。
+
+**三条防逃逸**（代码里，配置改不动）：
+
+- `..`、相对路径、NUL 一律拒绝；`//`、`.` 会被规整掉；
+- **授权根不得经过符号链接**（加载时 + 每次建挂载集时各查一次）：`timers -> /` 这种会让
+  `--bind` 跟着软链把根挂进来。目录**内部**的软链是正常的（`/usr/bin/sh -> bash`），
+  因为遮蔽按路径生效，指向遮蔽路径的软链进去只能看到空的 tmpfs；
+- `/` 不能授权；`secrets` / `services.d` / `chuan.toml` / `/run/credentials` 及其子路径不能授权。
+  硬链接理论上可绕过路径遮蔽，但 `chuan.toml` 属主是 root（`0640 root:chuan`），
+  在 `fs.protected_hardlinks=1`（发行版默认）下 chuan 无法硬链，实际不构成通道。
+
+**三条规则**（细节见 `INTERFACES.md §6.4`）：
+
+1. **临时挂载只读**：调用参数里带的 `grant[]` 永远 `ro`、≤ 8 条、不落盘；要 `rw` 必须写表
+   （`rw` 只能配 `always`，因为临时挂载永远是只读）。
+2. **免问靠工具自校验**：`host` 在没有 `grant[]`、且授权表未坏时声明"这条不用问"；
+   `hostd` 的 `always` 只对完全相同的 argv 前缀生效。策略域设成 `deny` 时一律不生效。
+3. **自毁防护**：`chuan.service` 的 `restart` 排队到本轮结束后执行；`stop`/`disable` 直接拒绝。
+
+**审计**：`<state>/host-access.jsonl`，每行含 `ts / caller_run / grant_index / argv / cwd / code / ms`。
+与 `net-access.jsonl` 同权限（`0640`），轮转交给 journald 之外的 logrotate 或每日备份清理。
+
+**部署前置**（P-B / P-C 上线时由 `install.sh` 落实）：
+
+- `SupplementaryGroups=lp systemd-journal`——否则 `journalctl -u` 读不到别人的日志；
+- `loginctl enable-linger chuan`——`systemctl --user` 与 `systemd-run --user` 的前提（`§3` 已有此条）；
+- `/run/chuan/host.sock`：`0660 root:chuan`，`chuan hostd` 负责创建；socket 存在但 hostd 没跑 → **拒绝**，不是降级；
+- **可写目录必须由 unit 放开**：bwrap 的 `--bind` 不清除源挂载继承的 `MS_RDONLY`
+  （2026-10-29 开发机实测），所以 `/run/user/%U` 这类在 `ProtectHome=read-only` 之下的路径，
+  要在 unit 里写 `ReadWritePaths=/run/user/%U` 才能真正可写；
+- 热加载：授权表按 mtime 读，改完**不用** `systemctl restart chuan`——重启会打断 agent 正在跑的那一轮。
+
+**看得见**：`/status` 打印生效授权条数，以及其中 `always` 的清单（最多 5 条 + 总数）。
+"什么时候放开的"不该靠翻文件才能回答。
+
+**排查记录（2026-10-29，结论已修正）**：
+
+- 现象：只挂 `/run/dbus` 时，沙盒里 `systemctl` 报
+  `System has not been booted with systemd as init system (PID 1)` + `Host is down`，
+  而宿主上正常、socket 是 `srw-rw-rw-`、沙盒内 `id -u` 仍是 996。
+- 原因：`systemctl` 连 bus **之前**先做 `sd_booted()`，实现是 `access("/run/systemd/system/")`。
+  该目录没挂 → 直接返回 `-EHOSTDOWN`。**不是 D-Bus 的问题**。
+- 处置：授权表加 `/run/systemd/system`（ro，unit 符号链接目录，不是控制通道）。
+  自此 `host` lane 里 `systemctl status/show` 可用；`sys(units)` 仍走 daemon 直连
+  （少一层挂载、少一次审批，且不需要 agent 在场）。
+- `systemctl --user` 一直可用（走 `/run/user/<uid>` 的控制 socket，与系统总线无关）。
+
 ## 2. 密钥
 
 ### 2.1 三种方式的安全性排序
@@ -328,7 +443,7 @@ StartLimitBurst=5
 Type=simple
 User=chuan
 Group=chuan
-SupplementaryGroups=lp            # CUPS 打印
+SupplementaryGroups=lp            # CUPS 打印；P4.6-B 起追加 systemd-journal
 ExecStart=/usr/local/bin/chuan --config /etc/chuan/chuan.toml
 Restart=always
 RestartSec=2
@@ -342,6 +457,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/chuan
+# P4.6-B 起加：ReadWritePaths=/run/user/%U（见「宿主执行与授权」）
 # 崩溃循环熔断：5 分钟内 5 次 → failed（由 OnFailure 告警）
 OnFailure=chuan-alert@%n.service
 MemoryMax=1G

@@ -76,6 +76,12 @@
 | **挂载集** | Mount Set | 沙盒可见的文件系统白名单 | 挂载配置 |
 | **工作区** | Workspace | 按 **run** 创建；P0 为单可写根 `/ws`，三段式列 P2 | 临时目录 |
 | **孤儿回收** | Orphan Reap | 启动时清理残留的沙盒子进程 | 清理 |
+| **宿主执行** | Host / `host` | L1：在 bwrap 里以服务账号身份跑宿主命令；可见范围由授权表决定 | 提权、root 执行 |
+| **提权通道** | Elevated / `hostd` | L2：独立 root 单元 + unix socket，只做 argv 前缀匹配与审计，不含领域动词 | 特权模式、sudo 代理 |
+| **宿主观测** | HostObserve / `sys` | L3：进程内只读 `/proc`、`/sys`，无子进程 | 监控、指标系统 |
+| **授权表** | Grant table | 两份数据文件（`[host.path]` / `[[host_elevated.grant]]`），人手写、按 mtime 热加载 | 权限配置、白名单（泛指） |
+| **临时挂载** | Ephemeral mount / `grant[]` | 随一次调用带出的额外**只读**路径，不落盘、不可为 `rw` | 临时授权、临时允许 |
+| **结构化拒绝** | `NotGranted` | 越界时返回：缺哪一项（路径 / argv / root）+ 已授权清单 + 下一步动作 | 权限错误 |
 
 ## E. 上下文与记忆
 

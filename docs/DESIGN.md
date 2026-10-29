@@ -108,6 +108,7 @@
 | 服务工具 | `http`（命名服务，支持 header/query/body/path 注入与 HMAC 签名）/ `mcp`（远端工具）/ `service`（运行期热加，写 `services.d/`） | token 不进上下文，也不进沙盒（D18） |
 | 技能工具 | manifest + scripts；stdin/stdout JSON；**纯函数** | 不直连打印/发送 |
 | 宿主特权工具 | `web_fetch`（唯一出网路径，已实现）、`send`（待做） | 永不下沉沙盒 |
+| 宿主执行工具（P4.6，未实现） | `host`（L1：bwrap + 路径授权 + 宿主 netns）/ `sys`（L3：只读 `/proc`）/ `capability`（申请单草稿）；L2 走独立单元 `chuan hostd`，不是工具 | **不做通用 `host_exec` 任意宿主 shell**；扩展靠授权表与技能，不靠加工具（D22） |
 | 领域能力 | **用技能实现**（打印、发现、查墨量…）；内核只给通用挂载 `[sandbox] mounts` | 内核不提供 `print` 之类的领域工具 |
 | MCP 客户端 | 自写 Streamable HTTP 客户端（initialize / tools-list / tools-call）；目录按需注入 | 不做 stdio；不引 `rmcp` |
 | 结果治理 | head/tail 截断；大结果落盘留引用；结构化错误 | 不塞整文件 |
@@ -117,6 +118,7 @@
 | 模块 | 功能点 | 不做 |
 |---|---|---|
 | 沙盒 | **白名单挂载**（绝不 `ro-bind /`）；默认 `--unshare-all` 无网；联网走独立 lane（`lan_exec` / `network: true` 技能） | 不自研 seccomp |
+| 宿主边界（P4.6，未实现） | `Host`：bwrap + 路径授权 + 宿主 netns（不做 pid/net 隔离）；`HostElevated`：独立 root 单元 + unix socket + argv 授权表 | 不做通用 `host_exec`，不 `ro-bind /` |
 | 资源限制 | cgroup v2 `memory.max`/`pids.max`；rlimit 兜底；编译任务 `nice` | 不用 `RLIMIT_AS` 限 Python |
 | 超时与清理 | 独立进程组；超时 `killpg`；启动回收孤儿 | 不留残留 |
 | Workspace | 单可写根 `/ws`（按任务子目录约定）+ `/media` 只读附件 + `/py` `/node` 运行时；7 天/256MB 清理 | 不复用上一 run 的目录这一条已放宽（会话内需要延续） |

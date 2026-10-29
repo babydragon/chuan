@@ -80,7 +80,7 @@
 - [ ] 重启后 offset 不丢（**部分**：多次重启后未出现重复回复，但没做"发消息→立刻重启"的对照）
 - [ ] `LoadCredentialEncrypted` 注入密钥（未验；出厂 unit 用的是明文 `LoadCredential=`
       + `0400 root:root`，加密路径需要自己改 unit 才启用）
-- [ ] `env -i` 的宿主执行看不到密钥（未验；`host_exec` 默认 deny，没跑过提权命令）
+- [ ] `env -i` 的宿主执行看不到密钥（未验；`host`/`host_elevated` 尚未实现，见 §12）
 - [ ] Telegram 走代理可用（**部分**：收发一直正常；但没单独验证"是否经过代理"——
       `[proxy] url` 已配置，Telegram 也可能直连可达，两者无法区分）
 - [x] 时区 / `[app] utc_offset` 与系统一致（**2026-10-27 实测**：16:30 / 16:45 定时任务
@@ -224,6 +224,68 @@
 - [ ] 派活判断（该派就派）：让它读一个 50KB 的文件并总结 → 应派子 agent，而不是把全文读进主上下文
 - [ ] 后台任务期间问答：后台任务运行中继续发消息 → 能正常回复（首字可能被子 agent 当前这一轮挡住）
 - [ ] 完成后追问：后台任务完成后问"刚才那个任务结果" → 模型能复述（说明 `agent_task_done` 进了账本）
+
+## 12. 宿主执行与授权（P4.6-A 已实现；B/C 未做）
+
+> 设计见 `DECISIONS.md` D22、`INTERFACES.md §6.4`、配置见 `OPS.md`「宿主执行与授权」。
+> 这一节提前列出**只能上板验**的项——它们大多不是"功能对不对"，而是"这台机器上到底允许什么"。
+>
+> **先跑脚本**：`sudo -u chuan -H bash deploy/verify-host-lane.sh`。它把下面大部分项
+> （linger、user manager、ro→rw 重挂、宿主 PID 视图、`/sys`、D-Bus、`journalctl`、
+> `systemctl --user`、遮蔽、`env -i`）一次性跑完，并给出 PASS/FAIL 的处置建议。
+
+**前置（安装脚本要落实，先手工验一遍）**：
+
+- [ ] `loginctl enable-linger chuan` 后 user manager 在跑：
+      `sudo -u chuan XDG_RUNTIME_DIR=/run/user/$(id -u chuan) systemctl --user is-system-running`
+- [ ] `journalctl -u chuan -n 5` 作为 chuan 能读（需 `SupplementaryGroups=systemd-journal`）；
+      改 unit 后**必须复核 bwrap 仍能挂 `/proc`**（`ProtectKernel*` 那条老坑，见 §2）
+
+**L1（host lane）**：
+
+- [ ] bwrap 里 `/run/user/<uid>` 是**可写**的（`systemctl --user` 的控制 socket 在那）：
+      `touch /run/user/<uid>/probe`
+      **2026-10-29 开发机实测（0.13）**：bwrap 的 `--bind` **不清除**源挂载继承来的
+      `MS_RDONLY`——ro 父挂载里 bind 出来的目录仍不可写。处置顺序：
+      ① unit 加 `ReadWritePaths=/run/user/%U`（systemd 会把这棵子树在本服务命名空间里重挂成 rw，
+      可豁免 `ProtectHome=read-only`）；② 退路 `ProtectHome=no`（chuan 的 home 是 `/var/lib/chuan`，
+      代价只是 daemon 能看到 `/home`；沙盒里仍遮蔽）。板上要确认 ① 真的生效
+- [ ] 看到的是**宿主进程表**：`ps -e | head` 里有 PID 1 与 `journald`（不是空表、不是新 procfs）
+- [ ] `/etc/chuan/secrets` 是空目录、`$CREDENTIALS_DIRECTORY` 不存在：
+      `ls -A /etc/chuan/secrets; echo $CREDENTIALS_DIRECTORY`
+- [ ] 能连宿主 loopback 的代理：`curl -x http://127.0.0.1:7890 -sI https://example.com`
+- [ ] 未授权路径的报错是**结构化**的（`NotGranted` + 精确路径），不是泛泛的 `Permission denied`
+
+**L2（hostd）**：
+
+- [ ] socket 权限 `0660 root:chuan`；`sudo -u nobody` 连接被拒（`SO_PEERCRED` 生效）
+- [ ] 授权表**热加载**：改一行后不重启即生效；把 TOML 写坏 → 全部拒绝（fail-closed，不是回退旧版）
+- [ ] `apt-get install` 条目：审批卡上是 `-s` 预览，真落后 `dpkg -l <pkg>` 存在
+- [ ] hostd 子进程 `env -i`：`/run/credentials/chuan.service` 不可读、环境里无 `*_KEY` / `*_FILE`
+- [ ] `host-access.jsonl`：权限 `0640`，每行含 `grant_index` 与展开后的 argv
+
+**L3（`sys`）与自毁防护**：
+
+- [ ] `sys(metric="mem")` 与 `free -m` 数值一致；`sys(pid=…)` 对**别的 uid** 的进程只给公开字段
+      （读不到 `smaps_rollup` 时要说清"看不到"，而不是报"进程不存在"）
+- [ ] `chuan.service` 的 `restart`：本轮结束后才执行，且先收到一条消息
+- [ ] user timer 一分钟实跑一次：journal 有输出，且**不吃** `chuan.service` 的 `MemoryMax=1G`
+
+**2026-10-29 · 首次上板实测（`deploy/verify-host-lane.sh`）**：
+
+| 项 | 结果 |
+|---|---|
+| 宿主 PID 视图（不 `--unshare-pid`） | ✅ 看到 PID 1 / kthreadd |
+| `/sys` 只读挂载 | ✅ `thermal_zone0` 45–46℃ |
+| 强制遮蔽 | ✅ tmpfs 后 `secrets` 为空；`/run/credentials` 不可见 |
+| `env -i` | ✅ 无 `*_KEY` / `*_TOKEN` 变量 |
+| linger / user manager | ✅ `enable-linger` 后 `/run/user/996/systemd/private` 存在 |
+| `systemctl --user` 在宿主 lane 里 | ✅ 能连（返回 `offline`，因还没有 user unit） |
+| `journalctl` | ⚠️ 未加 `systemd-journal` 组时"insufficient permissions"；加组后正常 |
+| ro 父挂载里 bind 成 rw | ❌ bwrap 不清 `MS_RDONLY`；**`systemd-run --property=ReadWritePaths=/run/user/996` 实测 `RW-OK`** → unit 加一行即可，无需动 `ProtectHome` |
+| 系统 D-Bus（`systemctl status`）在 bwrap 里 | ✅ **补挂 `/run/systemd/system` 后正常**（此前报 `Host is down` 是因为 `sd_booted()` 找不到该目录；不是 D-Bus 问题） |
+
+---
 
 ## 已在开发机验证、板上只需复核环境差异的项
 

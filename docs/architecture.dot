@@ -60,7 +60,7 @@ digraph chuan_harness {
   P [label=<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="7">
     <TR>
       <TD BGCOLOR="#eeeeee" ALIGN="LEFT"><B>⑦ 状态与资料（SQLite + 文件）</B><BR/><FONT POINT-SIZE="9">journal 状态（messages / tool_calls / attempts）<BR/>docs 结论：fact · file · reminder ｜ 文件库（KB，永久）<BR/>tasks · approvals ｜ net-access 审计日志</FONT></TD>
-      <TD BGCOLOR="#e2f0f2" ALIGN="LEFT"><B>⑥ 治理 · Governance</B><BR/><FONT POINT-SIZE="9">审批按执行域：sandbox / self_modify / outbound / lan / install / host_exec<BR/>副作用分级：Pure / Idem / External + 幂等键<BR/>身份：User ↔ 多通道 Binding<BR/>预算：token / 成本上限（未做）</FONT></TD>
+      <TD BGCOLOR="#e2f0f2" ALIGN="LEFT"><B>⑥ 治理 · Governance</B><BR/><FONT POINT-SIZE="9">审批按执行域：sandbox / self_modify / outbound / lan / install / host / host_elevated<BR/>副作用分级：Pure / Idem / External + 幂等键<BR/>身份：User ↔ 多通道 Binding<BR/>预算：token / 成本上限（未做）</FONT></TD>
       <TD BGCOLOR="#f5e6dc" ALIGN="LEFT"><B>⑧ 可观测 · Observability</B><BR/><FONT POINT-SIZE="9">tracing → journald<BR/>出网审计（JSONL，8MB 轮转）<BR/>回放与评测（未做）</FONT></TD>
     </TR>
   </TABLE>>];

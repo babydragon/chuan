@@ -7,9 +7,9 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 预发布到 `v0.1.0-rc.9`。
+> 预发布到 `v0.1.0-rc.10`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
-> OAuth2 令牌交换（D18 非目标）。
+> OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B/C 未做**。
 
 ---
 
@@ -68,7 +68,8 @@
 - 审批（按钮、TTL、单次消费、幂等键）✅ 已实现（卡片 + 回调 + 超时拒绝 + CAS + 结束后删卡）
 - LLM 重试 ✅ 已实现（5xx/流中断 1→2→4s ±20%，最多 3 次；Quota/Auth 永不重试）
 - `web_fetch` ✅ 已实现（宿主代取、拒绝内网/回环、逐次审计；未做域名白名单——默认全放行+记录）
-- 能力边界策略 ✅ 已实现（按执行域：sandbox / self_modify / outbound / lan / install / host_exec）
+- 能力边界策略 ✅ 已实现（按执行域：sandbox / self_modify / outbound / lan / install；
+  `host` / `host_elevated` / `host_observe` 在 P4.6 之前只有策略位，无工具）
 - `attempts` 账本 + 日/月预算 + 超限拒绝（**未做**；已并入 P4.2。`wall_clock` 已改为 0=不限，目前靠 max_turns 与 cancel 收口）
 - 运维两件套：迁移前备份、`OnFailure` 告警
 - 降级模式（沙盒失败 / LLM 连续失败 / 磁盘满 / 时钟不可信）
@@ -267,6 +268,67 @@
 2. owner `/invite` 生成的码 15 分钟内一次性有效，用过即废
 3. 撤销绑定后，该地址的消息被当作陌生人处理（而不是静默吞掉）
 4. 加第二个用户后，`/reminders` 仍只显示各自的提醒
+
+---
+
+## 5.7 P4.6 · 会管宿主（设计已定，未开工）
+
+**交付**：agent 能管理所在机器（user systemd、监控 timer、极少数 apt），
+且**扩展新场景靠改数据与写技能，不靠改 Rust**。取舍见 `DECISIONS.md` D22，
+契约见 `INTERFACES.md §6.4`，配置见 `OPS.md`「宿主执行与授权」。
+
+**进度**：A 段已实现并在开发机验证（`host` / `sys` / `capability` + 授权表热加载 + 软链/`..` 防护）；
+B、C 未做。
+
+三条边界，都不含领域语义：`host`（L1，chuan 身份）/ `hostd`（L2，root）/ `sys`（L3，只读 `/proc`）。
+
+### P4.6-A · 边界与观测（✅ 已实现）
+
+- `ExecutionEnv::Host`：bwrap 变体——去掉 `--unshare-pid` / `--unshare-net`，
+  `--proc /proc` 换成 `--ro-bind /proc /proc`，路径按 `[host.path]` 逐条挂，
+  强制遮蔽三项（`secrets` / `services.d` / `chuan.toml`）
+- `host` 工具：`argv | script`、`timeout_ms`、`grant[]`（只读、≤ 8 条、不落盘）
+- `sys` 工具：`load / mem / stat / psi / cgroup / units / journal`
+  （`/proc`、`/sys` 进程内读；`journalctl` / `systemctl show` 由内核直连固定命令，不经 bwrap——
+  固定读接口不该为一行指标开放整个宿主 lane）
+- `capability` 工具：`list / check / request`（**只写草稿**）+ `playbooks/capability.md`（8 节 + 5 条硬规则）
+- 域拆分：`host` / `host_elevated` / `host_observe`；旧键 `host_exec` 忽略并打 warning
+
+**验收**：
+
+1. 访问未授权路径返回 `NotGranted { kind, item }`，文案里带"已授权清单"与下一步动作
+2. host lane 里 `/etc/chuan/secrets` 是空目录、`$CREDENTIALS_DIRECTORY` 不存在（单测，复用 `tests/sandbox.rs` 基建）
+3. host lane 的 `ps` 有 PID 1（证明没换 pid namespace）；`sys(mem)` 与 `free -m` 一致
+4. 申请单缺节被拒；`capability(request)` 不修改任何授权文件
+5. 授权表改一行后**不重启**生效（mtime 热加载）；写坏 TOML → 全部拒绝
+
+### P4.6-B · user systemd（需上板：linger 与 `/run/user`）
+
+- `install.sh`：`loginctl enable-linger chuan`、`SupplementaryGroups=lp systemd-journal`
+- agent 自己写 `~/.config/systemd/user/*.{service,timer}` 并 `systemctl --user enable --now`
+- 授权表默认给 `/var/log/journal`（ro）、`/run/user/$UID`（rw）、`/var/lib/chuan/.config`、`/var/lib/chuan/timers`
+
+**验收**：
+
+1. 一句话让它"每天 7:30 采一次温度和磁盘"：它自己建 unit + 脚本，到点 journal 有输出
+2. 该 timer **不吃** `chuan.service` 的 `MemoryMax=1G`（独立 user slice）
+3. 改授权表加一个新目录 → 下一轮直接可用，不用 `systemctl restart chuan`
+
+### P4.6-C · hostd 与提权（root）
+
+- `chuan hostd` 子命令 + 第二单元（`User=root`）+ `/run/chuan/host.sock`（`0660 root:chuan`）
+- `SO_PEERCRED` 校验、argv 前缀匹配、`env -i`、`host-access.jsonl`、`dpkg` 快照
+- 自毁防护：`chuan.service` 的 `restart` 排队到本轮结束；`stop` / `disable` 拒绝
+
+**验收**：
+
+1. 授权表加一条 `["/usr/bin/apt-get","install"]` → 能装包；卡上是 `-s` 预览，装完 `dpkg -l` 有
+2. 非授权 argv（例如 `apt-get remove`）被拒，且失败原因写明"命中第 N 条授权之外"
+3. 非 chuan uid 连 socket 被拒；hostd 进程环境里没有任何密钥
+4. 让它"重启自己"：本轮先收到一条消息，turn 结束后才重启，不出现"消息发到一半连接断了"
+
+**v1 不做**：技能进宿主（`run_skill` 仍只跑沙盒，`tier=1` 的 `host` 工具只有主会话能调）、
+agent 写系统级 unit 文件、其他账号目录的组/ACL、公共 `/tmp` 共享区、per-exec cgroup。
 
 ---
 

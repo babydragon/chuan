@@ -6,9 +6,11 @@
 > 当前状态：P0–P3 主体已实现；**已在 riscv64 目标板上跑通**（沙盒隔离、两条 lane、代理、
 > mDNS、定时任务含 pinned/polish、凭据不落沙盒）。打印仅到「CUPS 可见」，实际打印/耗材未验。
 > P4 已完成：车道闸门、前台委托、角色、token 预算与用量归属、后台任务与接手；金额口径未做（D20）。
+> **P4.6（宿主执行）**：A 段已实现（`host` / `sys` / `capability` + 数据化授权，D22）；
+> B（user timer 上板）与 C（`chuan hostd` 提权）未做。
 > 逐条见 `ROADMAP.md §5`，板上验证清单见 `SBC-VERIFY.md §11`。
 > 逐条实测值见 `SBC-VERIFY.md`——它是唯一权威，概览与此冲突时以它为准。
-> 预发布到 `v0.1.0-rc.9`，正式版待定。
+> 预发布到 `v0.1.0-rc.10`，正式版待定。
 
 ---
 
@@ -28,6 +30,7 @@
 | 10 | [`SBC-VERIFY.md`](SBC-VERIFY.md) | 只能在目标板确认的项（上板清单），上板时按它逐条勾 |
 | 11 | [`ROLES.md`](ROLES.md) | 子 agent 怎么配、有哪些现成角色、平时怎么说话 |
 | 12 | [`VERIFY-P4.md`](VERIFY-P4.md) | P4 验证剧本：聊天话术 + 观察面 + 失败信号 |
+| 13 | [`WEIXIN.md`](WEIXIN.md) | 微信通道（ClawBot / iLink）**已实测事实**与未验证清单；只记事实，不含取舍 |
 
 图：`architecture.png`（源 `architecture.dot`，同时导出 `.svg`）。
 历史版本与已合并的文档在 `archive/`。
@@ -39,7 +42,8 @@
 1. **分层沿用业界十层模型**（接入/状态/循环/上下文/工具/执行/治理/记忆/编排/可观测），不自造词汇。
 2. **Journal 是状态唯一真相**：模型看见过的都必须能从账本重建；docs 是结论的唯一真相。
 3. **恢复按崩溃点分级**，不按"轮"重放；副作用分 `Pure`/`Idempotent`/`External` 三级。
-4. **权限与隔离分离**：授权轴是"执行域"（sandbox / self_modify / outbound / lan / install / host_exec），不是命令黑名单；沙盒才是边界。
+4. **权限与隔离分离**：授权轴是"执行域"（sandbox / self_modify / outbound / lan / install / host / host_elevated / host_observe），不是命令黑名单；沙盒才是边界。
+   **宿主能力的扩展靠数据不靠代码**：路径授权与 argv 授权表是配置（人手写、热加载），领域做法是技能（D22）。
 5. **技能是纯函数**：只能读写 workspace，拿不到打印/发送的直连能力；`SKILL.md` 正文永不进上下文。
    领域能力（打印、服务 API）由技能实现，内核只给通用挂载与协议适配（D17）。
    **凭据只在宿主侧**：值不进沙盒、不进上下文，注入发生在宿主构造请求时（D18）。
