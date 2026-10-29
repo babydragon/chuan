@@ -9,13 +9,25 @@
 
 ## 位置与命名（固定，别自创）
 
+**一个任务一个目录**——两个任务共用一层目录，过一周就分不清哪个文件是谁的、删的时候还会连坐。
+
+```
+/var/lib/chuan/timers/<name>/        0750
+├── <name>.sh | <name>.py            0755   实际运行的脚本
+├── <name>.env                       0600   凭据（EnvironmentFile=）
+├── orig.*                           0444   迁移来的原始副本（对账用，可不有）
+└── data/                            0750   输出（CSV / 状态文件）
+```
+
 | 东西 | 路径 |
 |---|---|
-| 脚本 | `/var/lib/chuan/timers/<name>.sh`（可写，已在 `[host.path]`） |
-| service | `/var/lib/chuan/.config/systemd/user/chuan-<name>.service` |
-| timer | `/var/lib/chuan/.config/systemd/user/chuan-<name>.timer` |
+| service / timer | `/var/lib/chuan/.config/systemd/user/chuan-<name>.{service,timer}` |
 
 `<name>` 只用 `[a-z0-9-]`，≤ 32 字。前缀 `chuan-` 是留给"哪些是 agent 建的"的边界。
+`/var/lib/chuan/timers` 整棵已授权，子目录不需要再申请。
+
+**删任务**：`systemctl --user disable --now chuan-<name>.timer` → 删目录。别只删脚本，
+留下一个指向不存在文件的 timer，每天在 journal 里报一次错。
 
 ## service 模板
 
@@ -25,7 +37,7 @@ Description=chuan timer: <name>
 
 [Service]
 Type=oneshot
-ExecStart=/var/lib/chuan/timers/<name>.sh
+ExecStart=/var/lib/chuan/timers/<name>/<name>.sh
 # 脚本自己负责超时；systemd 再兜一层
 TimeoutStartSec=300
 # 一次跑飞不要拖垮主板：上限给够但不放任
@@ -35,7 +47,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/chuan/timers
+ReadWritePaths=/var/lib/chuan/timers/<name>
 StandardOutput=journal
 StandardError=journal
 ```
@@ -63,15 +75,16 @@ WantedBy=timers.target
 ## 步骤（一次做完，别拆成五轮）
 
 ```bash
-# 1) 写脚本并自测（自己先跑通，不要指望 systemd 帮你发现语法错）
-cat > /var/lib/chuan/timers/<name>.sh <<'EOF'
+# 1) 建目录、写脚本并自测（自己先跑通，不要指望 systemd 帮你发现语法错）
+mkdir -p /var/lib/chuan/timers/<name>/data
+cat > /var/lib/chuan/timers/<name>/<name>.sh <<'EOF'
 #!/bin/sh
 set -eu
 echo "temp=$(cat /sys/class/thermal/thermal_zone0/temp)"
 echo "disk=$(df -h / | tail -1)"
 EOF
-chmod +x /var/lib/chuan/timers/<name>.sh
-/var/lib/chuan/timers/<name>.sh        # ← 必须这一步先过
+chmod +x /var/lib/chuan/timers/<name>/<name>.sh
+/var/lib/chuan/timers/<name>/<name>.sh   # ← 必须这一步先过
 
 # 2) 写两个 unit（同上模板）
 mkdir -p /var/lib/chuan/.config/systemd/user
@@ -101,7 +114,8 @@ systemctl --user show chuan-<name>.service -p Result -p ExecMainStatus
 
 | 要核对的 | 为什么 |
 |---|---|
-| 脚本属主和可执行位 | 从 `/root` 或别的账号搬过来，chuan 往往没有读/执行权 |
+| 脚本属主和可执行位 | 从 `/root` 或别的账号搬过来，chuan 往往没有读/执行权（`600` 的文件**给挂载也读不到**，必须由主人 `sudo install -o chuan` 搬一次） |
+| 原始副本 | 让主人把原文件放成 `timers/<name>/orig.py`（`0444`）：迁移只许改凭据来源与输出路径，报告里给 `diff -u orig.py <name>.py` |
 | 脚本里的绝对路径 | 常见 `/root/xxx`、`~/xxx`；`~` 在 user manager 里是 `/var/lib/chuan` |
 | 环境变量（PATH / 代理 / TZ） | systemd 的 PATH 很短；代理要显式写，或从 `/etc/environment` 读 |
 | 是否依赖 root | `smartctl`、`systemctl restart`、读 `/root` → 只能留在系统 timer |
