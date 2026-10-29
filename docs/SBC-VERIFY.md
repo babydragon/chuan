@@ -251,6 +251,8 @@
       `226/NAMESPACE` 起不来（板上实测）。真要可写必须写死 uid，且 bwrap 的 `--bind` 不清除
       继承的 `MS_RDONLY`，所以"挂成 rw"在只读父挂载下本来就不成立
 - [ ] 看到的是**宿主进程表**：`ps -e | head` 里有 PID 1 与 `journald`（不是空表、不是新 procfs）
+- [ ] **遮蔽实测**（2026-10-29 曾有回归：`masks_for` 写了但没接进 `exec_with`，L1 里能 `cat /etc/chuan/chuan.toml`）：
+      `ls -la /etc/chuan/secrets` 应为空、`cat /etc/chuan/chuan.toml` 应读出 0 字节
 - [ ] `/etc/chuan/secrets` 是空目录、`$CREDENTIALS_DIRECTORY` 不存在：
       `ls -A /etc/chuan/secrets; echo $CREDENTIALS_DIRECTORY`
 - [ ] 能连宿主 loopback 的代理：`curl -x http://127.0.0.1:7890 -sI https://example.com`

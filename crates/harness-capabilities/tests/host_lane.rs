@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use harness_capabilities::{GrantsCache, HostEnv};
+use harness_capabilities::{BwrapEnv, GrantsCache, HostEnv, Mount};
 use harness_kernel::{EnvError, ExecOpts, ExecutionEnv};
 use tokio_util::sync::CancellationToken;
 
@@ -55,7 +55,7 @@ async fn sees_host_pid_view_and_not_its_own() {
         )
         .await
         .expect("宿主 lane 应该能跑");
-    assert_eq!(out.code, Some(0), "stderr={}", out.stderr);
+    assert_eq!(out.code, Some(0), "stderr={} stdout={}", out.stderr, out.stdout);
     // 宿主 1 号进程能读到 → 没换 pid namespace
     assert!(!out.stdout.trim().is_empty());
     assert!(out.stdout.contains("/ws"));
@@ -87,6 +87,54 @@ async fn ungranted_paths_are_absent() {
         .unwrap();
     assert!(out.stdout.contains("etc=2"), "stdout={}", out.stdout);
     assert!(out.stdout.contains("home=2"), "stdout={}", out.stdout);
+}
+
+#[tokio::test]
+async fn masks_hide_dirs_and_files() {
+    if !have_bwrap() {
+        return;
+    }
+    let d = tempfile::tempdir().unwrap();
+    // 造一棵假 /etc（挂到它自己的绝对路径上，这样遮蔽路径与宿主路径一致）
+    let etc = d.path().join("etc");
+    std::fs::create_dir_all(etc.join("secrets")).unwrap();
+    std::fs::write(etc.join("secrets").join("token"), b"super-secret").unwrap();
+    std::fs::write(etc.join("chuan.toml"), b"token = 1").unwrap();
+    std::fs::write(etc.join("passwd"), b"root:x:0:0\n").unwrap();
+
+    let ws = d.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let mounts = vec![
+        Mount { src: "/usr".into(), dst: "/usr".into(), ro: true },
+        Mount { src: etc.clone(), dst: etc.clone(), ro: true },
+    ];
+    let empty = ws.join(".mask-empty");
+    std::fs::write(&empty, b"").unwrap();
+    let env = BwrapEnv::host(&ws, mounts, false)
+        .with_mask_file(&empty)
+        .with_masked_dir(etc.join("secrets"))
+        .with_masked_dir(etc.join("chuan.toml"));
+
+    let script = format!(
+        "echo secrets=$(ls -A {}/secrets | wc -l); echo toml_bytes=$(wc -c < {}/chuan.toml); echo passwd=$(head -c 4 {}/passwd)",
+        etc.display(),
+        etc.display(),
+        etc.display()
+    );
+    let out = env
+        .exec(&["sh".into(), "-c".into(), script], opts(), CancellationToken::new())
+        .await
+        .expect("应能执行");
+    assert_eq!(out.code, Some(0), "stderr={} stdout={}", out.stderr, out.stdout);
+    eprintln!("DBG stdout=[{}] stderr=[{}]", out.stdout, out.stderr);
+    assert!(out.stdout.contains("secrets=0"), "目录遮蔽失效：{}", out.stdout);
+    assert!(
+        out.stdout.contains("toml_bytes=0"),
+        "文件遮蔽失效（应绑 /dev/null）：{}",
+        out.stdout
+    );
+    // 没被遮蔽的照常可见，证明不是"整个目录都挂了"
+    assert!(out.stdout.contains("passwd=root"), "stdout={}", out.stdout);
 }
 
 #[tokio::test]

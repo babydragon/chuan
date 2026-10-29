@@ -48,7 +48,20 @@ impl HostEnv {
         }
         resolve_exe(grants, &argv[0])?;
 
-        let env = BwrapEnv::host(&self.workspace, mounts_for(grants), grants.net_host);
+        // 文件级遮蔽要一个 0 字节的普通文件（见 sandbox::append_masks）
+        let empty = self.workspace.join(".mask-empty");
+        if !empty.exists() {
+            let _ = std::fs::create_dir_all(&self.workspace);
+            let _ = std::fs::write(&empty, b"");
+        }
+        let mut env = BwrapEnv::host(&self.workspace, mounts_for(grants), grants.net_host)
+            .with_mask_file(empty);
+        // 遮蔽必须显式接上：`/etc` 整块挂进来时，secrets / services.d / chuan.toml 就在下面。
+        // （这一行漏掉过一次：授权表、masks_for、单测都在，但没人调用它，于是 L1 里
+        //   `cat /etc/chuan/chuan.toml` 真的成功了——2026-10-29 板上发现。）
+        for m in masks_for(grants) {
+            env = env.with_masked_dir(m);
+        }
         let mut opts = opts;
         opts.env = filter_env(opts.env);
         env.exec(argv, opts, cancel).await
@@ -104,9 +117,16 @@ pub fn mounts_for(grants: &Grants) -> Vec<Mount> {
 
 /// 遮蔽哪些：三个强制项里，只要有一个已被授权挂进来（比如 `/etc`），就得盖掉。
 pub fn masks_for(grants: &Grants) -> Vec<PathBuf> {
-    PROTECTED
+    let all: Vec<&str> = PROTECTED.iter().chain(NEVER_MOUNT.iter()).copied().collect();
+    masks_for_in(grants, &all)
+}
+
+/// 便于测试：给定主路径与遮蔽项，算"哪些需要盖掉"。
+///
+/// 判据是"**父目录被授权了**"——只有整块挂进来才需要盖；父目录没挂，路径根本不存在。
+fn masks_for_in(grants: &Grants, protected: &[&str]) -> Vec<PathBuf> {
+    protected
         .iter()
-        .chain(NEVER_MOUNT.iter())
         .map(PathBuf::from)
         .filter(|p| p.exists() && grants.paths.iter().any(|g| p.starts_with(&g.path)))
         .collect()
@@ -221,6 +241,26 @@ net = "host"
         for p in &masks {
             assert!(PROTECTED.iter().any(|b| Path::new(b) == p.as_path()));
         }
+    }
+
+    #[test]
+    fn mask_list_follows_granted_parents() {
+        let d = tempfile::tempdir().unwrap();
+        let etc = d.path().join("etc");
+        std::fs::create_dir_all(etc.join("secrets")).unwrap();
+        std::fs::write(etc.join("chuan.toml"), b"token = 1").unwrap();
+        let toml = format!("[host.path]\n\"{}\" = {{ mode = \"ro\" }}\n", etc.display());
+        let grants = crate::grants::from_toml(&toml).unwrap();
+
+        let secrets = etc.join("secrets");
+        let cfg = etc.join("chuan.toml");
+        let masks = masks_for_in(
+            &grants,
+            &[secrets.to_str().unwrap(), cfg.to_str().unwrap(), "/nonexistent/x"],
+        );
+        assert_eq!(masks.len(), 2, "两个存在的都必须遮，不存在的不算");
+        assert!(masks.contains(&secrets));
+        assert!(masks.contains(&cfg));
     }
 
     #[test]

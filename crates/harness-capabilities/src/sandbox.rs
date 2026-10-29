@@ -73,6 +73,9 @@ pub struct BwrapEnv {
     /// 宿主 lane（D22 的 L1）：Some 时走完全不同的挂载路径——
     /// 只挂授权表给的路径，不挂 `/usr` `/etc` 默认集，`/proc` 用宿主视图。
     host: Option<HostMounts>,
+    /// 遮蔽"文件"时用的空文件源（目录用 tmpfs；文件绑这个 0 字节文件）。
+    /// 不能用 `/dev/null`：userns 里绑设备节点读出来是 EACCES（板上/本机都复现）。
+    mask_file: Option<PathBuf>,
     /// 要在沙盒里**遮掉**的宿主目录（挂一个空 tmpfs 盖上去）。
     /// 典型用途：`/etc` 是整块只读挂进来的，凭据目录就在它下面——
     /// 不遮的话，沙盒里的脚本能直接读到 token（我们和 daemon 同 uid，权限位挡不住）。
@@ -91,6 +94,7 @@ impl BwrapEnv {
             network: false,
             runtime: None,
             host: None,
+            mask_file: None,
             masked: Vec::new(),
         }
     }
@@ -115,6 +119,7 @@ impl BwrapEnv {
             network: false,
             runtime: None,
             host: Some(HostMounts { mounts, net }),
+            mask_file: None,
             masked: Vec::new(),
         }
     }
@@ -157,6 +162,12 @@ impl BwrapEnv {
     /// 保留网络（内网调试用）。**这会同时放开公网**：bwrap 只能整块隔离或放开。
     /// 遮掉某个宿主目录：沙盒里同名路径变成空目录。
     /// 用于凭据目录这类"被整块 /etc 带进来"的东西。
+    /// 遮蔽"文件"时用的 0 字节源文件（目录用 tmpfs，文件绑它）。
+    pub fn with_mask_file(mut self, p: impl Into<PathBuf>) -> Self {
+        self.mask_file = Some(p.into());
+        self
+    }
+
     pub fn with_masked_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.masked.push(dir.into());
         self
@@ -224,16 +235,11 @@ impl BwrapEnv {
             }
         }
 
+        // /dev 要先挂：文件级遮蔽用 `--ro-bind /dev/null`
+        cmd.args(["--dev", "/dev"]);
         // 凭据目录必须盖掉：/etc 是整块只读挂进来的，而 daemon 与沙盒同 uid，
         // 靠权限位分不开。挂空 tmpfs 后沙盒里看到的是空目录。
-        for dir in &self.masked {
-            if dir.exists() {
-                // 空 tmpfs 盖住，并**重挂成只读**：沙盒里既看不到内容，也不能往这块
-                // 内存里写东西——避免出现"看起来是个可写空目录"的误导。
-                cmd.arg("--tmpfs").arg(dir);
-                cmd.arg("--remount-ro").arg(dir);
-            }
-        }
+        append_masks(&mut cmd, &self.masked, self.mask_file.as_deref());
 
         // 联网 lane 的 DNS：`/etc/resolv.conf` 常是指向 /run 的符号链接，
         // 而 /run 默认没挂 —— 只把指向的那个目录补进来，别把整个 /run 暴露了
@@ -263,7 +269,7 @@ impl BwrapEnv {
         // /tmp 是 tmpfs，算在服务的内存 cgroup 里：不设上限时它会长到内存的一半
         // （板上 8GB → 3.9GB），脚本写满就把整个服务拖进 OOM。这里按字节限死，
         // 大产物应该写 /ws（宿主磁盘）。
-        cmd.args(["--proc", "/proc", "--dev", "/dev"]);
+        cmd.args(["--proc", "/proc"]);
         cmd.args(["--size", TMP_MAX_BYTES]);
         cmd.arg("--tmpfs").arg("/tmp");
         cmd.arg("--dir").arg("/ws");
@@ -351,6 +357,11 @@ impl BwrapEnv {
         if !h.net {
             cmd.arg("--unshare-net");
         }
+        // 底座先挂：/dev（文件级遮蔽要 /dev/null）、/tmp 的 tmpfs。
+        // 顺序很重要——授权路径必须在它们**之后**挂，否则 `[host.path] "/tmp"` 会被盖掉。
+        cmd.args(["--dev", "/dev"]);
+        cmd.args(["--size", TMP_MAX_BYTES]);
+        cmd.arg("--tmpfs").arg("/tmp");
         for m in &h.mounts {
             cmd.arg(if m.ro { "--ro-bind" } else { "--bind" }).arg(&m.src).arg(&m.dst);
         }
@@ -371,15 +382,8 @@ impl BwrapEnv {
         if !h.mounts.iter().any(|m| m.dst == Path::new("/proc")) {
             cmd.args(["--ro-bind", "/proc", "/proc"]);
         }
-        // 遮蔽必须在挂载之后：/etc 整块挂进来时，凭据目录就在它下面
-        for dir in &self.masked {
-            if dir.exists() {
-                cmd.arg("--tmpfs").arg(dir);
-                cmd.arg("--remount-ro").arg(dir);
-            }
-        }
-        cmd.args(["--dev", "/dev", "--size", TMP_MAX_BYTES]);
-        cmd.arg("--tmpfs").arg("/tmp");
+        // 遮蔽必须在授权挂载之后：/etc 整块挂进来时，凭据目录就在它下面
+        append_masks(&mut cmd, &self.masked, self.mask_file.as_deref());
         // /ws 仍是 agent 自己的地盘（脚本可以先写这里，再让 timer 从 /var/lib/chuan/timers 跑）
         let _ = std::fs::create_dir_all(&self.workspace);
         cmd.arg("--dir").arg("/ws");
@@ -409,6 +413,35 @@ impl BwrapEnv {
         }
         cmd.args(argv);
         cmd
+    }
+}
+
+/// 遮蔽一条路径。
+///
+/// 目录用空 tmpfs + 重挂只读；**文件**必须另行处理——`--tmpfs` 挂到普通文件上会 ENOTDIR，
+/// 所以绑定 `--ro-bind /dev/null`（读出来是空的，`ls -l` 显示为 0 字节）。
+/// 调用方要保证 `/dev` 已经挂好（两处 build 都把 `--dev /dev` 放在遮蔽之前）。
+fn append_masks(cmd: &mut Command, masks: &[PathBuf], empty: Option<&Path>) {
+    for p in masks {
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => {
+                cmd.arg("--tmpfs").arg(p);
+                cmd.arg("--remount-ro").arg(p);
+            }
+            Ok(_) => match empty {
+                // 绑一个 0 字节的普通文件：读出来是 EOF，`ls -l` 显示 0 B。
+                // 不用 /dev/null——设备节点在 userns 里读会 EACCES。
+                Some(src) => {
+                    cmd.arg("--ro-bind").arg(src).arg(p);
+                }
+                None => {
+                    // 没有可用的空文件源：宁可不挂这个文件，也不能让它原样露出来。
+                    // 调用方（HostEnv）总会提供；走到这里说明配置有 bug，留个日志。
+                    tracing::warn!(path = %p.display(), "缺少遮蔽源文件，跳过文件遮蔽");
+                }
+            },
+            Err(_) => {}
+        }
     }
 }
 

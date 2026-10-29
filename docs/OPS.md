@@ -341,6 +341,10 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 
 `roles/`、`playbooks/` 保留可见（agent 自己要读）。`$CREDENTIALS_DIRECTORY` 永不可见（D15）。
 
+实现方式：**目录**用空 tmpfs + 重挂只读；**文件**（`chuan.toml` 这种）绑一个 0 字节普通文件。
+不要用 `/dev/null`——设备节点在 user namespace 里 `cat` 会 `EACCES`（能 `ls` 到、读不出来，
+2026-10-29 实测）。
+
 **三条防逃逸**（代码里，配置改不动）：
 
 - `..`、相对路径、NUL 一律拒绝；`//`、`.` 会被规整掉；
