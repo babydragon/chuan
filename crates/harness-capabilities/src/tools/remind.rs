@@ -101,6 +101,25 @@ fn trunc(s: &str, n: usize) -> String {
 
 /// 单条提醒的完整描述：规则、下次时间、技能与参数、加工指令、内容。
 /// `skill.args` 必须显示——否则模型（和主人）都无从知道这条任务当前用的什么参数。
+/// `message` 与 `text` 不是"两种可选写法"，是**互斥的执行模式**：有 `message` 就到点静态直发，
+/// 不跑模型、不跑技能——`text` 里写的"调钉钉"永远不会执行。两者并存时必须在回执与
+/// `reminders get` 里说清楚，否则模型会以为"改了没生效"，然后删了重建（板上真实发生）。
+fn mode_note(payload: &serde_json::Value) -> Option<String> {
+    let has_msg = payload["message"].as_str().is_some_and(|s| !s.trim().is_empty());
+    let has_text = payload["text"].as_str().is_some_and(|s| !s.trim().is_empty());
+    if has_msg {
+        Some(if has_text {
+            "生效：静态 message（**不跑模型/技能**）——text 里的指令不会执行".to_string()
+        } else {
+            "生效：静态 message".to_string()
+        })
+    } else if payload["skill"].is_object() {
+        Some("生效：到点跑技能（不跑模型）".to_string())
+    } else {
+        Some("生效：text（到点跑一轮模型）".to_string())
+    }
+}
+
 fn describe(d: &Doc, tz_min: i32) -> String {
     let desc = schedule::parse(&d.payload["schedule"], tz_min)
         .map(|s| s.describe())
@@ -128,6 +147,14 @@ fn describe(d: &Doc, tz_min: i32) -> String {
     }
     let text = d.payload["text"].as_str().unwrap_or("?");
     out.push_str(&format!("  内容：{text}\n"));
+    if let Some(note) = mode_note(&d.payload) {
+        out.push_str(&format!("  {note}\n"));
+        if d.payload["message"].as_str().is_some_and(|s| !s.trim().is_empty()) && !text.is_empty() {
+            out.push_str(
+                "  ⚠ 同时有 message 与 text：到点只发 message，text 里的动作（如调钉钉）不会执行\n",
+            );
+        }
+    }
     out
 }
 
@@ -137,7 +164,7 @@ impl Tool for RemindTool {
         ToolSpec {
             name: "remind".into(),
             description:
-                "安排/修改/取消一个定时任务。形态（优先级：message > skill > 纯 prompt）：\
+                "安排/修改/取消一个定时任务。**三种形态互斥，优先级 message > skill > text**：\
 ① `message`：到点**只发这句文本**，不跑模型、不跑脚本。适合“提醒我周五穿红色校服”；\
 ② `skill`：到点跑一个已安装技能，stdout 原样发回（格式固定、时延稳定）；\
 ②b `skill` + `polish`：技能只负责**拉数据**，拿到 stdout 后交给模型按 polish 指令加工（翻译/分类/排版）——\
@@ -145,7 +172,10 @@ impl Tool for RemindTool {
 ③ 都不填：到点把 `text` 当作用户消息重新跑一次（适合需要临场判断的开放任务）。\
 用户在说“每天/工作日/每周 X 的几点”时用它，不要自己 sleep 等待。\
 时间要自己算成绝对时间（消息里带“现在”），一次性的用 once + at。\n\
-`action=update`：只写要改的字段（text/schedule/skill/polish/message），其余保持不变——\
+`action=update`：只写要改的字段（text/schedule/skill/polish/message），其余保持不变。\
+**改文案前先看这条是什么形态**：`reminders get` 会打印「生效：…」。\
+若生效形态是 `text`（要到点跑模型、发钉钉），就改 `text`；\
+只给 `message` 会把它**降级成静态直发**，原来 text 里的钉钉调用将不再执行。\
 改了技能参数就用它，**不要删了重建**（重建会因 id 哈希变了而变成两条任务）。\
 `action=del`：取消一条任务。\n\
 查看已有任务（含技能参数、加工指令）用 `reminders`。"
@@ -618,9 +648,10 @@ impl RemindTool {
         };
         Ok(ToolOutput {
             content: vec![Block::Paragraph(format!(
-                "已修改 `{}`：改了 {}\n{}",
+                "已修改 `{}`：改了 {}\n{}\n{}",
                 write.id.0,
                 changed.join(" / "),
+                mode_note(&write.payload).unwrap_or_default(),
                 describe(&after, self.tz_min)
             ))],
             doc_writes: vec![write],
@@ -942,6 +973,56 @@ mod tests {
         assert_eq!(w.version, 2);
         assert!(w.payload["next_at"].as_i64().unwrap() > 0, "next_at 必须重算");
         assert!(text_of(&out).contains("skill"), "回执要说清改了什么");
+    }
+
+    /// 改 message 会让 text 模式的提醒降级成静态直发（钉钉那条就断了）。
+    /// 回执必须把"生效形态"和"两者并存"说出来，否则模型以为没生效。
+    #[tokio::test]
+    async fn update_message_warns_about_downgrade() {
+        let docs = FakeDocs::default();
+        // 手工构造：fixture 的 `doc()` 默认带 polish（会触发"polish 必须配 skill"的校验）
+        docs.docs.lock().unwrap().push(harness_kernel::Doc {
+            id: harness_kernel::DocId("reminder-1".into()),
+            kind: "reminder".into(),
+            scope: "family".into(),
+            payload: serde_json::json!({
+                "chat": "1000",
+                "channel": "telegram",
+                "user": "1000",
+                "actor": "1000",
+                "text": "到点调 dingtalk 发通知，再把文本输出到 TG",
+                "schedule": {"kind": "once", "at": "2099-01-01T07:00"},
+                "next_at": 4_070_905_200_000i64,
+            }),
+            version: 1,
+            valid_from: 0,
+            valid_to: None,
+        });
+        let env = crate::NullEnv;
+        let ws = harness_kernel::Workspace { run: harness_kernel::RunId("r".into()), root: "/tmp".into() };
+        let ctx = ToolCtx {
+            system_prompt: "",
+            spawner: None,
+            conv: harness_kernel::ConversationId("telegram:1000:1".into()),
+            actor: "1000",
+            outbox: &harness_kernel::NullOutbox,
+            docs: &docs,
+            run: harness_kernel::RunId("r".into()),
+            call: harness_kernel::CallId("c".into()),
+            workspace: &ws,
+            env: &env,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let out = RemindTool::new(480)
+            .execute(
+                serde_json::json!({"action":"update","id":"reminder-1","message":"新文案"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let t = text_of(&out);
+        assert!(t.contains("静态 message"), "要说清生效形态：{t}");
+        assert!(t.contains("不会执行"), "要警告 text 里的动作不会跑：{t}");
     }
 
     #[tokio::test]
