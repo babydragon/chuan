@@ -4,6 +4,18 @@ use harness_capabilities::PlaybookTool;
 use harness_kernel::{Tool, ToolCtx, Workspace};
 use tokio_util::sync::CancellationToken;
 
+/// 取全部文本块：`get` 现在第一块是「来源：…」，正文在其后（列出"文件还是内置"用）。
+fn all_text(out: &harness_kernel::ToolOutput) -> String {
+    out.content
+        .iter()
+        .map(|b| match b {
+            harness_kernel::Block::Paragraph(t) => t.clone(),
+            other => panic!("unexpected: {other:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn ctx<'a>(ws: &'a Workspace, env: &'a harness_capabilities::NullEnv) -> ToolCtx<'a> {
     ToolCtx {
         system_prompt: "",
@@ -36,11 +48,9 @@ async fn builtin_webhook_playbook_is_listed_and_readable() {
         .execute(serde_json::json!({"topic":"webhook"}), &ctx(&ws, &env))
         .await
         .unwrap();
-    let text = match &out.content[0] {
-        harness_kernel::Block::Paragraph(t) => t.clone(),
-        other => panic!("unexpected: {other:?}"),
-    };
+    let text = all_text(&out);
     assert!(text.contains("放凭据"), "{text}");
+    assert!(text.contains("来源：内置"), "应标明读的是内置文本: {text}");
 }
 
 #[tokio::test]
@@ -54,9 +64,7 @@ async fn file_overrides_builtin() {
         .execute(serde_json::json!({"topic":"webhook"}), &ctx(&ws, &env))
         .await
         .unwrap();
-    let text = match &out.content[0] {
-        harness_kernel::Block::Paragraph(t) => t.clone(),
-        other => panic!("unexpected: {other:?}"),
-    };
+    let text = all_text(&out);
     assert!(text.contains("本地覆盖版"), "{text}");
+    assert!(text.contains("webhook.md"), "应标明读的是哪个文件: {text}");
 }
