@@ -181,6 +181,15 @@ impl Grants {
             let p = normalize(raw)?;
             ensure_not_protected(&p)?;
             ensure_no_symlink_components(&p)?;
+            // 点名一个不存在的路径 = 白弹一次审批卡，然后 cat 报 "文件不存在"，
+            // 人会以为是权限问题。直接在这里说清楚。
+            if !p.exists() {
+                return Err(format!(
+                    "{} 在本机不存在：临时挂载只接受已存在的路径。\
+                     如果本来就想知道文件在不在，直接在命令里 ls 或 test -e，不要点名挂载",
+                    p.display()
+                ));
+            }
             if out.best_path(&p).is_some_and(|g| g.path == p) {
                 continue; // 已经在表里（或已经点名过），不必重复
             }
@@ -560,24 +569,41 @@ snapshot = "dpkg"
         assert!(g.with_ephemeral(&["/etc/chuan/services.d".into()]).is_err());
         assert!(g.with_ephemeral(&["/etc/chuan/secrets/token".into()]).is_err());
         // 父目录可以授权（靠 masks_for 盖掉里面的凭据），根目录不行
-        assert!(g.with_ephemeral(&["/etc/chuan".into()]).is_ok());
+        assert!(g.with_ephemeral(&["/etc".into()]).is_ok());
         assert!(g.with_ephemeral(&["/".into()]).is_err());
+    }
+
+    #[test]
+    fn ephemeral_requires_an_existing_path() {
+        let g = grants();
+        let err = g.with_ephemeral(&["/opt/definitely-not-here".into()]).unwrap_err();
+        assert!(err.contains("不存在"), "{err}");
+        // 存在的路径照常（/usr 一定有）
+        assert!(g.with_ephemeral(&["/usr".into()]).is_ok());
     }
 
     #[test]
     fn ephemeral_is_ro_limited_and_non_persistent() {
         let g = grants();
-        let more = g.with_ephemeral(&["/opt/data".into()]).unwrap();
-        let p = normalize("/opt/data/report.csv").unwrap();
-        let (_, approval, _) = more.authorize_path("/opt/data/report.csv", Mode::Ro).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let data = d.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("report.csv"), b"a,b").unwrap();
+        let item = data.display().to_string();
+
+        let more = g.with_ephemeral(&[item.clone()]).unwrap();
+        let file = data.join("report.csv").display().to_string();
+        let (_, approval, idx) = more.authorize_path(&file, Mode::Ro).unwrap();
         assert_eq!(approval, Approval::Once);
-        assert_eq!(normalize("/opt/data/x").unwrap(), p.with_file_name("x"));
+        assert_eq!(idx, 0, "临时挂载在审计里记 0（不是持久表的第 N 条）");
         // rw 永远不行：临时挂载只读
-        assert!(more.authorize_path("/opt/data/report.csv", Mode::Rw).is_err());
+        assert!(more.authorize_path(&file, Mode::Rw).is_err());
         // 原表不受影响
-        assert!(g.authorize_path("/opt/data/report.csv", Mode::Ro).is_err());
-        // 超出 max=2
-        assert!(g.with_ephemeral(&["/a".into(), "/b".into(), "/c".into()]).is_err());
+        assert!(g.authorize_path(&file, Mode::Ro).is_err());
+        // 超出 max=2（都指向已存在路径，确保是因为数量被拒）
+        assert!(g
+            .with_ephemeral(&[item.clone(), "/usr".into(), "/etc".into()])
+            .is_err());
     }
 
     #[test]
