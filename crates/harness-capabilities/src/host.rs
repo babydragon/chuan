@@ -48,8 +48,11 @@ impl HostEnv {
         }
         resolve_exe(grants, &argv[0])?;
 
-        // 文件级遮蔽要一个 0 字节的普通文件（见 sandbox::append_masks）
-        let empty = self.workspace.join(".mask-empty");
+        // 文件级遮蔽要一个 0 字节的普通文件（见 sandbox::append_masks）。
+        // 放在 workspace 的**父目录**（= state 根）：放 workspace 里会让每个 run 的
+        // `/ws` 都多一个来历不明的空文件。
+        let state_root = self.workspace.parent().unwrap_or(&self.workspace);
+        let empty = state_root.join(".mask-empty");
         if !empty.exists() {
             let _ = std::fs::create_dir_all(&self.workspace);
             let _ = std::fs::write(&empty, b"");
