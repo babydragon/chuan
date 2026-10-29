@@ -9,7 +9,8 @@
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
 > 预发布到 `v0.1.0-rc.19`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
-> OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B/C 未做**。
+> OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；
+> **通知类流程 P4.7：A 由主人写 SOP（零代码），B/C 触发式暂不做**（见 D23）。
 
 ---
 
@@ -334,6 +335,54 @@ B、C 未做。
 
 **v1 不做**：技能进宿主（`run_skill` 仍只跑沙盒，`tier=1` 的 `host` 工具只有主会话能调）、
 agent 写系统级 unit 文件、其他账号目录的组/ACL、公共 `/tmp` 共享区、per-exec cgroup。
+
+---
+
+## 5.9 P4.7 · 会记事（通知类流程）
+
+**交付**：把老师/学校的通知粘进来，能自动解析、定提醒点、润色、建提醒、存档、按渠道推送，
+且**流程本身可迭代**（先由主人写 SOP，稳定后下放给 agent）。取舍见 `DECISIONS.md` D23。
+
+**为什么单列**：这不是新工具，而是"判断 + 措辞 + 落地"的组合流程；它同时检验三件事——
+playbook 能不能承载流程、`remind` 的三形态够不够用、记忆的键约定能不能防重复。
+
+### P4.7-A · SOP 定型（零代码，现在就能做）
+
+- 主人写 `<config>/playbooks/school-notice.md`：解析四要素（事项/绝对时间/要带什么/时限）、
+  判时表（次日事项、截止缴费、活动、调课）、润色规则（≤100 字、专名照抄）、落地顺序
+  （`remember` → 逐条 `remind` → 回执含 id）、例外（日期含糊只问一次；已有则 `update` 不重建）
+- 系统提示追加段里加一句触发：收到学校/老师通知 → 先取 `playbook("school-notice")`
+
+**验收**（用真实通知，至少三条：含"下周三"、未写日期、涉及缴费）：
+
+1. 绝对日期换算正确，回执里明确写出"哪天几点"
+2. 重复粘贴同一条通知 → 不产生第二条提醒（幂等键 `hash(chat,due_at,text)` 生效）
+3. 涉及钱的提醒点前移到"提前 3 天"，并在回执里单独标出
+4. 钉钉渠道走 `text` 形态：到点后 ≤1 分钟发出，内容与润色版一致
+5. `reminders(list)` 能看到该条（含渠道与参数），可 `update` / `del`
+
+### P4.7-B · `publish_playbook` 下放（触发式，暂不做）
+
+**触发**：SOP 两周内被手改 ≥3 次，或主人明确要求。
+
+- 工具：`publish_playbook(topic, content, based_on?, override?)`；`SelfModify` 域、`tier=1`
+- 审批卡：topic、字数、**变更行**（新增/删除，最多 60 行）；批准后才落盘
+- 保护：`builtin` 主题不可覆盖（`override=true` 才允许，卡片红字）；正文 ≤20k；覆盖留 `.bak`；
+  文件头强制三行溯源（时间 / 基于哪个 run 或 topic / 上一版哈希）
+- `playbook(list)` 显示每个 topic 的**最后修改时间与来源**（builtin / 主人 / agent）
+
+**验收**：agent 改一条自建 SOP → 卡片能看出改了哪几句 → 批准后 `playbook(topic)` 立刻是新版；
+试图覆盖 `timer` → 被拒并提示 `override=true`；`cat <config>/playbooks/<topic>.md` 头部有溯源。
+
+### P4.7-C · 不遗漏（触发式，暂不做）
+
+**触发**：出现一次"因为关机/重启漏发"，或主人明确要求。
+
+- 补跑窗口从 2 小时（`REMINDER_GRACE_MS`）做成可配（如 `[actor] reminder_grace_h = 24`）；
+- 迟到投递时加前缀「（迟到的提醒）」并写明原定时间，避免"以为是准点的"
+- 可选：`remind.notify = "service:dingtalk"` 零 LLM 路由（触发条件见 D23）
+
+**明确不做**：把通知流程写成技能（判断类工作脚本化只会更脆）；让技能进宿主（D22）。
 
 ---
 

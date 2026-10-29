@@ -565,6 +565,22 @@ permission denied: /opt/foo 不在 [host.path] 里
 申请后停下、改完自验）随二进制发布为 `playbook("capability")`，可用
 `~/.config/chuan/playbooks/capability.md` 覆盖。
 
+### 6.5 `publish_playbook`（未实现，D23）
+
+```rust
+// topic: [a-z0-9-]{1,32}；正文 ≤20_000 字符（与 Playbook 读取上限一致）
+publish_playbook(topic: String, content: String, based_on: Option<String>, override: bool)
+```
+
+- 域 `SelfModify`（默认 ask）、`tier=1`、effect `External`；
+- **只在审批通过后落盘**（工具的执行本身就在批准之后），审批卡必须给出变更行；
+- `builtin` 主题（`capability` / `timer` / `distill` / `import-skill` / `schedule-job` / `webhook`）
+  默认拒绝覆盖，`override=true` 才允许；
+- 落盘前把旧版复制成 `<topic>.md.bak`；文件头强制三行溯源（时间 / 基于 / 上一版哈希）；
+- `playbook` 工具在 `list` 时返回每个 topic 的 mtime 与来源（builtin / 主人 / agent）。
+
+**硬边界**：playbook 只影响模型"怎么想"，**不参与任何授权判定**——代码不读它（D23）。
+
 ---
 
 ## 7. 组合约束
