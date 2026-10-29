@@ -50,7 +50,10 @@ impl Tool for HostTool {
 只读、一次一格，会弹审批卡——`grant` 只能只读，**要写必须让主人写进授权表**。\
 被拒时不要换写法重试：按返回的 `permission denied (host_path ...)` 用 `capability` 提交申请。\
 常见用法：`systemctl --user`（user timer / 用户级服务）、`journalctl -u`、读授权目录里的文件。\
-注意：**一次调用做一整件事**（把多条命令写进一个 script），每次调用都会新建容器。"
+注意：**一次调用做一整件事**（把多条命令写进一个 script），每次调用都会新建容器。\
+**路径对照**：这里的 `/ws` 与沙盒的 `/ws` 是**同一个宿主目录**（`/var/lib/chuan/workspaces`），一边写另一边立刻可见；宿主上的真实路径就是你看到的路径，没有额外映射。\
+`/etc/chuan/secrets`、`/etc/chuan/services.d`、`/etc/chuan/chuan.toml` 被强制遮蔽（空目录 / 0 字节）。\
+**纯计算、画图、处理 /ws 里的文件不要用 host**：沙盒里 `/py/bin/python3`（venv 含系统 site-packages）够用，而且不需要审批。host 只用来做「必须看宿主」的事。"
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",

@@ -73,7 +73,9 @@ load（1/5/15 分钟负载）、mem（内存与 swap）、stat（CPU 时间片�
 psi（资源压力，需内核支持）、cgroup（本服务的 memory/pids 用量与上限）、\
 units（某个 systemd 单元的状态，需 `unit`）、journal（某个单元的最近日志，需 `unit`，可选 `lines`，上限 500）。\
 这些都是**只读**：`sys` 不能启动/停止/重启任何东西——那要用 `host`（要主人确认）。\
-读不到别的用户的进程内存时，会说\"看不到\"，不会说\"进程不存在\"。"
+读不到别的用户的进程内存时，会说「看不到」，不会说「进程不存在」。\
+**数据来自宿主，不是沙盒**：`/proc` `/sys` 是宿主视图；`units` / `journal` 由内核直连\
+`systemctl show` / `journalctl`（不经 bwrap），沙盒里看不到这些不影响本工具。"
     }
 
     async fn run_fixed(&self, argv: &[String], timeout_ms: u64) -> Result<String, ToolError> {
