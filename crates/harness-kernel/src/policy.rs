@@ -33,8 +33,12 @@ pub enum Domain {
     Lan,
     /// 装依赖：拉外部包写进运行时目录（供应链动作）
     Install,
-    /// 宿主执行 / 提权
-    HostExec,
+    /// 宿主执行（L1）：bwrap + 路径白名单 + 宿主 netns，服务账号身份
+    Host,
+    /// 宿主提权（L2）：经 `chuan hostd`，argv 授权表
+    HostElevated,
+    /// 宿主只读观测（L3）：`/proc`、`/sys`、`systemctl status`
+    HostObserve,
 }
 
 /// `[policy]` 的运行时形态。
@@ -45,7 +49,12 @@ pub struct ApprovalPolicy {
     pub outbound: Verdict,
     pub lan: Verdict,
     pub install: Verdict,
-    pub host_exec: Verdict,
+    /// 宿主执行（L1）：默认逐条问
+    pub host: Verdict,
+    /// 宿主提权（L2）：默认关闭
+    pub host_elevated: Verdict,
+    /// 宿主只读观测（L3）：默认放行（读 `/proc` 本身不构成越界）
+    pub host_observe: Verdict,
     /// 额外要求确认的工具名：只能加严，不能放松域的 Deny
     pub extra_tools: Vec<String>,
 }
@@ -58,7 +67,9 @@ impl Default for ApprovalPolicy {
             outbound: Verdict::Allow,
             lan: Verdict::Ask,
             install: Verdict::Ask,
-            host_exec: Verdict::Deny,
+            host: Verdict::Ask,
+            host_elevated: Verdict::Deny,
+            host_observe: Verdict::Allow,
             extra_tools: Vec::new(),
         }
     }
@@ -72,7 +83,9 @@ impl ApprovalPolicy {
             Domain::Outbound => self.outbound,
             Domain::Lan => self.lan,
             Domain::Install => self.install,
-            Domain::HostExec => self.host_exec,
+            Domain::Host => self.host,
+            Domain::HostElevated => self.host_elevated,
+            Domain::HostObserve => self.host_observe,
         }
     }
 
@@ -98,7 +111,10 @@ mod tests {
         let p = ApprovalPolicy::default();
         assert_eq!(p.verdict("exec", Domain::Sandbox), Verdict::Allow);
         assert_eq!(p.verdict("publish_skill", Domain::SelfModify), Verdict::Ask);
-        assert_eq!(p.verdict("host_exec", Domain::HostExec), Verdict::Deny);
+        assert_eq!(p.verdict("host", Domain::Host), Verdict::Ask);
+        assert_eq!(p.verdict("hostd", Domain::HostElevated), Verdict::Deny);
+        // 读 /proc 不算越界；但 L1/L2 不行
+        assert_eq!(p.verdict("sys", Domain::HostObserve), Verdict::Allow);
         assert_eq!(p.verdict("lan_exec", Domain::Lan), Verdict::Ask);
         assert_eq!(p.verdict("install_deps", Domain::Install), Verdict::Ask);
     }
@@ -106,11 +122,13 @@ mod tests {
     #[test]
     fn name_list_only_tightens() {
         let p = ApprovalPolicy {
-            extra_tools: vec!["write".into(), "host_exec".into()],
+            extra_tools: vec!["write".into(), "hostd".into(), "sys".into()],
             ..Default::default()
         };
         assert_eq!(p.verdict("write", Domain::Sandbox), Verdict::Ask);
         // 域本身是 Deny，名单不能把它放成 Ask
-        assert_eq!(p.verdict("host_exec", Domain::HostExec), Verdict::Deny);
+        assert_eq!(p.verdict("hostd", Domain::HostElevated), Verdict::Deny);
+        // 域是 Allow，名单可以把它提成 Ask
+        assert_eq!(p.verdict("sys", Domain::HostObserve), Verdict::Ask);
     }
 }

@@ -258,9 +258,18 @@ pub struct PolicyFile {
     /// 装依赖（供应链）
     #[serde(default = "verdict_ask")]
     pub install: Verdict,
-    /// 宿主执行 / 提权：默认关闭
+    /// 宿主执行（L1，chuan 身份）：默认逐条问
+    #[serde(default = "verdict_ask")]
+    pub host: Verdict,
+    /// 宿主提权（L2，经 chuan hostd）：默认关闭
     #[serde(default = "verdict_deny")]
-    pub host_exec: Verdict,
+    pub host_elevated: Verdict,
+    /// 宿主只读观测（L3：/proc、systemctl status）：默认放行
+    #[serde(default = "verdict_allow")]
+    pub host_observe: Verdict,
+    /// 已退役（D22）：只用于提示改名，不参与判定
+    #[serde(default)]
+    pub host_exec: Option<Verdict>,
 }
 
 impl Default for PolicyFile {
@@ -272,7 +281,10 @@ impl Default for PolicyFile {
             outbound: Verdict::Allow,
             lan: Verdict::Ask,
             install: Verdict::Ask,
-            host_exec: Verdict::Deny,
+            host: Verdict::Ask,
+            host_elevated: Verdict::Deny,
+            host_observe: Verdict::Allow,
+            host_exec: None,
         }
     }
 }
@@ -602,6 +614,8 @@ pub struct Config {
     pub budget: harness_kernel::BudgetLimits,
     /// 角色目录（热加载；agent 可写）
     pub roles_dir: std::path::PathBuf,
+    /// 实际使用的配置文件路径（`[host]` 授权表就从这个文件热加载）
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 /// "+08:00" / "-05:30" / "8" → 分钟
@@ -731,6 +745,14 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     let mut lock = file.storage.lock.clone();
     let mut workspace = file.actor.workspace.clone();
     let mut require_approval = file.policy.require_approval.clone();
+    // D22：一个 host_exec 拆成三个域。旧键从未实现过工具，直接忽略并提示改名，
+    // 不静默映射（否则"我明明写了 deny，为什么 host 还是 ask"会成为长期的困惑）。
+    if let Some(old) = file.policy.host_exec {
+        eprintln!(
+            "config: [policy] host_exec 已退役（D22），本次忽略 {old:?}；\
+             请改用 host（L1，默认 ask）/ host_elevated（L2，默认 deny）/ host_observe（L3，默认 allow）"
+        );
+    }
 
     if let Ok(v) = std::env::var("CHUAN_PROVIDER") { provider = v; }
     if let Ok(v) = std::env::var("CHUAN_BASE_URL") { base_url = Some(v); }
@@ -820,7 +842,9 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             outbound: file.policy.outbound,
             lan: file.policy.lan,
             install: file.policy.install,
-            host_exec: file.policy.host_exec,
+            host: file.policy.host,
+            host_elevated: file.policy.host_elevated,
+            host_observe: file.policy.host_observe,
             extra_tools: require_approval,
         },
         max_retries: file.engine.max_retries,
@@ -933,6 +957,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .unwrap_or_else(|| format!("{home}/.local/share/chuan/media")),
         media_keep_days: file.media.keep_days.unwrap_or(30),
         config_dir,
+        config_path: path.clone(),
         mcp_servers: file
             .services
             .iter()

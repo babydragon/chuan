@@ -2695,7 +2695,14 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
                 tracing::info!(tool, "denied by policy");
                 return Ok(false);
             }
-            crate::policy::Verdict::Ask => {}
+            crate::policy::Verdict::Ask => {
+                // 工具可以在自己核对过授权表后声明"这一条不需要打扰人"（D22：
+                // `approval = "always"` 的路径）。只能把 Ask 放成放行，Deny 已在上面返回。
+                if self.tools.get(tool).is_some_and(|t| t.skip_approval(args)) {
+                    tracing::info!(tool, "preapproved by tool (grant=always)");
+                    return Ok(true);
+                }
+            }
         }
         let hint = self.tools.get(tool).and_then(|t| t.approval_hint(args));
         let brief = summarize_args(args);

@@ -138,6 +138,15 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// 本次调用是否可以免审批。
+    ///
+    /// 只有工具**自己核对过授权表**才能返回 true（例如 `host` 发现这次只用到
+    /// `approval = "always"` 的路径、没有临时挂载）。它只能把 `Ask` 放成"放行"，
+    /// **不能**绕过 `Deny`——策略天花板仍在（D22）。每次跳过都会记日志。
+    fn skip_approval(&self, _args: &serde_json::Value) -> bool {
+        false
+    }
+
     /// 能力域：决定要不要人确认（见 `policy`）。默认沙盒内。
     fn domain(&self) -> crate::policy::Domain {
         crate::policy::Domain::Sandbox

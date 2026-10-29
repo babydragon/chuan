@@ -36,7 +36,7 @@ pub use agent::{
 };
 pub use effect::EffectClass;
 pub use env::{ExecOpts, ExecOutput, ExecutionEnv};
-pub use error::{EngineError, EnvError, ErrorCode, StoreError, ToolError};
+pub use error::{EngineError, EnvError, ErrorCode, GrantKind, StoreError, ToolError};
 pub use event::{Event, EventKind, NewEvent};
 pub use ids::*;
 pub use identity::{Binding, Directory, User};
