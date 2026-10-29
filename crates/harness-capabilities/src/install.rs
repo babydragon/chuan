@@ -103,7 +103,12 @@ impl Tool for InstallTool {
 pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/node，技能里 `require` 即可。\
 调用前先用 `exec` 探一下（`python3 -c \"import x\"`）——已经能用就别调这个。
 这条调用会联网并改运行时环境，需要主人确认。只装用户明确要的东西，不要顺手升级整个环境。
-若探测发现已可用，本工具会直接返回、不联网。"
+若探测发现已可用，本工具会直接返回、不联网。\
+**大件不要走 pip**：numpy / scipy / pandas / matplotlib / pillow 这类在 riscv64 上没有预编译 wheel，\
+pip 会现场编译（几十分钟起），还会吃掉大量磁盘。它们应该由主人用系统包安装\
+（`apt install python3-numpy python3-matplotlib`）——沙盒的 venv 开了 `--system-site-packages`，\
+系统装完后 `/py/bin/python3 -c 'import matplotlib'` 就能用。\
+遇到这种需求：先用 exec 试 import；不行就告诉主人要装哪个 apt 包，不要 pip 硬上。"
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -226,7 +231,13 @@ pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/no
                     "--disable-pip-version-check".to_owned(),
                 ];
                 argv.extend(packages.iter().cloned());
-                let mut env = vec![("PIP_DISABLE_PIP_VERSION_CHECK".to_owned(), "1".to_owned())];
+                // pip 的临时目录默认是沙盒 /tmp（256MB tmpfs，且**计入服务内存**）。
+                // 大包解包 + 现场编译会把它撑满，轻则失败、重则把整个 chuan 拖进 OOM。
+                // 指到 /rt（磁盘、可写）——装完能清就清，清不掉也只是占磁盘。
+                let mut env = vec![
+                    ("PIP_DISABLE_PIP_VERSION_CHECK".to_owned(), "1".to_owned()),
+                    ("TMPDIR".to_owned(), "/rt/tmp".to_owned()),
+                ];
                 if let Some(idx) = &self.pip_index {
                     env.push(("PIP_INDEX_URL".to_owned(), idx.clone()));
                 }
@@ -242,7 +253,7 @@ pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/no
                     "--no-fund".to_owned(),
                 ];
                 argv.extend(packages.iter().cloned());
-                let mut env = vec![];
+                let mut env = vec![("TMPDIR".to_owned(), "/rt/tmp".to_owned())];
                 if let Some(reg) = &self.npm_registry {
                     env.push(("NPM_CONFIG_REGISTRY".to_owned(), reg.clone()));
                 }
