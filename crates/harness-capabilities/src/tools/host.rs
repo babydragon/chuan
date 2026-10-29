@@ -169,11 +169,14 @@ impl Tool for HostTool {
             .exec_with(&argv, opts, &merged, ctx.cancel.clone())
             .await
             .map_err(|e| match e {
-                harness_kernel::EnvError::NotGranted { kind, item, hint } => ToolError::new(
-                    ErrorCode::NotPermitted,
-                    format!("permission denied ({kind}): {item} — {hint}"),
-                    false,
-                ),
+                harness_kernel::EnvError::NotGranted { kind, item, hint } => {
+                    tracing::info!(%kind, %item, "host: 越界被拒");
+                    ToolError::new(
+                        ErrorCode::NotPermitted,
+                        format!("permission denied ({kind}): {item} — {hint}"),
+                        false,
+                    )
+                }
                 harness_kernel::EnvError::Timeout(ms) => {
                     ToolError::new(ErrorCode::Timeout, format!("超时 {ms}ms"), true)
                 }

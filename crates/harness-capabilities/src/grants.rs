@@ -129,6 +129,21 @@ impl Grants {
         self.locked.is_some()
     }
 
+    /// `capability list` 的第一行：**哪个文件、什么时候、几条**
+    pub fn provenance(&self, path: &Path, mtime: Option<SystemTime>) -> String {
+        let mtime = mtime
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| format!("{}s", d.as_secs()))
+            .unwrap_or_else(|| "?".into());
+        format!(
+            "来源：{}｜mtime={mtime}（与 `stat -c %Y` 对比）｜路径 {} 条，提权 {} 条{}",
+            path.display(),
+            self.paths.len(),
+            self.elevated.len(),
+            if let Some(r) = &self.locked { format!("｜**锁定**：{r}") } else { String::new() }
+        )
+    }
+
     /// 找覆盖这个路径的授权（**最长前缀**生效：`/var/lib/chuan/timers` 优先于 `/var/lib/chuan`）。
     pub fn best_path(&self, path: &Path) -> Option<&PathGrant> {
         self.ephemeral
@@ -467,6 +482,11 @@ impl GrantsCache {
         &self.path
     }
 
+    /// 文件的 mtime（给 `capability list` 显示"我到底读的是哪份、什么时候的"）
+    pub fn file_mtime(&self) -> Option<SystemTime> {
+        std::fs::metadata(&self.path).and_then(|m| m.modified()).ok()
+    }
+
     /// 取当前生效的授权表。文件不存在 → 空表（一切拒绝，但不算"坏"）；
     /// 解析失败 → `locked`（所有请求都会被拒，并带上原因）。
     pub fn current(&self) -> Grants {
@@ -483,6 +503,19 @@ impl GrantsCache {
             },
             (_, Err(e)) => Grants::locked(format!("读取 {} 失败：{e}", self.path.display())),
         };
+        // 热加载要留痕：否则"我改了没生效"只能靠猜（板上 2026-10-29 就踩过）。
+        match &fresh.locked {
+            Some(reason) => tracing::warn!(
+                path = %self.path.display(),
+                "host 授权表加载失败（全部拒绝）：{reason}"
+            ),
+            None => tracing::info!(
+                path = %self.path.display(),
+                paths = fresh.paths.len(),
+                elevated = fresh.elevated.len(),
+                "host 授权表已加载/重新加载"
+            ),
+        }
         *st = (mtime, fresh.clone());
         fresh
     }

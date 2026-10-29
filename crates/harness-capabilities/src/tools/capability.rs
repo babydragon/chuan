@@ -138,7 +138,11 @@ impl Tool for CapabilityTool {
         let grants = self.grants.current();
 
         let text = match action {
-            "list" => self.summary(&grants),
+            "list" => format!(
+                "{}\n{}",
+                grants.provenance(self.grants.path(), self.grants.file_mtime()),
+                self.summary(&grants)
+            ),
             "check" => {
                 let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("host_path");
                 let item = args.get("item").and_then(|v| v.as_str()).unwrap_or("");
