@@ -3,7 +3,9 @@
 //! 与 `exec` 的区别不是"有没有网"，而是**执行位置**：这条 lane 跑在宿主上，
 //! 能看到宿主的进程、服务与授权目录；代价是必须逐条授权、默认要主人点头。
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use harness_kernel::{
@@ -17,11 +19,14 @@ pub struct HostTool {
     env: Arc<HostEnv>,
     cache: Arc<GrantsCache>,
     default_timeout_ms: u64,
+    /// 逐次审计（与 hostd 写同一个文件）：argv、命中的授权、退出码、耗时。
+    /// 没有它，"它半夜自己跑了什么"只能靠 journald 里的碎片拼。
+    audit: PathBuf,
 }
 
 impl HostTool {
-    pub fn new(env: Arc<HostEnv>, cache: Arc<GrantsCache>) -> Self {
-        Self { env, cache, default_timeout_ms: 20_000 }
+    pub fn new(env: Arc<HostEnv>, cache: Arc<GrantsCache>, audit: impl Into<PathBuf>) -> Self {
+        Self { env, cache, default_timeout_ms: 20_000, audit: audit.into() }
     }
 
     fn argv_of(args: &serde_json::Value) -> Result<Vec<String>, ToolError> {
@@ -37,6 +42,33 @@ impl HostTool {
         }
         Ok(argv)
     }
+}
+
+/// 一条审计记录。字段刻意与 hostd 侧对齐（`grant_index` 在这里是每条挂载的来源），
+/// 这样 `jq` 一个文件就能看全"谁在什么时候动了宿主"。
+pub(crate) fn audit_call(
+    path: &std::path::Path,
+    argv: &[String],
+    grants: &[String],
+    ephemeral: bool,
+    error: Option<String>,
+    code: Option<i32>,
+    ms: u128,
+) {
+    let rec = serde_json::json!({
+        "at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        "via": "host",
+        "argv": argv,
+        "grants": grants,
+        "ephemeral": ephemeral,
+        "code": code,
+        "ms": ms as u64,
+        "error": error,
+    });
+    crate::net::append_log(path, &rec.to_string());
 }
 
 #[async_trait]
@@ -167,11 +199,26 @@ impl Tool for HostTool {
             stdin: None,
         };
 
-        let out = self
+        let grants_desc: Vec<String> = crate::host::mounts_for(&merged)
+            .iter()
+            .map(|m| format!("{}:{}", m.src.display(), if m.ro { "ro" } else { "rw" }))
+            .collect();
+        let started = Instant::now();
+        let result = self
             .env
             .exec_with(&argv, opts, &merged, ctx.cancel.clone())
-            .await
-            .map_err(|e| match e {
+            .await;
+        audit_call(
+            &self.audit,
+            &argv,
+            &grants_desc,
+            !merged.ephemeral.is_empty(),
+            result.as_ref().err().map(|e| e.to_string()),
+            result.as_ref().ok().and_then(|o| o.code),
+            started.elapsed().as_millis(),
+        );
+
+        let out = result.map_err(|e| match e {
                 harness_kernel::EnvError::NotGranted { kind, item, hint } => {
                     tracing::info!(%kind, %item, "host: 越界被拒");
                     ToolError::new(
@@ -220,7 +267,8 @@ mod tests {
         std::fs::write(&cfg, toml).unwrap();
         let cache = Arc::new(GrantsCache::new(&cfg));
         let env = Arc::new(HostEnv::new(dir.path().join("ws"), Arc::clone(&cache)));
-        (dir, HostTool::new(env, cache))
+        let audit = dir.path().join("host-access.jsonl");
+        (dir, HostTool::new(env, cache, audit))
     }
 
     #[test]
@@ -242,6 +290,34 @@ mod tests {
     fn broken_table_never_skips() {
         let (_d, t) = tool("[host.path\n");
         assert!(!t.skip_approval(&serde_json::json!({"argv": ["true"]})));
+    }
+
+    #[test]
+    fn audit_line_is_one_json_object() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("host-access.jsonl");
+        audit_call(
+            &p,
+            &["systemctl".into(), "--user".into(), "list-timers".into()],
+            &["/usr:ro".into()],
+            false,
+            None,
+            Some(0),
+            42,
+        );
+        audit_call(&p, &["cat".into()], &[], true, Some("permission denied".into()), None, 7);
+
+        let text = std::fs::read_to_string(&p).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(v["via"], "host");
+        assert_eq!(v["argv"][0], "systemctl");
+        assert_eq!(v["code"], 0);
+        assert_eq!(v["ephemeral"], false);
+        let v2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(v2["ephemeral"], true);
+        assert_eq!(v2["error"], "permission denied");
     }
 
     #[test]

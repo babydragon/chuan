@@ -364,8 +364,19 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
    `hostd` 的 `always` 只对完全相同的 argv 前缀生效。策略域设成 `deny` 时一律不生效。
 3. **自毁防护**：`chuan.service` 的 `restart` 排队到本轮结束后执行；`stop`/`disable` 直接拒绝。
 
-**审计**：`<state>/host-access.jsonl`，每行含 `ts / caller_run / grant_index / argv / cwd / code / ms`。
-与 `net-access.jsonl` 同权限（`0640`），轮转交给 journald 之外的 logrotate 或每日备份清理。
+**审计**：`<state>/host-access.jsonl`，**L1 与 L2 写同一个文件**，一个 `jq` 就能看全：
+
+| 字段 | 来源 | 说明 |
+|---|---|---|
+| `at` / `ms` | 两者 | 毫秒时间戳 / 耗时 |
+| `via` | 仅 L1 | 固定 `host`（L2 的行没有这个字段） |
+| `argv` | 两者 | 实际执行的命令（数组，不是拼好的字符串） |
+| `grants` | 仅 L1 | 本次挂载集 `路径:ro|rw` |
+| `ephemeral` | 仅 L1 | 是否用了临时挂载（= 那次弹过卡） |
+| `grant_index` | 仅 L2 | 命中的第几条提权授权 |
+| `code` / `error` | 两者 | 退出码 / 被拒原因（含 `NotGranted`） |
+
+权限 `0600`（命令里可能带敏感参数），超过 8MB 滚一份 `.1`。
 
 **部署前置**（P-B / P-C 上线时由 `install.sh` 落实）：
 

@@ -264,7 +264,9 @@
 - [ ] 授权表**热加载**：改一行后不重启即生效；把 TOML 写坏 → 全部拒绝（fail-closed，不是回退旧版）
 - [ ] `apt-get install` 条目：审批卡上是 `-s` 预览，真落后 `dpkg -l <pkg>` 存在
 - [ ] hostd 子进程 `env -i`：`/run/credentials/chuan.service` 不可读、环境里无 `*_KEY` / `*_FILE`
-- [ ] `host-access.jsonl`：权限 `0640`，每行含 `grant_index` 与展开后的 argv
+- [ ] `host-access.jsonl`：权限 `0600`；L1 的行有 `via=host`/`grants`/`ephemeral`，
+      L2 的行有 `grant_index`。验法：让 agent 跑一次 `host`（`systemctl --user list-timers`）
+      和一次 `pkg install`，然后 `tail -2` 看两条记录字段对不对
 - [ ] `pkg` 全链路：`plan` 拿到 `apt-get -s` 预览 → 审批卡上写着包名与"已预览"
       → `install` 成功 → `/var/lib/chuan/pkg-snapshots/` 出现变更前清单
 - [ ] 没预览就 `install` → 直接被拒（不发请求到 hostd）

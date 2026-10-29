@@ -347,9 +347,15 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("/etc/chuan/chuan.toml")),
     ));
+    // 审计与 hostd 写同一个文件（谁在什么时候动了宿主，一个 jq 就能看全）
+    let host_audit = std::path::Path::new(&cfg.db)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/var/lib/chuan"))
+        .join("host-access.jsonl");
     tools.register(Arc::new(HostTool::new(
         Arc::new(HostEnv::new(&cfg.workspace, Arc::clone(&grants))),
         Arc::clone(&grants),
+        host_audit,
     )));
     // 系统包：走 hostd 提权通道（host_elevated，默认 deny）。没有 chuan-hostd 就没有这条路。
     tools.register(Arc::new(PkgTool::new(ElevatedClient::new(

@@ -132,8 +132,8 @@ fn audit_log(path: &Path, grant_index: usize, argv: &[String], code: Option<i32>
     if let Ok(mut f) = opts.open(path) {
         use std::io::Write;
         if old == 0 {
-            // 首次创建：收紧成 0640（内容是命令与退出码，不含凭据，但不该全局可读）
-            let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o640));
+            // 首次创建：收紧成 0600（命令里可能带敏感参数，只给属主看）
+            let _ = std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
         }
         let _ = writeln!(f, "{line}");
     } else {

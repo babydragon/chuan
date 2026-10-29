@@ -293,6 +293,7 @@ B、C 未做。
   固定读接口不该为一行指标开放整个宿主 lane）
 - `capability` 工具：`list / check / request`（**只写草稿**）+ `playbooks/capability.md`（8 节 + 5 条硬规则）
 - 域拆分：`host` / `host_elevated` / `host_observe`；旧键 `host_exec` 忽略并打 warning
+- ✅ `host-access.jsonl` 审计（L1 与 hostd 写同一文件：argv、挂载集、是否临时挂载、退出码、耗时）
 
 **验收**：
 
