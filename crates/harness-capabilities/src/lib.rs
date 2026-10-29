@@ -8,6 +8,7 @@ use harness_kernel::{env::{ExecOpts, ExecOutput}, EnvError, ExecutionEnv};
 
 pub mod admin;
 pub mod auth;
+pub mod elevated;
 pub mod grants;
 pub mod host;
 pub mod hostd;
@@ -27,6 +28,7 @@ pub mod tools;
 
 pub use admin::ServiceTool;
 pub use grants::{Approval, ArgvGrant, Grants, GrantsCache, Mode, PathGrant};
+pub use elevated::ElevatedClient;
 pub use host::HostEnv;
 pub use install::InstallTool;
 pub use library::{FilesTool, KeepTool};
@@ -42,7 +44,8 @@ pub use proxy::{Mode as ProxyMode, ProxyConfig};
 pub use sandbox::{BwrapEnv, Mount, validate_mount};
 pub use skills::{PublishSkillTool, RollbackSkillTool, RunSkillTool, SkillCatalog};
 pub use tools::{
-    CapabilityTool, DelegateTool, ExecTool, HostTool, ReadTool, RememberTool, SysTool, WriteTool,
+    CapabilityTool, DelegateTool, ExecTool, HostTool, PkgTool, ReadTool, RememberTool, SysTool,
+    WriteTool,
 };
 
 /// 未接入沙盒时的占位：任何执行都明确失败，绝不静默放行。

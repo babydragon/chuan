@@ -1,0 +1,26 @@
+[Unit]
+Description=chuan hostd (privileged helper, D22 L2)
+Documentation=https://github.com/babydragon/chuan
+After=local-fs.target
+# 故意不 Wants/Requires chuan.service：主服务重启不该带走提权通道，
+# 反过来也一样——hostd 挂了只是"不能装包"，不该影响聊天。
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/chuan hostd --socket /run/chuan/host.sock --config /etc/chuan/chuan.toml --audit /var/lib/chuan/host-access.jsonl --snapshot-dir /var/lib/chuan/pkg-snapshots --allow-uid @CHUAN_UID@ --allow-gid @CHUAN_GID@
+# 目录 0755：chuan 要能穿进来（真正拦人的是 socket 的 0660 + SO_PEERCRED）
+RuntimeDirectory=chuan
+RuntimeDirectoryMode=0755
+StateDirectory=chuan
+# hostd 自己就是 root；这里只做防误伤，不要限制它的写权限（apt 要动 /usr /var /etc）
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+Restart=on-failure
+RestartSec=2
+
+# 没有 [Install]：由 install.sh 显式 enable，避免"装完就自动获得提权通道"
+

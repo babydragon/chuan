@@ -256,12 +256,30 @@ for u in chuan.service chuan-backup.service chuan-backup.timer; do
     run install -Dm644 -o root -g root "$f" "$UNITDIR/$u"
   fi
 done
+# hostd：提到 root 的单元要按服务账号的 uid/gid 生成（unit 里没有"别的用户"的 uid 占位符）
+HOSTD="$(asset chuan-hostd.service)" || true
+if [[ -n $HOSTD ]]; then
+  UID_SVC="$(id -u "$SVC_USER" 2>/dev/null || echo 1000)"
+  GID_SVC="$(id -g "$SVC_GROUP" 2>/dev/null || id -g "$SVC_USER" 2>/dev/null || echo 1000)"
+  sed -e "s/@CHUAN_UID@/$UID_SVC/g" -e "s/@CHUAN_GID@/$GID_SVC/g" "$HOSTD" > "$ETC/chuan-hostd.service.tmp"
+  if [[ -z $R ]]; then
+    run install -Dm644 "$ETC/chuan-hostd.service.tmp" /etc/systemd/system/chuan-hostd.service
+  else
+    run install -Dm644 "$ETC/chuan-hostd.service.tmp" "$UNITDIR/chuan-hostd.service"
+  fi
+  rm -f "$ETC/chuan-hostd.service.tmp"
+fi
+
 if [[ -z $R ]]; then
   run systemctl daemon-reload
   # 宿主执行（D22 L1）：`systemctl --user` 需要 user manager；journalctl 需要 journal 组。
   # 两者都只在真实系统上做，--root 安装（打包/交叉）时跳过。
   # 上一次安装留下的失败计数（例如 unit 写错导致 226/NAMESPACE）会挡住本次启动
   run systemctl reset-failed chuan.service || true
+  if [[ -n $HOSTD && $ENABLE -eq 1 ]]; then
+    run systemctl reset-failed chuan-hostd.service || true
+    run systemctl enable --now chuan-hostd.service
+  fi
   if command -v loginctl >/dev/null 2>&1; then
     run loginctl enable-linger "$SVC_USER"
   else
@@ -293,7 +311,10 @@ cat <<NEXT
   /var/lib/chuan            0750 $SVC_USER:$SVC_GROUP
   /var/lib/chuan/timers     0750 $SVC_USER:$SVC_GROUP  （宿主 lane 的监控脚本；[host.path] 已授权）
 
-宿主执行（D22，P4.6-A）：
+宿主执行（D22）：
+  - chuan-hostd.service 是**提权通道**（root）：只在 [[host_elevated.grant]] 里列出的
+    argv 前缀能跑（默认是空的 = 一律拒绝），执行前会存 dpkg 快照，并写
+    /var/lib/chuan/host-access.jsonl。不需要就 systemctl disable --now chuan-hostd
   - 已 enable-linger $SVC_USER：systemctl --user 才能用（user timer 跑在独立 slice，
     不吃 chuan.service 的 MemoryMax）
   - unit 里已加 SupplementaryGroups=systemd-journal（journalctl 要读系统日志）

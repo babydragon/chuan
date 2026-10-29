@@ -7,7 +7,7 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 预发布到 `v0.1.0-rc.17`。
+> 预发布到 `v0.1.0-rc.18`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B/C 未做**。
 
@@ -316,8 +316,9 @@ B、C 未做。
 
 ### P4.6-C · hostd 与提权（root）
 
-**进度**：`chuan hostd` 骨架已实现（socket + `SO_PEERCRED` + argv 前缀匹配 + `env -i` +
-`host-access.jsonl`，4 个端到端测试）；**unit、install.sh、工具侧（含 `-s` 预览与 dpkg 快照）未接**。
+**进度**：已实现——`chuan hostd`（socket + `SO_PEERCRED` + argv 前缀匹配 + `env -i` +
+`host-access.jsonl` + dpkg 快照）、`chuan-hostd.service`、install.sh 装配、`pkg` 工具
+（`plan` 预览 → `install`，未预览过会被拒）。**未上板验证**。
 
 - `chuan hostd` 子命令 + 第二单元（`User=root`）+ `/run/chuan/host.sock`（`0660 root:chuan`）
 - `SO_PEERCRED` 校验、argv 前缀匹配、`env -i`、`host-access.jsonl`、`dpkg` 快照

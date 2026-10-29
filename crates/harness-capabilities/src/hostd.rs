@@ -30,6 +30,10 @@ pub struct HostdConfig {
     pub audit: PathBuf,
     /// 只接受这个 uid 的连接（install.sh 传 `id -u chuan`）
     pub allow_uid: u32,
+    /// socket 的组（= 服务账号的主组），让 chuan 能在文件系统层连进来
+    pub allow_gid: u32,
+    /// `snapshot = "dpkg"` 的条目在执行前把包清单存到这里
+    pub snapshot_dir: PathBuf,
 }
 
 #[derive(serde::Deserialize)]
@@ -38,7 +42,7 @@ struct Request {
 }
 
 #[derive(serde::Serialize)]
-struct Response {
+pub struct Response {
     ok: bool,
     code: Option<i32>,
     stdout: String,
@@ -47,6 +51,8 @@ struct Response {
     /// 命中的授权条目（从 1 开始），审计与工具栏对账用
     grant_index: usize,
     error: Option<String>,
+    /// 执行前做的快照文件（没有就是 None）
+    snapshot: Option<String>,
 }
 
 /// argv 前缀匹配：逐项相等，不做 glob、不看参数个数。
@@ -63,6 +69,38 @@ pub fn match_grant<'a>(grants: &'a Grants, argv: &[String]) -> Option<(usize, &'
         .enumerate()
         .find(|(_, g)| !g.argv.is_empty() && argv.starts_with(&g.argv))
         .map(|(i, g)| (i + 1, g))
+}
+
+/// 变更前把已装包清单落盘。失败不阻断（宁可真跑失败也能回滚知道原状？不——失败就说明
+/// 状态不可知，仍然继续执行但记 WARN：apt 自己有事务性，回滚信息缺失是可见的代价）。
+fn take_dpkg_snapshot(dir: &Path) -> Option<String> {
+    let _ = std::fs::create_dir_all(dir);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("{ts}.txt"));
+    match std::process::Command::new("/usr/bin/dpkg")
+        .arg("--get-selections")
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            if let Err(e) = std::fs::write(&path, &o.stdout) {
+                tracing::warn!(error = %e, "hostd: 写 dpkg 快照失败");
+                return None;
+            }
+            tracing::info!(path = %path.display(), "hostd: 已存 dpkg 快照");
+            Some(path.display().to_string())
+        }
+        Ok(o) => {
+            tracing::warn!(code = ?o.status.code(), "hostd: dpkg --get-selections 失败");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "hostd: 跑不了 dpkg，跳过快照");
+            None
+        }
+    }
 }
 
 fn truncate(s: &mut String, truncated: &mut bool) {
@@ -127,6 +165,7 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
             truncated: false,
             grant_index: 0,
             error: Some(format!("请求不是合法 JSON：{e}")),
+            snapshot: None,
         },
         Ok(req) if req.argv.is_empty() => Response {
             ok: false,
@@ -136,6 +175,7 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
             truncated: false,
             grant_index: 0,
             error: Some("argv 为空".into()),
+            snapshot: None,
         },
         Ok(req) => {
             let grants_now = grants.current();
@@ -149,6 +189,7 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                         stderr: String::new(),
                         truncated: false,
                         grant_index: 0,
+                        snapshot: None,
                         error: Some(match &grants_now.locked {
                             Some(r) => format!("授权表不可用（{r}）——修好配置再试，不会回退旧授权"),
                             None => format!(
@@ -159,6 +200,15 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                     }
                 }
                 Some((idx, g)) => {
+                    // 快照不算提权：它由 hostd 自己决定，不需要主人再授权一条 argv。
+                    let snapshot = match g.snapshot.as_deref() {
+                        Some("dpkg") => take_dpkg_snapshot(&cfg.snapshot_dir),
+                        Some(other) => {
+                            tracing::warn!(other, "hostd: 未知的 snapshot 类型，跳过");
+                            None
+                        }
+                        None => None,
+                    };
                     let mut cmd = tokio::process::Command::new(&req.argv[0]);
                     cmd.args(&req.argv[1..])
                         .env_clear()
@@ -189,6 +239,7 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                                 truncated,
                                 grant_index: idx,
                                 error: None,
+                                snapshot: snapshot.clone(),
                             }
                         }
                         Ok(Err(e)) => Response {
@@ -199,6 +250,7 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                             truncated: false,
                             grant_index: idx,
                             error: Some(format!("启动失败：{e}")),
+                            snapshot: snapshot.clone(),
                         },
                         Err(_) => Response {
                             ok: false,
@@ -208,12 +260,9 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                             truncated: false,
                             grant_index: idx,
                             error: Some(format!("超时（{}ms）", DEFAULT_TIMEOUT_MS)),
+                            snapshot: snapshot.clone(),
                         },
                     };
-                    if g.snapshot.is_some() {
-                        // 快照在第二步（apt）里做；这里只留痕，别让人以为已经做了
-                        tracing::info!(argv = ?req.argv, snapshot = ?g.snapshot, "hostd: 该条目声明了快照");
-                    }
                     audit_log(&cfg.audit, idx, &req.argv, r.code, started.elapsed().as_millis());
                     r
                 }
@@ -237,7 +286,11 @@ pub async fn serve(cfg: HostdConfig) -> Result<(), String> {
     let _ = std::fs::remove_file(&cfg.socket);
     let listener = UnixListener::bind(&cfg.socket)
         .map_err(|e| format!("bind {}：{e}", cfg.socket.display()))?;
-    // 0660：组权限是第一道闸，SO_PEERCRED 是第二道
+    // 0660 + root:服务组：组权限是第一道闸，SO_PEERCRED 是第二道。
+    // 不 chown 的话 socket 属主是 root:root，chuan 连文件系统层都进不来。
+    if cfg.allow_gid != 0 {
+        let _ = std::os::unix::fs::chown(&cfg.socket, Some(0), Some(cfg.allow_gid));
+    }
     let _ = std::fs::set_permissions(
         &cfg.socket,
         std::os::unix::fs::PermissionsExt::from_mode(0o660),
@@ -276,6 +329,8 @@ pub fn config_from_args(args: &[String]) -> Result<HostdConfig, String> {
         config: PathBuf::from("/etc/chuan/chuan.toml"),
         audit: PathBuf::from("/var/lib/chuan/host-access.jsonl"),
         allow_uid: 0,
+        allow_gid: 0,
+        snapshot_dir: PathBuf::from("/var/lib/chuan/pkg-snapshots"),
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -286,6 +341,12 @@ pub fn config_from_args(args: &[String]) -> Result<HostdConfig, String> {
             "--socket" => cfg.socket = PathBuf::from(take("--socket")?),
             "--config" => cfg.config = PathBuf::from(take("--config")?),
             "--audit" => cfg.audit = PathBuf::from(take("--audit")?),
+            "--allow-gid" => {
+                cfg.allow_gid = take("--allow-gid")?
+                    .parse()
+                    .map_err(|_| "--allow-gid 需要数字".to_string())?
+            }
+            "--snapshot-dir" => cfg.snapshot_dir = PathBuf::from(take("--snapshot-dir")?),
             "--allow-uid" => {
                 cfg.allow_uid = take("--allow-uid")?
                     .parse()

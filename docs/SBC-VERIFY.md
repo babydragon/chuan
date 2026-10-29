@@ -265,6 +265,10 @@
 - [ ] `apt-get install` 条目：审批卡上是 `-s` 预览，真落后 `dpkg -l <pkg>` 存在
 - [ ] hostd 子进程 `env -i`：`/run/credentials/chuan.service` 不可读、环境里无 `*_KEY` / `*_FILE`
 - [ ] `host-access.jsonl`：权限 `0640`，每行含 `grant_index` 与展开后的 argv
+- [ ] `pkg` 全链路：`plan` 拿到 `apt-get -s` 预览 → 审批卡上写着包名与"已预览"
+      → `install` 成功 → `/var/lib/chuan/pkg-snapshots/` 出现变更前清单
+- [ ] 没预览就 `install` → 直接被拒（不发请求到 hostd）
+- [ ] `systemctl disable --now chuan-hostd` 后 `pkg` 报"连接失败，确认 chuan-hostd 在跑"
 
 **L3（`sys`）与自毁防护**：
 

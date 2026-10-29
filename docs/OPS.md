@@ -371,7 +371,10 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 
 - `SupplementaryGroups=lp systemd-journal`——否则 `journalctl -u` 读不到别人的日志；
 - `loginctl enable-linger chuan`——`systemctl --user` 与 `systemd-run --user` 的前提（`§3` 已有此条）；
-- `/run/chuan/host.sock`：`0660 root:chuan`，`chuan hostd` 负责创建；socket 存在但 hostd 没跑 → **拒绝**，不是降级；
+- `/run/chuan/host.sock`：`0660 root:chuan`，`chuan hostd` 负责创建（目录 0755 让 chuan 穿得进来，
+  真正的闸是 socket 权限 + `SO_PEERCRED`）；socket 存在但 hostd 没跑 → **拒绝**，不是降级；
+- `chuan-hostd.service`：`User=root`，**没有 `[Install]` 段**，由 `install.sh` 显式 enable；
+  不需要提权通道就 `systemctl disable --now chuan-hostd`（不影响聊天，只影响 `pkg`）；
 - **`/run/user` 只读就够**：`systemctl --user` 只需要**连** `/run/user/<uid>/systemd/private`
   （socket `srw-rw-rw-`，只读挂载也能连），unit 文件写在 `/var/lib/chuan/.config`（`StateDirectory` 已放开）。
   **不要**在 unit 里写 `ReadWritePaths=/run/user/%U`——system 单元里 `%U` 恒为 `0`

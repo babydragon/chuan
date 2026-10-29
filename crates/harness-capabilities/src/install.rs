@@ -104,7 +104,7 @@ pip 装到 /rt/py（venv），技能里用 `/py/bin/python3`；npm 装到 /rt/no
 调用前先用 `exec` 探一下（`python3 -c \"import x\"`）——已经能用就别调这个。
 这条调用会联网并改运行时环境，需要主人确认。只装用户明确要的东西，不要顺手升级整个环境。
 若探测发现已可用，本工具会直接返回、不联网。\
-**路径对照**：`/rt` = 宿主 `/var/lib/chuan/rt`；pip 装到 `/rt/py`（沙盒挂成 `/py`），npm 装到 `/rt/node`（沙盒挂成 `/node`）；pip/npm 的 `TMPDIR` 已指到 `/rt/tmp`（磁盘，不占内存）。\
+**装到哪**：pip 包在沙盒里以 `/py` 出现，npm 包以 `/node` 出现；临时目录用的是磁盘而不是沙盒 `/tmp`。\
 **大件不要走 pip**：numpy / scipy / pandas / matplotlib / pillow 这类在 riscv64 上没有预编译 wheel，\
 pip 会现场编译（几十分钟起），还会吃掉大量磁盘。它们应该由主人用系统包安装\
 （`apt install python3-numpy python3-matplotlib`）——沙盒的 venv 开了 `--system-site-packages`，\

@@ -28,6 +28,8 @@ argv = ["/usr/bin/true"]
         config: cfg,
         audit: dir.join("host-access.jsonl"),
         allow_uid: unsafe { libc::getuid() },
+        allow_gid: unsafe { libc::getgid() },
+        snapshot_dir: dir.join("snapshots"),
     }
 }
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use harness_capabilities::{
     BwrapEnv, CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache,
-    HostEnv, HostTool,
+    ElevatedClient, HostEnv, HostTool, PkgTool,
     HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
     NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
     RoleTool,
@@ -351,6 +351,10 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         Arc::new(HostEnv::new(&cfg.workspace, Arc::clone(&grants))),
         Arc::clone(&grants),
     )));
+    // 系统包：走 hostd 提权通道（host_elevated，默认 deny）。没有 chuan-hostd 就没有这条路。
+    tools.register(Arc::new(PkgTool::new(ElevatedClient::new(
+        std::env::var("CHUAN_HOSTD_SOCK").unwrap_or_else(|_| "/run/chuan/host.sock".into()),
+    ))));
     // 权限申请（只写草稿，不改配置）：agent 被卡住时的唯一出口
     tools.register(Arc::new(CapabilityTool::new(
         cfg.config_dir.join("capabilities"),

@@ -61,8 +61,8 @@ impl Tool for ReadTool {
         ToolSpec {
             name: "read".into(),
             description: "读取工作区内的文本文件（上限 256KB）。\
-路径相对 workspace 根（= 沙盒 `/ws` = 宿主 `/var/lib/chuan/workspaces`），`x` 与 `/ws/x` 等价，\
-其它绝对路径视为越界。更大的文件用 exec（`head` / `grep`）或 python 读。".into(),
+路径相对工作区根（沙盒里就是 `/ws`），`x` 与 `/ws/x` 等价；其它绝对路径视为越界。\
+更大的文件用 exec（`head` / `grep`）或 python 读。".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -105,9 +105,8 @@ impl Tool for WriteTool {
         ToolSpec {
             name: "write".into(),
             description: "写入工作区内的文本文件（覆盖）。\
-路径相对 workspace 根（= 沙盒 `/ws` = 宿主 `/var/lib/chuan/workspaces`），`x` 与 `/ws/x` 等价；\
-其它绝对路径视为越界。内容走工具参数，**只适合模型自己写的短文本**——大文件用 exec 生成，\
-或让 host `cp` 到 `/ws`。".into(),
+路径相对工作区根（沙盒里就是 `/ws`），`x` 与 `/ws/x` 等价；其它绝对路径视为越界。\
+内容走工具参数，**只适合模型自己写的短文本**——大文件用 exec 生成，或让 host `cp` 到 `/ws`。".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
