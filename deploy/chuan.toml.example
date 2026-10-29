@@ -123,7 +123,7 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 "/var/log/journal"    = { mode = "ro" }   # journalctl（需 systemd-journal 组）
 "/run/systemd/system" = { mode = "ro" }   # sd_booted()；缺了 systemctl 会报 "not booted"
 "/run/dbus"           = { mode = "ro" }   # 系统总线（systemctl 用）
-"/run/user/%U"        = { mode = "rw" }   # systemctl --user 的控制 socket
+"/run/user/%U"        = { mode = "ro" }   # systemctl --user 的控制 socket（只连不写）
 "/var/lib/chuan/.config" = { mode = "rw" }  # user unit 文件
 "/var/lib/chuan/timers"  = { mode = "rw" }  # 监控脚本
 # 要读别的目录就点名（只读、弹卡）：host(grant=["/home/you/report.csv"])

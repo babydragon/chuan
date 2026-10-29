@@ -400,6 +400,10 @@ impl BwrapEnv {
             "TMPDIR",
             "/tmp",
         ]);
+        // `systemctl --user` 依赖 XDG_RUNTIME_DIR 找 /run/user/<uid> 的控制 socket；
+        // 不设的话会直接报 "$XDG_RUNTIME_DIR not defined"（板上实测）。
+        let runtime = format!("/run/user/{}", unsafe { libc::getuid() });
+        cmd.arg("--setenv").arg("XDG_RUNTIME_DIR").arg(runtime);
         for (k, v) in &opts.env {
             cmd.arg("--setenv").arg(k).arg(v);
         }

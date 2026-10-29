@@ -406,8 +406,10 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
   不是工具名——否则一条 `always` 等于放行整类命令。
 - 逐次审计：`host-access.jsonl`（第几条授权、展开后的 argv、退出码、耗时），与 `net-access.jsonl` 并列。
 - **可写路径由 unit 决定**：bwrap 的 `--bind` 不清除源挂载继承的 `MS_RDONLY`
-  （2026-10-29 实测：ro 父挂载里 bind 出来仍不可写）。可写目录必须写进 unit 的
-  `ReadWritePaths`（如 `/run/user/%U`），否则 L1 里"挂上了但写不进"。
+  （2026-10-29 实测：ro 父挂载里 bind 出来仍不可写）。所以 L1 里"挂成 rw 却写不进"是正常现象，
+  可写目录必须写进 unit 的 `ReadWritePaths`，且**只能写实际 uid 的路径**：
+  system 单元里 `%U` 恒为 0，写 `/run/user/%U` 会变成 `/run/user/0` 并让服务起不来（实测 226/NAMESPACE）。
+  `/run/user/<uid>` 本身只需 `ro`——`systemctl --user` 只连 socket。
 - **自毁防护**：`chuan.service` 的 `restart` 排队到本轮 turn 结束后执行（先发消息再重启）；
   `stop` / `disable` 一律拒绝，要主人手工。
 - 单位名称/路径不靠 argv 猜：hostd 匹配授权后再过一遍通用校验（拒绝 `..`、拒绝符号链接逃逸、

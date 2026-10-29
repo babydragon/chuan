@@ -308,7 +308,7 @@ net = "host"        # 共享宿主 netns：能连 127.0.0.1 的代理与 D-Bus
 "/run/systemd/system"  = { mode = "ro" }   # sd_booted() 就看这个目录；缺了 systemctl 直接报 "not booted with systemd"
 "/run/dbus"            = { mode = "ro" }   # 系统总线（systemctl 用）
 "/run/dbus/system_bus_socket" = { mode = "ro" }
-"/run/user/1000"              = { mode = "rw" }   # systemctl --user 的控制 socket
+"/run/user/1000"              = { mode = "ro" }   # systemctl --user 的控制 socket（只连不写）
 "/var/lib/chuan/.config"      = { mode = "rw" }   # user unit 文件（XDG_CONFIG_HOME）
 "/var/lib/chuan/timers"       = { mode = "rw" }   # timer 要跑的脚本
 
@@ -367,9 +367,12 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 - `SupplementaryGroups=lp systemd-journal`——否则 `journalctl -u` 读不到别人的日志；
 - `loginctl enable-linger chuan`——`systemctl --user` 与 `systemd-run --user` 的前提（`§3` 已有此条）；
 - `/run/chuan/host.sock`：`0660 root:chuan`，`chuan hostd` 负责创建；socket 存在但 hostd 没跑 → **拒绝**，不是降级；
-- **可写目录必须由 unit 放开**：bwrap 的 `--bind` 不清除源挂载继承的 `MS_RDONLY`
-  （2026-10-29 开发机实测），所以 `/run/user/%U` 这类在 `ProtectHome=read-only` 之下的路径，
-  要在 unit 里写 `ReadWritePaths=/run/user/%U` 才能真正可写；
+- **`/run/user` 只读就够**：`systemctl --user` 只需要**连** `/run/user/<uid>/systemd/private`
+  （socket `srw-rw-rw-`，只读挂载也能连），unit 文件写在 `/var/lib/chuan/.config`（`StateDirectory` 已放开）。
+  **不要**在 unit 里写 `ReadWritePaths=/run/user/%U`——system 单元里 `%U` 恒为 `0`
+  （指"运行 service manager 的用户"），会变成 `/run/user/0`，启动直接 `226/NAMESPACE`；
+  真要可写就写死实际 uid。bwrap 的 `--bind` 也不清除继承的 `MS_RDONLY`（实测），
+  所以"挂成 rw"本身在只读父挂载下不成立。
 - 热加载：授权表按 mtime 读，改完**不用** `systemctl restart chuan`——重启会打断 agent 正在跑的那一轮。
 
 **看得见**：`/status` 打印生效授权条数，以及其中 `always` 的清单（最多 5 条 + 总数）。

@@ -245,11 +245,11 @@
 
 - [ ] bwrap 里 `/run/user/<uid>` 是**可写**的（`systemctl --user` 的控制 socket 在那）：
       `touch /run/user/<uid>/probe`
-      **2026-10-29 开发机实测（0.13）**：bwrap 的 `--bind` **不清除**源挂载继承来的
-      `MS_RDONLY`——ro 父挂载里 bind 出来的目录仍不可写。处置顺序：
-      ① unit 加 `ReadWritePaths=/run/user/%U`（systemd 会把这棵子树在本服务命名空间里重挂成 rw，
-      可豁免 `ProtectHome=read-only`）；② 退路 `ProtectHome=no`（chuan 的 home 是 `/var/lib/chuan`，
-      代价只是 daemon 能看到 `/home`；沙盒里仍遮蔽）。板上要确认 ① 真的生效
+      **2026-10-29 结论**：不需要可写。`systemctl --user` 只**连** socket（`srw-rw-rw-`），
+      只读挂载即可；unit 文件写 `/var/lib/chuan/.config`。
+      踩过的坑：`ReadWritePaths=/run/user/%U` 在 system 单元里 `%U` 恒为 0 → `/run/user/0` 不存在 →
+      `226/NAMESPACE` 起不来（板上实测）。真要可写必须写死 uid，且 bwrap 的 `--bind` 不清除
+      继承的 `MS_RDONLY`，所以"挂成 rw"在只读父挂载下本来就不成立
 - [ ] 看到的是**宿主进程表**：`ps -e | head` 里有 PID 1 与 `journald`（不是空表、不是新 procfs）
 - [ ] `/etc/chuan/secrets` 是空目录、`$CREDENTIALS_DIRECTORY` 不存在：
       `ls -A /etc/chuan/secrets; echo $CREDENTIALS_DIRECTORY`

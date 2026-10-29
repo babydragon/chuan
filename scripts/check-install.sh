@@ -47,6 +47,11 @@ run_case() {
   n=$(grep -c "→ /usr/local/bin/chuan" "$out" || true)
   [[ "$n" == "1" ]] || fail "$name: 安装步骤出现 $n 次（预期 1，说明下载分支后没有 exit）"
   grep -q "校验通过（SHA256SUMS）" "$out" || fail "$name: 没走 SHA256SUMS 校验"
+  # 反引号写在未加引号的 heredoc 里会被当成命令替换真的执行（真实事故：
+  # 装完多一行 "Failed to connect to user scope bus"，且那句话变成空）
+  grep -q "Failed to connect" "$out" && fail "$name: 结尾提示里有命令替换的残留输出"
+  grep -q "已 enable-linger chuan：systemctl --user 才能用" "$out" \
+    || fail "$name: 结尾提示里变量没展开（$(grep -m1 "已 enable-linger" "$out")）"
 }
 
 # 1. 无代理参数

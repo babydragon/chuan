@@ -49,7 +49,7 @@ async fn sees_host_pid_view_and_not_its_own() {
     );
     let out = env
         .exec(
-            &["sh".into(), "-c".into(), "cat /proc/1/comm; echo ws=$(ls -d /ws)".into()],
+            &["sh".into(), "-c".into(), "cat /proc/1/comm; echo ws=$(ls -d /ws); echo xdg=$XDG_RUNTIME_DIR".into()],
             opts(),
             CancellationToken::new(),
         )
@@ -59,6 +59,8 @@ async fn sees_host_pid_view_and_not_its_own() {
     // 宿主 1 号进程能读到 → 没换 pid namespace
     assert!(!out.stdout.trim().is_empty());
     assert!(out.stdout.contains("/ws"));
+    // `systemctl --user` 靠它找到 /run/user/<uid>；不设会报 "$XDG_RUNTIME_DIR not defined"
+    assert!(out.stdout.contains("xdg=/run/user/"), "stdout={}", out.stdout);
 }
 
 #[tokio::test]

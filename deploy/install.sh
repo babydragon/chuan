@@ -260,6 +260,8 @@ if [[ -z $R ]]; then
   run systemctl daemon-reload
   # 宿主执行（D22 L1）：`systemctl --user` 需要 user manager；journalctl 需要 journal 组。
   # 两者都只在真实系统上做，--root 安装（打包/交叉）时跳过。
+  # 上一次安装留下的失败计数（例如 unit 写错导致 226/NAMESPACE）会挡住本次启动
+  run systemctl reset-failed chuan.service || true
   if command -v loginctl >/dev/null 2>&1; then
     run loginctl enable-linger "$SVC_USER"
   else
@@ -292,7 +294,7 @@ cat <<NEXT
   /var/lib/chuan/timers     0750 $SVC_USER:$SVC_GROUP  （宿主 lane 的监控脚本；[host.path] 已授权）
 
 宿主执行（D22，P4.6-A）：
-  - 本脚本已 enable-linger：`systemctl --user` 才能用（user timer 跑在独立 slice，
+  - 已 enable-linger $SVC_USER：systemctl --user 才能用（user timer 跑在独立 slice，
     不吃 chuan.service 的 MemoryMax）
   - unit 里已加 SupplementaryGroups=systemd-journal（journalctl 要读系统日志）
   - 授权表就在本配置文件（改完热加载，不用重启）；默认表见 chuan.toml 的 [host] 段

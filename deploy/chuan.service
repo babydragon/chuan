@@ -47,9 +47,10 @@ ProtectClock=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/chuan
-# 宿主 lane（D22）：/run/user 在 ProtectHome=read-only 之下是只读的，而 bwrap 的 --bind
-# 不会清除继承的 MS_RDONLY（实测）。这里由 systemd 先重挂成 rw，user timer 才能落盘。
-ReadWritePaths=/run/user/%U
+# 注意：不要在这里写 ReadWritePaths=/run/user/%U —— system 单元里 %U 恒为 0
+# （它指"运行 service manager 的用户"），会变成 /run/user/0 导致 226/NAMESPACE。
+# 宿主 lane 只需要**连** /run/user/<uid>/systemd/private，只读挂载即可；
+# 真要可写就写死实际 uid（install.sh 知道它），但那不是当前需要。
 MemoryMax=1G
 
 [Install]
