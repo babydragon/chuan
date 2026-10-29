@@ -925,10 +925,14 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
                 }
             }
         },
+        // 默认跟配置目录走（与 services.d / roles 一致）：install.sh 建的是 <config>/playbooks。
+        // 以前默认是 `{home}/.config/chuan/playbooks`，服务账号的 HOME 是 /var/lib/chuan，
+        // 于是"人放进 /etc/chuan/playbooks、daemon 读 /var/lib/chuan/.config/chuan/playbooks"
+        // ——文件明明在，工具却说没有（2026-10-29 板上踩过）。
         playbooks_dir: file
             .skills
             .playbooks_dir
-            .unwrap_or_else(|| format!("{home}/.config/chuan/playbooks")),
+            .unwrap_or_else(|| config_dir.join("playbooks").to_string_lossy().into_owned()),
         tz_offset_min: parse_offset(&file.app.utc_offset)?,
         identity: std::sync::Arc::new(harness_kernel::Directory {
             users: file

@@ -48,6 +48,41 @@ impl PlaybookTool {
         out
     }
 
+    fn file_of(&self, topic: &str) -> Option<PathBuf> {
+        let p = self.dir.join(format!("{topic}.md"));
+        p.is_file().then_some(p)
+    }
+
+    /// `list` 的输出：每个 topic 是内置、还是哪份文件、多久前改的。
+    /// 排查"我明明放进去了"时，这一行就够（2026-10-29 有人在这上面耗了半小时）。
+    fn list_text(&self) -> String {
+        let mut out = format!("目录：{}\n", self.dir.display());
+        for t in self.topics() {
+            match self.file_of(&t) {
+                Some(p) => {
+                    let ago = std::fs::metadata(&p)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|m| m.elapsed().ok())
+                        .map(|d| {
+                            let s = d.as_secs();
+                            match s {
+                                0..=59 => "刚刚".to_string(),
+                                60..=3599 => format!("{} 分钟前", s / 60),
+                                3600..=86399 => format!("{} 小时前", s / 3600),
+                                _ => format!("{} 天前", s / 86400),
+                            }
+                        })
+                        .unwrap_or_else(|| "?".into());
+                    let builtin = if self.builtins.contains_key(&t) { "（覆盖内置）" } else { "" };
+                    out.push_str(&format!("- {t}{builtin}  文件 {}  · {ago}\n", p.display()));
+                }
+                None => out.push_str(&format!("- {t}  内置\n")),
+            }
+        }
+        out
+    }
+
     fn load(&self, topic: &str) -> Option<String> {
         let path = self.dir.join(format!("{topic}.md"));
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -83,12 +118,17 @@ impl Tool for PlaybookTool {
             name: "playbook".into(),
             description: format!(
                 "取一份本机的操作规范（SOP），按它办事。可用：{topics}。\
-                 导入/复刻外部技能前取 `import-skill`；沉淀技能前取 `distill`。"
+                 目录：{}（`action=list` 看每个 topic 是内置还是哪份文件、多久前改的）。\
+                 取不到时会告诉你这个目录和现有清单——**不要**据此要求主人「再去放一遍」，先看是不是目录不对。\
+                 导入/复刻外部技能前取 `import-skill`；沉淀技能前取 `distill`。",
+                self.dir.display()
             ),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": { "topic": { "type": "string", "description": "规范名" } },
-                "required": ["topic"]
+                "properties": {
+                    "action": { "type": "string", "enum": ["get", "list"], "description": "默认 get" },
+                    "topic": { "type": "string", "description": "规范名（action=get 时必填）" }
+                }
             }),
         }
     }
@@ -102,6 +142,13 @@ impl Tool for PlaybookTool {
         args: serde_json::Value,
         _ctx: &ToolCtx<'_>,
     ) -> Result<ToolOutput, ToolError> {
+        if args.get("action").and_then(|v| v.as_str()) == Some("list") {
+            return Ok(ToolOutput {
+                content: vec![Block::Paragraph(self.list_text())],
+                doc_writes: Vec::new(),
+                artifacts: Vec::new(),
+            });
+        }
         let topic = args
             .get("topic")
             .and_then(|v| v.as_str())
@@ -116,12 +163,21 @@ impl Tool for PlaybookTool {
         let text = self.load(topic).ok_or_else(|| {
             ToolError::new(
                 ErrorCode::NotFound,
-                format!("没有这份规范：{topic}（可用：{}）", self.topics().join("、")),
+                format!(
+                    "没有这份规范：{topic}。目录 {}\n现有：{}",
+                    self.dir.display(),
+                    self.topics().join("、")
+                ),
                 false,
             )
         })?;
+        // 标明来源：模型据此能判断"我读到的是文件还是内置"，人也能一眼看出目录对不对
+        let src = match self.file_of(topic) {
+            Some(p) => format!("来源：{}", p.display()),
+            None => "来源：内置（无同名文件）".to_string(),
+        };
         Ok(ToolOutput {
-            content: vec![Block::Paragraph(text)],
+            content: vec![Block::Paragraph(src), Block::Paragraph(text)],
             doc_writes: Vec::new(),
             artifacts: Vec::new(),
         })
@@ -143,6 +199,18 @@ mod tests {
         let spec = t.spec();
         assert!(spec.description.contains("import-skill"), "{}", spec.description);
         assert!(spec.description.contains("extra"), "{}", spec.description);
+    }
+
+    #[test]
+    fn list_shows_dir_and_file_age() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("teacher-notice.md"), "# 老师通知\n").unwrap();
+        let t = PlaybookTool::new(dir.path(), vec![("distill", "内置")]);
+        let text = t.list_text();
+        assert!(text.contains(&dir.path().display().to_string()), "{text}");
+        assert!(text.contains("teacher-notice  文件"), "{text}");
+        assert!(text.contains("刚刚"), "{text}");
+        assert!(text.contains("distill  内置"), "{text}");
     }
 
     #[test]
