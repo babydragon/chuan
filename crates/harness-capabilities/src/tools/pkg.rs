@@ -125,6 +125,12 @@ v1 只做 install：删包、整机升级一律不做（在 SBC 上等于赌博�
         Lane::External
     }
 
+    /// `plan` 是只读预览（`apt-get -s` 不改任何东西），不该占一次审批；
+    /// 真装（`install`）仍然逐条问。策略域设成 `deny` 时这条不生效。
+    fn skip_approval(&self, args: &serde_json::Value) -> bool {
+        args.get("action").and_then(|v| v.as_str()) == Some("plan")
+    }
+
     fn approval_hint(&self, args: &serde_json::Value) -> Option<String> {
         let pkgs: Vec<String> = args
             .get("packages")
