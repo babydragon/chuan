@@ -106,7 +106,12 @@ pub struct Grants {
     pub conversation_ttl_s: u64,
     /// 单次调用能带几条临时挂载
     pub max_ephemeral: usize,
+    /// 整份文件不可用（不存在 / TOML 语法错）：两段都死
     pub locked: Option<String>,
+    /// `[host.path]` 段自己有问题（如某条目非法）：**只废这一段**，提权授权仍可用
+    pub paths_error: Option<String>,
+    /// `[[host_elevated.grant]]` 段有问题：只废提权，`host` 仍可用
+    pub elevated_error: Option<String>,
 }
 
 impl Default for Grants {
@@ -119,6 +124,8 @@ impl Default for Grants {
             conversation_ttl_s: 1800,
             max_ephemeral: 8,
             locked: None,
+            paths_error: None,
+            elevated_error: None,
         }
     }
 }
@@ -131,6 +138,25 @@ impl Grants {
 
     pub fn is_locked(&self) -> bool {
         self.locked.is_some()
+    }
+
+    /// 路径授权是否可用（`host` lane 关心这个）
+    pub fn paths_ok(&self) -> bool {
+        self.locked.is_none() && self.paths_error.is_none()
+    }
+
+    /// 提权授权是否可用（`elevated` / hostd 关心这个）
+    pub fn elevated_ok(&self) -> bool {
+        self.locked.is_none() && self.elevated_error.is_none()
+    }
+
+    /// 给工具/卡片用的一句话说明（哪一段坏了、为什么）
+    pub fn path_error(&self) -> Option<&str> {
+        self.locked.as_deref().or(self.paths_error.as_deref())
+    }
+
+    pub fn elevated_error(&self) -> Option<&str> {
+        self.locked.as_deref().or(self.elevated_error.as_deref())
     }
 
     /// `capability list` 的第一行：**哪个文件、什么时候、几条**
@@ -150,6 +176,9 @@ impl Grants {
 
     /// 找覆盖这个路径的授权（**最长前缀**生效：`/var/lib/chuan/timers` 优先于 `/var/lib/chuan`）。
     pub fn best_path(&self, path: &Path) -> Option<&PathGrant> {
+        if !self.paths_ok() {
+            return None;
+        }
         self.ephemeral
             .iter()
             .chain(self.paths.iter())
@@ -174,6 +203,9 @@ impl Grants {
     /// 一条 `["/usr/bin/apt-get","install"]` 就是"apt-get 装东西"，后面跟什么都不影响匹配——
     /// 这是这个设计的已知弱点，靠逐次审批 + `-s` 预览兜底（见 D22「代价」）。
     pub fn match_argv(&self, argv: &[String]) -> Option<(usize, &ArgvGrant)> {
+        if !self.elevated_ok() {
+            return None;
+        }
         self.elevated
             .iter()
             .enumerate()
@@ -219,8 +251,8 @@ impl Grants {
 
     /// 宿主 cue：某个路径能不能读 / 写。失败时给出**结构化**提示（`NotGranted` 用）。
     pub fn authorize_path(&self, raw: &str, want: Mode) -> Result<(PathBuf, Approval, usize), String> {
-        if let Some(reason) = &self.locked {
-            return Err(format!("授权表不可用（{reason}）——修好配置再试，不会回退旧授权"));
+        if let Some(reason) = self.path_error() {
+            return Err(format!("[host.path] 不可用（{reason}）——修好配置再试，不会回退旧授权"));
         }
         let p = normalize(raw)?;
         ensure_not_protected(&p)?;
@@ -441,7 +473,9 @@ pub fn from_toml_for_uid(text: &str, uid: u32) -> Result<Grants, String> {
             g.max_ephemeral = m;
         }
     }
+    let mut path_err: Option<String> = None;
     for (raw, entry) in &f.host.path {
+        let one = (|| -> Result<PathGrant, String> {
         let p = normalize_for_uid(raw, uid)?;
         ensure_not_protected(&p)?;
         ensure_no_symlink_components(&p)?;
@@ -458,13 +492,29 @@ pub fn from_toml_for_uid(text: &str, uid: u32) -> Result<Grants, String> {
                  要长期可写请改成 approval = \"always\""
             ));
         }
-        g.paths.push(PathGrant { path: p, mode, approval });
+        Ok(PathGrant { path: p, mode, approval })
+        })();
+        match one {
+            Ok(grant) => g.paths.push(grant),
+            // 收第一个错误就够；整段作废（fail-closed），但**不牵连**提权授权
+            Err(e) => {
+                if path_err.is_none() {
+                    path_err = Some(e);
+                }
+            }
+        }
+    }
+    if let Some(e) = path_err {
+        g.paths.clear();
+        g.paths_error = Some(e);
     }
     // 长路径排前面没有意义（匹配是 longest-prefix），但排序让审批卡的"第 N 条"稳定
     g.paths.sort_by(|a, b| a.path.cmp(&b.path));
 
     if let Some(e) = &f.host_elevated {
+        let mut elev_err: Option<String> = None;
         for gr in &e.grant {
+            let one = (|| -> Result<ArgvGrant, String> {
             if gr.argv.is_empty() {
                 return Err("host_elevated.grant.argv 不能为空".into());
             }
@@ -494,13 +544,26 @@ pub fn from_toml_for_uid(text: &str, uid: u32) -> Result<Grants, String> {
                 }
                 (None, None) => None,
             };
-            g.elevated.push(ArgvGrant {
+            Ok(ArgvGrant {
                 argv: gr.argv.clone(),
                 approval: Approval::parse_argv(gr.approval.as_deref())?,
                 snapshot_argv: snap_argv,
                 snapshot: gr.snapshot.clone(),
                 note: gr.note.clone(),
-            });
+            })
+            })();
+            match one {
+                Ok(grant) => g.elevated.push(grant),
+                Err(e) => {
+                    if elev_err.is_none() {
+                        elev_err = Some(e);
+                    }
+                }
+            }
+        }
+        if let Some(e) = elev_err {
+            g.elevated.clear();
+            g.elevated_error = Some(e);
         }
     }
     Ok(g)
@@ -643,7 +706,9 @@ snapshot = "dpkg"
 [host.path]
 "/etc/chuan/secrets" = { mode = "ro" }
 "#;
-        let err = from_toml(bad).unwrap_err();
+        // 分段解析后不再整表失败：坏的那一段作废，错误挂在 paths_error 上
+        let g = from_toml(bad).unwrap();
+        let err = g.paths_error.clone().expect("应标记路径段作废");
         assert!(err.contains("强制遮蔽"), "{err}");
 
         let g = grants();
@@ -705,7 +770,8 @@ snapshot = "dpkg"
 
         // 授权一个指向 /etc 的软链 → 等于把 /etc 挂进来，必须拒绝
         let toml = format!("[host.path]\n\"{}\" = {{ mode = \"ro\" }}\n", link.display());
-        let err = from_toml(&toml).unwrap_err();
+        let g = from_toml(&toml).unwrap();
+        let err = g.paths_error.clone().expect("应标记路径段作废");
         assert!(err.contains("符号链接"), "{err}");
 
         // 临时挂载同理
@@ -731,12 +797,58 @@ snapshot = "dpkg"
         assert!(g.authorize_path(&ws.join("alias/x").to_string_lossy(), Mode::Ro).is_ok());
     }
 
+    /// 两段独立失效：路径表坏了不该把提权通道一起废掉（板上 2026-10-30 真实踩过）。
+    #[test]
+    fn path_errors_do_not_kill_elevated_grants() {
+        let toml = r#"
+[host.path]
+"/usr" = { mode = "ro" }
+"/run/user/0" = { mode = "ro" }
+
+[[host_elevated.grant]]
+argv = ["/usr/bin/apt-get", "install"]
+approval = "once"
+"#;
+        let g = from_toml(toml).unwrap();
+        assert!(g.paths_error.is_some(), "路径段应被标记作废");
+        assert!(g.paths.is_empty(), "整段作废，不留半截");
+        assert!(g.elevated_ok(), "提权授权必须仍然可用");
+        assert_eq!(
+            g.match_argv(&["/usr/bin/apt-get".into(), "install".into()]).map(|(i, _)| i),
+            Some(1)
+        );
+        assert!(g.authorize_path("/usr", Mode::Ro).is_err());
+    }
+
+    #[test]
+    fn elevated_errors_do_not_kill_path_grants() {
+        let toml = r#"
+[host.path]
+"/usr" = { mode = "ro" }
+
+[[host_elevated.grant]]
+argv = ["relative/path"]
+"#;
+        let g = from_toml(toml).unwrap();
+        assert!(g.elevated_error.is_some());
+        assert!(g.paths_ok(), "路径授权必须仍然可用");
+        assert!(g.authorize_path("/usr", Mode::Ro).is_ok());
+        assert!(g.match_argv(&["relative/path".into()]).is_none());
+    }
+
     #[test]
     fn bad_toml_locks_everything() {
-        let g = from_toml("[host.path]\n\"/usr\" = { mode = \"rwx\" }\n");
-        assert!(g.is_err());
+        // 语法错 → 整份不可用（两段都死）；条目非法 → 只废那一段（见上面的分段测试）
+        let g = from_toml("[host.path\n");
+        assert!(g.is_err(), "语法错应该整体失败");
+
+        let bad_mode = from_toml("[host.path]\n\"/usr\" = { mode = \"rwx\" }\n").unwrap();
+        assert!(bad_mode.paths_error.is_some());
+        assert!(bad_mode.authorize_path("/usr", Mode::Ro).is_err());
+
         let locked = Grants::locked("坏了");
         assert!(locked.authorize_path("/usr", Mode::Ro).is_err());
+        assert!(!locked.elevated_ok());
     }
 
     #[test]

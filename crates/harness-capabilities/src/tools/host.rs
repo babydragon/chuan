@@ -128,7 +128,7 @@ impl Tool for HostTool {
         if extra > 0 {
             return false;
         }
-        !self.cache.current().is_locked()
+        self.cache.current().paths_ok()
     }
 
     fn approval_hint(&self, args: &serde_json::Value) -> Option<String> {

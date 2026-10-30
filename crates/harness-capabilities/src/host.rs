@@ -39,10 +39,10 @@ impl HostEnv {
         if argv.is_empty() {
             return Err(EnvError::Io("empty argv".into()));
         }
-        if let Some(reason) = &grants.locked {
+        if let Some(reason) = grants.path_error() {
             return Err(EnvError::NotGranted {
                 kind: GrantKind::Path,
-                item: "(授权表)".into(),
+                item: "(host.path)".into(),
                 hint: format!("{reason}；修好配置再试，不会回退旧授权"),
             });
         }

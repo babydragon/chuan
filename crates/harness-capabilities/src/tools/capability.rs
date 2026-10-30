@@ -45,6 +45,14 @@ impl CapabilityTool {
         if let Some(reason) = &g.locked {
             return format!("授权表不可用：{reason}");
         }
+        let mut head = String::new();
+        if let Some(e) = &g.paths_error {
+            head.push_str(&format!("⚠ [host.path] 整段作废：{e}\n"));
+        }
+        if let Some(e) = &g.elevated_error {
+            head.push_str(&format!("⚠ [[host_elevated.grant]] 整段作废：{e}\n"));
+        }
+        s.push_str(&head);
         s.push_str(&format!("net = {}\n", if g.net_host { "host" } else { "isolated" }));
         if g.paths.is_empty() {
             s.push_str("[host.path]：（空）\n");

@@ -15,7 +15,9 @@
 > `host` 逐次审计；`remind` 回执标明「生效形态」；`playbook` 默认目录改为 `<config>/playbooks`。
 > **rc.22**：**删除 apt 专用 `pkg`**，改为通用 `elevated`（argv 授权表驱动，无发行版语义）；
 > `approval = "always"` 真正生效（预览免问、真装逐条问）；快照改成数据 `snapshot_argv`。
-> 预发布到 `v0.1.0-rc.22`，正式版待定。
+> **rc.23**：`%U` 按服务账号展开（hostd 是 root，曾展开成 `/run/user/0` 导致整表失效）；
+> host lane 补 DNS（`/etc/resolv.conf` 软链悬空）；授权表两段独立失效。
+> 预发布到 `v0.1.0-rc.23`，正式版待定。
 
 ---
 
@@ -36,6 +38,7 @@
 | 11 | [`ROLES.md`](ROLES.md) | 子 agent 怎么配、有哪些现成角色、平时怎么说话 |
 | 12 | [`VERIFY-P4.md`](VERIFY-P4.md) | P4 验证剧本：聊天话术 + 观察面 + 失败信号 |
 | 13 | [`WEIXIN.md`](WEIXIN.md) | 微信通道（ClawBot / iLink）**已实测事实**与未验证清单；只记事实，不含取舍 |
+| 14 | [`VOICE.md`](VOICE.md) | 语音消息**入站**的方案与成本：两平台事实、现状缺口、最小改动集、未验证项 |
 
 图：`architecture.png`（源 `architecture.dot`，同时导出 `.svg`）。
 历史版本与已合并的文档在 `archive/`。

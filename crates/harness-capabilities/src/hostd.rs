@@ -60,7 +60,7 @@ pub struct Response {
 /// 这是这套设计公认的弱点（`apt-get install` 一条等于放行它全部参数），
 /// 兜底靠"逐次审批 + `-s` 预览 + dpkg 快照"，见 D22「代价」。
 pub fn match_grant<'a>(grants: &'a Grants, argv: &[String]) -> Option<(usize, &'a ArgvGrant)> {
-    if grants.is_locked() || argv.is_empty() {
+    if !grants.elevated_ok() || argv.is_empty() {
         return None;
     }
     grants
@@ -194,8 +194,8 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                         truncated: false,
                         grant_index: 0,
                         snapshot: None,
-                        error: Some(match &grants_now.locked {
-                            Some(r) => format!("授权表不可用（{r}）——修好配置再试，不会回退旧授权"),
+                        error: Some(match grants_now.elevated_error() {
+                            Some(r) => format!("提权授权不可用（{r}）——修好配置再试，不会回退旧授权"),
                             None => format!(
                                 "命令不在 [[host_elevated.grant]] 里：{}。加一行业主授权后再试",
                                 req.argv.join(" ")

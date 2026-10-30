@@ -53,8 +53,8 @@ impl ElevatedTool {
     /// 工具侧也匹配一次：为的是给出"哪条授权、还差什么"的**可读错误**，
     /// 真正的判定仍由 hostd 再做一遍（纵深防御，别指望工具层的校验当边界）。
     fn grant_hint(grants: &Grants, argv: &[String]) -> Result<usize, String> {
-        if let Some(reason) = &grants.locked {
-            return Err(format!("授权表不可用（{reason}）——修好配置再试，不会回退旧授权"));
+        if let Some(reason) = grants.elevated_error() {
+            return Err(format!("提权授权不可用（{reason}）——修好配置再试，不会回退旧授权"));
         }
         if let Some((idx, _)) = grants.match_argv(argv) {
             return Ok(idx);
@@ -280,6 +280,8 @@ argv = ["/usr/bin/x"]
 snapshot = "dpkg"
 snapshot_argv = ["/usr/bin/y"]
 "#;
-        assert!(from_toml(bad).unwrap_err().contains("只能写一个"));
+        let g = from_toml(bad).unwrap();
+        let err = g.elevated_error.clone().expect("应标记提权段作废");
+        assert!(err.contains("只能写一个"), "{err}");
     }
 }
