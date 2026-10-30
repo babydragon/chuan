@@ -363,6 +363,8 @@ use harness_kernel::{
 
 #[derive(Default)]
 struct FakeChannel {
+    /// 通道名（多通道测试用）；空 = "fake"
+    name: String,
     delivered: Mutex<Vec<String>>,
     cards: Mutex<Vec<(String, Vec<Vec<(String, String)>>)>>,
     acks: Mutex<Vec<String>>,
@@ -390,7 +392,11 @@ fn view_text(v: &View) -> String {
 #[async_trait]
 impl harness_kernel::Channel for FakeChannel {
     fn id(&self) -> harness_kernel::ChannelId {
-        harness_kernel::ChannelId("fake".into())
+        harness_kernel::ChannelId(if self.name.is_empty() {
+            "fake".into()
+        } else {
+            self.name.clone()
+        })
     }
     fn caps(&self) -> Caps {
         Caps { edit: true, buttons: true, markdown: false, max_text: 4096, min_edit_interval_ms: 0 }
@@ -3176,7 +3182,6 @@ async fn reminders_are_per_user() {
                 channels: vec![Binding::parse("fake:2000").unwrap()],
             },
         ],
-        default_user: None,
     };
     let actor = Arc::new(ConversationActor::new(
         Arc::clone(&store),
@@ -3676,4 +3681,134 @@ async fn cancel_clears_reaction() {
         channel.delivered.lock().unwrap().iter().any(|t| t.contains("已取消")),
         "应回复已取消"
     );
+}
+
+/// 两个通道同时存在：同一个地址字符串不算同一个会话，回复不能串台。
+#[tokio::test]
+async fn two_channels_do_not_cross_talk() {
+    let tg = Arc::new(FakeChannel { name: "tg".into(), ..Default::default() });
+    let wx = Arc::new(FakeChannel { name: "wx".into(), ..Default::default() });
+    let store = Arc::new(EphemeralStore::new());
+    let actor = Arc::new(ConversationActor::with_channels(
+        store,
+        Arc::new(FakeDriver::new(vec![done_step("来自 TG"), done_step("来自微信")])),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        vec![
+            Arc::clone(&tg) as Arc<dyn harness_kernel::Channel>,
+            Arc::clone(&wx) as Arc<dyn harness_kernel::Channel>,
+        ],
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let send = |ch: &str, key: &str| Inbound {
+        channel: harness_kernel::ChannelId(ch.into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Text,
+        text: Some("你好".into()),
+        dedupe_key: key.into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    };
+    tx.send(send("tg", "u1")).await.unwrap();
+    tx.send(send("wx", "u2")).await.unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let tg_said = tg.delivered.lock().unwrap().join("\n");
+    let wx_said = wx.delivered.lock().unwrap().join("\n");
+    assert!(tg_said.contains("来自 TG"), "TG 应收到自己的回复：{tg_said:?}");
+    assert!(!tg_said.contains("来自微信"), "TG 不该收到微信的回复：{tg_said:?}");
+    assert!(wx_said.contains("来自微信"), "微信应收到自己的回复：{wx_said:?}");
+    assert!(!wx_said.contains("来自 TG"), "微信不该收到 TG 的回复：{wx_said:?}");
+}
+
+/// 未绑定的地址：回一句"未授权"，且**不触发 run**（不花模型钱）。
+#[tokio::test]
+async fn unbound_address_gets_unauthorized_without_running() {
+    let channel = Arc::new(FakeChannel::default());
+    let driver = FakeDriver::new(vec![done_step("不该被调用")]);
+    let store = Arc::new(EphemeralStore::new());
+    let mut dir = harness_kernel::Directory::default();
+    dir.users.push(harness_kernel::User {
+        id: "owner".into(),
+        name: None,
+        channels: vec![harness_kernel::Binding::parse("fake:42").unwrap()],
+    });
+    let actor = Arc::new(ConversationActor::new(
+        store,
+        Arc::new(driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: std::sync::Arc::new(dir),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "999".into(),
+        actor: "999".into(), // 没绑过
+        kind: InboundKind::Text,
+        text: Some("你好".into()),
+        dedupe_key: "u1".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let said = channel.delivered.lock().unwrap().join("\n");
+    assert!(said.contains("未授权"), "应回一句未授权：{said:?}");
+    assert!(!said.contains("不该被调用"), "未授权的消息不该跑模型：{said:?}");
 }

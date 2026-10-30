@@ -10,6 +10,8 @@ name = "chuan"
 path = "src/main.rs"
 
 [dependencies]
+# 只在 `weixin-login` 里把二维码画到终端；不带 image 特性，避免拉进图片编解码
+qrcode = { version = "0.14", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 harness-kernel = { workspace = true }
 harness-engine = { workspace = true }

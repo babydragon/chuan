@@ -8,8 +8,18 @@ name = "home"
 utc_offset = "+08:00"
 timezone = "Asia/Shanghai"
 
+# 可以同时开多条；同一个会话（通道 + 地址）仍然只跑一个 run。
+# 微信是**对话入口，不是推送通道**：额度按"每条入站 10 条出站"计，不随时间恢复（D25）。
+[channels]
+enabled = ["telegram"]       # 例：["telegram", "weixin"]；第一个是默认通道
+
+[weixin]
+# 扫码登录写下的凭据（chuan weixin-login）；0600，不进沙盒。
+# 白名单不在这一节：把 "weixin:<主人 id>" 写进 [identity.user].channels。
+credential_file = "~/.config/chuan/secrets/weixin.json"
+stale_after_s = 300
+
 [telegram]
-allowed_users = [123456789]
 stale_after_s = 300
 # 生产用 systemd 凭据时，由 unit 的 CHUAN_TELEGRAM_TOKEN_FILE=%d/telegram_token 覆盖
 token_file = "~/.config/chuan/secrets/telegram_token"
@@ -81,13 +91,21 @@ dir = "/var/lib/chuan/skills"
 playbooks_dir = "/etc/chuan/playbooks"
 
 [identity]
-# 一个人可以有多个通道地址；找不到绑定时用 default_user
-default_user = "owner"
-
+# 白名单唯一来源（D26）。一人可以绑多个账号（同一通道也行），也可以写多个人。
+# 未绑定的地址会收到「未授权」，不跑模型；没有 default_user 兜底。
 [[identity.user]]
 id = "owner"
 name = "主人"
-channels = ["telegram:123456789"]
+channels = [
+  "telegram:123456789",
+  # "telegram:987654321",          # 同一个人的第二个 TG 号
+  # "weixin:o9cq...@im.wechat",    # 扫码后 weixin-login 会打印主人的 id
+]
+
+# [[identity.user]]
+# id = "kid"
+# name = "小孩"
+# channels = ["telegram:555555555"]
 
 [policy]
 # 审批轴是"执行域"（能力越界），不是命令黑名单：

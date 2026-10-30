@@ -145,6 +145,12 @@ fn describe(d: &Doc, tz_min: i32) -> String {
     if let Some(m) = d.payload["message"].as_str() {
         out.push_str(&format!("  到点原样发出：{}\n", trunc(m, 120)));
     }
+    // 投递目标：多通道之后必须能看出来这条会发到哪（D27）
+    let ch = d.payload["channel"].as_str().unwrap_or("");
+    let addr = d.payload["chat"].as_str().unwrap_or("");
+    if !ch.is_empty() {
+        out.push_str(&format!("  投到：{ch} · {addr}\n"));
+    }
     let text = d.payload["text"].as_str().unwrap_or("?");
     out.push_str(&format!("  内容：{text}\n"));
     if let Some(note) = mode_note(&d.payload) {
@@ -195,6 +201,10 @@ impl Tool for RemindTool {
                     "text": {
                         "type": "string",
                         "description": "到点后要执行/汇报的内容，写成一句完整的指令"
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "可选：提醒投到哪个通道（如 telegram / weixin）。不填就用当前通道——也就是你现在说话的这个，等价于\"最近活跃\""
                     },
                     "message": {
                         "type": "string",
@@ -440,17 +450,37 @@ impl RemindTool {
             ));
         }
 
-        // 提醒是"自己提醒自己"：记在 user 名下，默认投自己的通道
+        // 提醒是"自己提醒自己"：记在 user 名下。
+        // 投递目标默认就是**当前通道**——你能建提醒，说明你刚在这个通道说过话，
+        // 所以它天然就是"最近活跃"的那个绑定。要投别处就显式给 channel（D27）。
         let user = self.identity.resolve(&channel, &chat);
-        let mut targets: Vec<serde_json::Value> = self
-            .identity
-            .channels(&user)
-            .into_iter()
-            .map(|b| serde_json::json!({ "channel": b.channel, "addr": b.addr }))
-            .collect();
-        if targets.is_empty() {
-            targets.push(serde_json::json!({ "channel": channel, "addr": chat }));
-        }
+        let bindings = self.identity.channels(&user);
+        let (target_channel, target_addr) = match args.get("channel").and_then(|v| v.as_str()) {
+            Some(want) if !want.trim().is_empty() && want != channel => {
+                let b = bindings
+                    .iter()
+                    .find(|b| b.channel == want.trim())
+                    .ok_or_else(|| {
+                        let have: Vec<String> = bindings
+                            .iter()
+                            .map(|b| format!("{}:{}", b.channel, b.addr))
+                            .collect();
+                        ToolError::new(
+                            ErrorCode::InvalidArgs,
+                            format!(
+                                "这个用户没有绑定通道 {want}。可用：{}",
+                                if have.is_empty() { "（无）".into() } else { have.join("、") }
+                            ),
+                            false,
+                        )
+                    })?;
+                (b.channel.clone(), b.addr.clone())
+            }
+            _ => (channel.clone(), chat.clone()),
+        };
+        // 只投一个目标：多投会让一句话同时打到 TG 和微信，而微信那边每条都是额度。
+        let targets: Vec<serde_json::Value> =
+            vec![serde_json::json!({ "channel": target_channel, "addr": target_addr })];
 
         let id = reminder_id(&ctx.conv.0, &text, raw);
         let doc = DocWrite {
@@ -464,8 +494,8 @@ impl RemindTool {
                 "polish": polish,
                 "message": message,
                 "next_at": next,
-                "channel": channel,
-                "chat": chat,
+                "channel": target_channel,
+                "chat": target_addr,
                 "actor": ctx.actor,
                 "user": user,
                 "targets": targets,
@@ -1135,6 +1165,105 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("没有这个技能"), "{}", err.message);
+    }
+
+    /// 默认投「当前通道」——你能建提醒，说明你刚在这个通道说过话（D27）。
+    #[tokio::test]
+    async fn reminder_defaults_to_current_channel() {
+        use harness_kernel::{Binding, ConversationId, Directory, RunId, User, Workspace};
+        let dir = Arc::new(Directory {
+            users: vec![User {
+                id: "owner".into(),
+                name: None,
+                channels: vec![
+                    Binding::parse("telegram:42").unwrap(),
+                    Binding::parse("weixin:abc@im.wechat").unwrap(),
+                ],
+            }],
+        });
+        let tool = RemindTool::new(480).with_identity(dir);
+        let env = crate::NullEnv;
+        let ws = Workspace { run: RunId("r".into()), root: "/tmp".into() };
+        let ctx = ToolCtx {
+            system_prompt: "",
+            spawner: None,
+            conv: ConversationId("telegram:42:0".into()),
+            actor: "42",
+            outbox: &harness_kernel::NullOutbox,
+            docs: &harness_kernel::NullDocReader,
+            run: RunId("r".into()),
+            call: harness_kernel::CallId("c".into()),
+            workspace: &ws,
+            env: &env,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        // 哪怕这个人还绑了微信，默认也只投当前这条会话所在的通道
+        let out = tool
+            .execute(
+                serde_json::json!({
+                    "text": "提醒我带伞",
+                    "schedule": {"kind":"once","at":"2030-01-01T20:00"}
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let doc = &out.doc_writes[0];
+        assert_eq!(doc.payload["channel"], "telegram");
+        assert_eq!(doc.payload["chat"], "42");
+        assert_eq!(
+            doc.payload["targets"].as_array().unwrap().len(),
+            1,
+            "只投一个目标，别同时打到微信"
+        );
+    }
+
+    /// 显式指定通道：投到那个绑定；没有的通道要报错并列出可用的。
+    #[tokio::test]
+    async fn reminder_can_target_another_channel() {
+        use harness_kernel::{Binding, ConversationId, Directory, RunId, User, Workspace};
+        let dir = Arc::new(Directory {
+            users: vec![User {
+                id: "owner".into(),
+                name: None,
+                channels: vec![
+                    Binding::parse("telegram:42").unwrap(),
+                    Binding::parse("weixin:abc@im.wechat").unwrap(),
+                ],
+            }],
+        });
+        let tool = RemindTool::new(480).with_identity(dir);
+        let env = crate::NullEnv;
+        let ws = Workspace { run: RunId("r".into()), root: "/tmp".into() };
+        let ctx = ToolCtx {
+            system_prompt: "",
+            spawner: None,
+            conv: ConversationId("telegram:42:0".into()),
+            actor: "42",
+            outbox: &harness_kernel::NullOutbox,
+            docs: &harness_kernel::NullDocReader,
+            run: RunId("r".into()),
+            call: harness_kernel::CallId("c".into()),
+            workspace: &ws,
+            env: &env,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let base = serde_json::json!({
+            "text": "提醒我带伞",
+            "schedule": {"kind":"once","at":"2030-01-01T20:00"}
+        });
+        let mut want = base.clone();
+        want["channel"] = serde_json::json!("weixin");
+        let out = tool.execute(want, &ctx).await.unwrap();
+        let doc = &out.doc_writes[0];
+        assert_eq!(doc.payload["channel"], "weixin");
+        assert_eq!(doc.payload["chat"], "abc@im.wechat");
+
+        let mut bad = base;
+        bad["channel"] = serde_json::json!("feishu");
+        let err = tool.execute(bad, &ctx).await.unwrap_err();
+        assert!(err.message.contains("没有绑定通道 feishu"), "{}", err.message);
+        assert!(err.message.contains("telegram:42"), "要列出可用绑定：{}", err.message);
     }
 
     #[test]

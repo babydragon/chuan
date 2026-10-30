@@ -23,8 +23,11 @@ use harness_capabilities::{
     WebFetchTool,
     WriteTool,
 };
+use harness_channels::offsets::OffsetStore;
 use harness_channels::telegram::http::HttpApi;
 use harness_channels::telegram::{TelegramChannel, TelegramConfig};
+use harness_channels::weixin::http::HttpApi as WeixinHttpApi;
+use harness_channels::weixin::{Credential, WeixinChannel, WeixinConfig};
 use harness_kernel::{ActorConfig, Channel, ConversationActor, Store, ToolRegistry};
 use harness_store::SqliteStore;
 use offsets::StoreOffsets;
@@ -80,6 +83,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(parent) = std::path::Path::new(&cfg.db).parent() {
         std::fs::create_dir_all(parent)?;
+    }
+
+    if cli.command.as_deref() == Some("weixin-login") {
+        use harness_channels::weixin::login::{Hooks, qr_login};
+        let proxy = std::env::var("CHUAN_PROXY").ok().or_else(|| cfg.proxy.url.clone());
+        // 渲染在应用层：通道层只给二维码内容
+        let hooks = Hooks {
+            on_qr: Box::new(|img: &str| {
+                println!("二维码内容：{img}\n");
+                match qrcode::QrCode::new(img.as_bytes()) {
+                    Ok(code) => {
+                        let art = code
+                            .render::<qrcode::render::unicode::Dense1x2>()
+                            .quiet_zone(true)
+                            .build();
+                        println!("{art}");
+                    }
+                    Err(e) => println!("（终端渲染失败：{e}；请用上面的字符串自行生成二维码）"),
+                }
+                println!("用手机微信扫描上面的码（8 分钟内有效）。");
+            }),
+            ask_code: Box::new(|| {
+                use std::io::Write;
+                print!("手机上要求输入验证码，请输入：");
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok()?;
+                Some(line.trim().to_owned())
+            }),
+        };
+        let cred = qr_login("https://ilinkai.weixin.qq.com", proxy.as_deref(), hooks)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        cred.save(std::path::Path::new(&cfg.weixin_credential))
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("写凭据 {} 失败：{e}", cfg.weixin_credential).into()
+            })?;
+        println!("\n登录成功：{}（0600）", cfg.weixin_credential);
+        println!("  bot  : {}", cred.bot_id);
+        println!("  主人 : {}", cred.user_id);
+        println!(
+            "\n把 [channels] enabled 加上 \"weixin\"，并把主人 id 写进 [weixin] allowed_users，然后重启。"
+        );
+        return Ok(());
     }
 
     if cli.backup {
@@ -148,21 +195,70 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    // Telegram：CHUAN_PROXY 优先（兼容旧用法），否则用 [proxy] url
+    // 代理：CHUAN_PROXY 优先（兼容旧用法），否则用 [proxy] url。
+    // 注意微信是**国内直连**，正常情况下不需要代理（docs/WEIXIN.md）。
     let tg_proxy = std::env::var("CHUAN_PROXY")
         .ok()
         .or_else(|| cfg.proxy.url.clone());
-    let api = Arc::new(HttpApi::with_proxy(cfg.token.clone(), tg_proxy.as_deref())?);
-    let offsets = Arc::new(StoreOffsets::new(Arc::clone(&store), "tg.offset"));
-    let channel: Arc<dyn Channel> = Arc::new(TelegramChannel::new(
-        api,
-        offsets as Arc<dyn harness_channels::telegram::OffsetStore>,
-        TelegramConfig {
-            allowed_users: cfg.allowed_users.clone(),
-            media_dir: std::path::PathBuf::from(&cfg.media_dir),
-            stale_after_s: cfg.stale_after_s,
-        },
-    ));
+
+    // 空身份表 = 谁都不能用（D26）。放在这里而不是 config::load，
+    // 否则 `weixin-login` 也会被挡住——而那时恰恰还没有 id 可填。
+    if cfg.identity.users.is_empty() {
+        return Err(
+            "[identity] 里没有任何绑定：至少要有一条 [[identity.user]] + channels = [\"telegram:<id>\"]，\
+             否则所有消息都会被当成未授权"
+                .into(),
+        );
+    }
+
+    let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
+    for name in &cfg.enabled_channels {
+        match name.as_str() {
+        "weixin" => {
+            let cred = Credential::load(std::path::Path::new(&cfg.weixin_credential))
+                .map_err(|e| {
+                    format!(
+                        "读取微信凭据 {} 失败：{e}（先跑 `chuan weixin-login`）",
+                        cfg.weixin_credential
+                    )
+                })?;
+            if cred.bot_token.is_empty() {
+                return Err(format!("微信凭据 {} 里没有 bot_token", cfg.weixin_credential).into());
+            }
+            let api = Arc::new(WeixinHttpApi::new(
+                cred.bot_token.clone(),
+                cred.base_url.clone(),
+                tg_proxy.as_deref(),
+            )?);
+            let offsets = Arc::new(StoreOffsets::new(Arc::clone(&store), "wx.buf"));
+            channels.push(Arc::new(WeixinChannel::new(
+                api,
+                offsets as Arc<dyn OffsetStore>,
+                WeixinConfig {
+                    stale_after_s: cfg.weixin_stale_s,
+                    cursor_key: "wx.buf".into(),
+                },
+            )) as Arc<dyn Channel>);
+        }
+        "telegram" => {
+            let api = Arc::new(HttpApi::with_proxy(cfg.token.clone(), tg_proxy.as_deref())?);
+            let offsets = Arc::new(StoreOffsets::new(Arc::clone(&store), "tg.offset"));
+            channels.push(Arc::new(TelegramChannel::new(
+                api,
+                offsets as Arc<dyn OffsetStore>,
+                TelegramConfig {
+                    media_dir: std::path::PathBuf::from(&cfg.media_dir),
+                    stale_after_s: cfg.stale_after_s,
+                },
+            )) as Arc<dyn Channel>);
+        }
+        other => return Err(format!("未实现的通道：{other}").into()),
+        }
+    }
+    println!(
+        "channels: {:?}",
+        channels.iter().map(|c| c.id().0.clone()).collect::<Vec<_>>()
+    );
 
     std::fs::create_dir_all(&cfg.workspace)?;
     std::fs::create_dir_all(&cfg.media_dir)?;
@@ -265,7 +361,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         cfg.npm_registry.clone(),
     )
     .with_proxy(cfg.proxy.clone())));
-    tools.register(Arc::new(RememberTool));
+    tools.register(Arc::new(RememberTool::default().with_identity(Arc::clone(&cfg.identity))));
     tools.register(Arc::new(SendFileTool));
     tools.register(KeepTool::new(&cfg.library_dir));
     tools.register(FilesTool::new(&cfg.library_dir));
@@ -392,7 +488,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         cfg.timezone,
         cfg.db,
         cfg.provider,
-        cfg.allowed_users
+        cfg.identity.users.len()
     );
     println!(
         "sandbox: /ws(可写) /inbox(只读) /skills(只读) /media(只读) ← {} · skills={} · media={}",
@@ -421,12 +517,12 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         println!("sandbox mounts: {}", list.join(", "));
     }
 
-    let actor = Arc::new(ConversationActor::new(
+    let actor = Arc::new(ConversationActor::with_channels(
         Arc::clone(&store),
         Arc::new(driver),
         Arc::new(tools),
         Arc::new(env),
-        Arc::clone(&channel),
+        channels.clone(),
         ActorConfig {
             model: cfg.model.clone().unwrap_or_else(|| cfg.provider.clone()),
             max_turns: cfg.max_turns,
@@ -478,8 +574,10 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         Some(Arc::new(harness_store::Fts5Retriever::new(Arc::clone(&store)))),
     ));
 
-    if let Err(e) = channel.register_commands().await {
-        eprintln!("register commands failed: {e}");
+    for ch in &channels {
+        if let Err(e) = ch.register_commands().await {
+            eprintln!("register commands failed ({}): {e}", ch.id().0);
+        }
     }
 
     let (tx, rx) = mpsc::channel(64);
@@ -518,13 +616,19 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             }
         });
     }
-    let poll_cancel = cancel.clone();
-    let ch = Arc::clone(&channel);
-    let poller = tokio::spawn(async move {
-        if let Err(e) = ch.run(tx, poll_cancel).await {
-            eprintln!("poll loop ended: {e}");
-        }
-    });
+    let mut pollers = Vec::new();
+    for ch in &channels {
+        let ch = Arc::clone(ch);
+        let tx = tx.clone();
+        let poll_cancel = cancel.clone();
+        pollers.push(tokio::spawn(async move {
+            if let Err(e) = ch.run(tx, poll_cancel).await {
+                eprintln!("poll loop ended ({}): {e}", ch.id().0);
+            }
+        }));
+    }
+    // 主线程不再持有发送端：所有 poller 退出后 actor 才会收尾
+    drop(tx);
 
     Arc::clone(&actor).spawn_scheduler(cancel.clone());
     println!("polling started");
@@ -532,7 +636,9 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         r = actor.run(rx, cancel.clone()) => { r?; }
         _ = tokio::signal::ctrl_c() => { cancel.cancel(); }
     }
-    let _ = poller.await;
+    for p in pollers {
+        let _ = p.await;
+    }
     Ok(())
 }
 

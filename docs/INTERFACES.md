@@ -44,6 +44,9 @@ pub trait Channel: Send + Sync + 'static {
 }
 ```
 
+0. **一个通道实现 = 一条通道**（`id()` 唯一）。多通道并存时，actor 持一张
+   `ChannelId → Arc<dyn Channel>` 表，按 `Inbound.channel` 路由；**会话键是 `{channel}:{addr}`**，
+   所以"同一个人在 TG 和微信"是两个互不相干的会话（锁、`/cancel`、`/status` 都按这个键）。
 1. 通道只收 `View`，不拼字符串；排版/分片/转义在 Renderer。
 2. `ActorRef ≠ 人`；跨通道合并靠应用层。
 3. `NotModified` 当成功、`TooOld` 让 Renderer 换新消息、`Rejected` 全局退避。

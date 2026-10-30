@@ -6,7 +6,34 @@ use harness_kernel::{
     ToolSpec,
 };
 
-pub struct RememberTool;
+pub struct RememberTool {
+    /// 身份表：用来把"人"解析成跨通道稳定的 user id（D26）。
+    /// 单测/子 agent 没有身份表时退化成地址本身。
+    identity: Option<std::sync::Arc<harness_kernel::Directory>>,
+}
+
+impl Default for RememberTool {
+    fn default() -> Self {
+        Self { identity: None }
+    }
+}
+
+impl RememberTool {
+    pub fn with_identity(mut self, d: std::sync::Arc<harness_kernel::Directory>) -> Self {
+        self.identity = Some(d);
+        self
+    }
+
+    /// `user` scope 一律写成 `user:<id>`，且 id 与通道无关：
+    /// 同一个人在 TG / 微信 / 两个 TG 号上看到的是同一份个人记忆。
+    fn user_scope(&self, ctx: &ToolCtx<'_>) -> String {
+        let channel = ctx.conv.0.split(':').next().unwrap_or_default();
+        match &self.identity {
+            Some(d) => format!("user:{}", d.resolve(channel, ctx.actor)),
+            None => format!("user:{}", ctx.actor),
+        }
+    }
+}
 
 fn fnv(bytes: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
@@ -35,7 +62,8 @@ impl Tool for RememberTool {
                     "subject": { "type": "string", "description": "主体，如 打印机 / 女儿" },
                     "predicate": { "type": "string", "description": "属性，如 型号 / 班级" },
                     "value": { "type": "string" },
-                    "scope": { "type": "string", "enum": ["family", "user"], "default": "family" }
+                    "scope": { "type": "string", "enum": ["family", "user"], "default": "family",
+                        "description": "全家都适用的写 family；只跟某一个人有关的写 user（系统会自动关联到人，跨通道共享）" }
                 },
                 "required": ["subject", "predicate", "value"]
             }),
@@ -67,7 +95,19 @@ impl Tool for RememberTool {
         let value = get("value").ok_or_else(|| {
             ToolError::new(ErrorCode::InvalidArgs, "需要 value", false)
         })?;
-        let scope = get("scope").unwrap_or_else(|| "family".into());
+        // 注意：`user` 不能直接当 scope 用——记忆注入按 `user:<id>` 查，
+        // 直接写 "user" 会写进一个永远读不回来的作用域（旧实现的 bug）。
+        let scope = match get("scope").as_deref() {
+            None | Some("family") => "family".to_string(),
+            Some("user") => self.user_scope(ctx),
+            Some(other) => {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    format!("scope 只能是 family / user，收到 {other}"),
+                    false,
+                ))
+            }
+        };
 
         let id = fact_id(&scope, &subject, &predicate);
         let doc = DocWrite {
@@ -108,6 +148,47 @@ mod tests {
         assert_ne!(a, c);
     }
 
+    /// `scope=user` 必须落成 `user:<user id>`，且 id 与通道无关（D26）。
+    #[tokio::test]
+    async fn user_scope_maps_to_user_id() {
+        let dir = std::sync::Arc::new(harness_kernel::Directory {
+            users: vec![harness_kernel::User {
+                id: "owner".into(),
+                name: None,
+                channels: vec![
+                    harness_kernel::Binding::parse("telegram:42").unwrap(),
+                    harness_kernel::Binding::parse("weixin:abc@im.wechat").unwrap(),
+                ],
+            }],
+        });
+        let tool = RememberTool::default().with_identity(dir);
+        let env = crate::NullEnv;
+        let ws = Workspace { run: RunId("r".into()), root: "/tmp".into() };
+        for (conv, actor) in [("telegram:42:0", "42"), ("weixin:abc@im.wechat:0", "abc@im.wechat")] {
+            let ctx = ToolCtx {
+                system_prompt: "",
+                spawner: None,
+                conv: ConversationId(conv.into()),
+                actor,
+                outbox: &harness_kernel::NullOutbox,
+                docs: &harness_kernel::NullDocReader,
+                run: RunId("r".into()),
+                call: harness_kernel::CallId("call-1".into()),
+                workspace: &ws,
+                env: &env,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            };
+            let out = tool
+                .execute(
+                    serde_json::json!({"subject":"我","predicate":"过敏","value":"花生","scope":"user"}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.doc_writes[0].scope, "user:owner", "conv={conv}");
+        }
+    }
+
     #[tokio::test]
     async fn execute_returns_doc_write() {
         let env = crate::NullEnv;
@@ -125,7 +206,7 @@ mod tests {
             env: &env,
             cancel: tokio_util::sync::CancellationToken::new(),
         };
-        let out = RememberTool
+        let out = RememberTool::default()
             .execute(
                 serde_json::json!({"subject":"打印机","predicate":"型号","value":"HP M15"}),
                 &ctx,

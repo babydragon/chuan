@@ -56,15 +56,14 @@ async fn run_collect(api: Arc<FakeApi>, cfg: TelegramConfig, expect: usize) -> V
 }
 
 #[tokio::test]
-async fn filters_whitelist_and_stale() {
+async fn filters_stale_and_keeps_commands() {
     let api = Arc::new(FakeApi::new());
-    api.push_update(update(1, 42, "你好", 0));       // 允许、新鲜
-    api.push_update(update(2, 999, "坏人", 0));      // 非白名单
+    api.push_update(update(1, 42, "你好", 0));       // 新鲜
     api.push_update(update(3, 42, "旧消息", 3600));  // 过期
     api.push_update(update(4, 42, "/status", 0));    // 命令
 
+    // 授权不在这里做（D26：白名单只在 actor 校验），通道只负责新鲜度与解析
     let cfg = TelegramConfig {
-        allowed_users: vec![42],
         media_dir: std::env::temp_dir().join("chuan-test-media"),
         stale_after_s: 300,
     };
@@ -86,7 +85,6 @@ async fn persists_offset() {
         Arc::clone(&api),
         Arc::clone(&offsets) as _,
         TelegramConfig {
-            allowed_users: vec![42],
             media_dir: std::env::temp_dir().join("chuan-test-media"),
             stale_after_s: 300,
         },
@@ -99,7 +97,7 @@ async fn persists_offset() {
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(1), h).await;
 
-    assert_eq!(offsets.get("tg.offset").await, Some(8));
+    assert_eq!(offsets.get("tg.offset").await, Some("8".to_string()));
 }
 
 #[tokio::test]
@@ -108,7 +106,6 @@ async fn survives_rate_limit() {
     *api.rate_limit_once.lock().unwrap() = Some(10);
     api.push_update(update(1, 42, "after-429", 0));
     let cfg = TelegramConfig {
-        allowed_users: vec![42],
         media_dir: std::env::temp_dir().join("chuan-test-media"),
         stale_after_s: 300,
     };
@@ -232,7 +229,6 @@ async fn sends_files_and_images() {
         std::sync::Arc::clone(&api),
         std::sync::Arc::new(MemoryOffsets::default()),
         TelegramConfig {
-            allowed_users: vec![42],
             media_dir: std::env::temp_dir().join("chuan-test-media"),
             stale_after_s: 300,
         },

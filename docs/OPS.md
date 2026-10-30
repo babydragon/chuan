@@ -18,7 +18,6 @@ utc_offset = "+08:00"
 timezone = "Asia/Shanghai"
 
 [telegram]
-allowed_users = [123456789]
 stale_after_s = 300
 token_file = "~/.config/chuan/secrets/telegram_token"
 
@@ -113,13 +112,21 @@ distill_prompt_file = "~/.config/chuan/prompts/distill.md"
 playbooks_dir = "~/.config/chuan/playbooks"
 
 [identity]
-# 一个人可以有多个通道地址；找不到绑定时用 default_user
-default_user = "owner"
-
+# 白名单唯一来源（D26）。一人可以绑多个账号（同一通道也行），也可以写多个人。
+# 未绑定的地址会收到「未授权」，不跑模型；没有 default_user 兜底。
 [[identity.user]]
 id = "owner"
 name = "主人"
-channels = ["telegram:123456789"]
+channels = [
+  "telegram:123456789",
+  # "telegram:987654321",          # 同一个人的第二个 TG 号
+  # "weixin:o9cq...@im.wechat",    # 扫码后 weixin-login 会打印主人的 id
+]
+
+# [[identity.user]]
+# id = "kid"
+# name = "小孩"
+# channels = ["telegram:555555555"]
 
 [policy]
 # 审批轴是"执行域"（能力越界），不是命令黑名单：
@@ -195,6 +202,7 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 | 东西 | 位置 | 谁创建 |
 |---|---|---|
 | 凭据（token/key） | `<config>/secrets/<name>`，目录 `0750 root:chuan`，文件见下 | **主人**（agent 只使用，永不读取内容） |
+| 微信凭据 | `<config>/secrets/weixin.json`（`chuan weixin-login` 写，0600），含 bot_token / bot_id / 主人 id | 扫码登录 |
 | 主配置 | `<config>/chuan.toml` | 主人 |
 | 运行期新增服务 | `<config>/services.d/<name>.toml`（目录 `0770 root:chuan`） | agent 通过 `service` 工具写；安装脚本预建，缺了会导致"本进程可用、重启丢失" |
 | playbook（SOP/API 说明） | `<config>/playbooks/<topic>.md` | agent 或主人 |
@@ -347,7 +355,7 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 |---|---|
 | `/etc/chuan/secrets` | token 就是 chuan 自己读的（`0440 root:chuan`），不遮等于白做 D18 |
 | `/etc/chuan/services.d` | 里面写着 `token_file` 的宿主路径 |
-| `/etc/chuan/chuan.toml` | 完整策略与 allowed_users |
+| `/etc/chuan/chuan.toml` | 完整策略与身份绑定（`[identity]`） |
 
 `roles/`、`playbooks/` 保留可见（agent 自己要读）。`$CREDENTIALS_DIRECTORY` 永不可见（D15）。
 

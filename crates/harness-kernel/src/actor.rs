@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::channel::{Channel, ChannelError, Inbound, InboundKind};
 use crate::driver::{EventSink, TurnDriver};
 use crate::env::ExecutionEnv;
-use crate::ids::{ApprovalId, CallId, ConversationId, MsgRef, RunId, now_ms};
+use crate::ids::{ApprovalId, CallId, ChannelId, ConversationId, MsgRef, RunId, now_ms};
 use crate::effect::EffectClass;
 use crate::event::{EventKind, NewEvent};
 use crate::record::{NewApproval, ToolCallRecord};
@@ -155,7 +155,10 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     pub driver: Arc<D>,
     pub tools: Arc<ToolRegistry>,
     pub env: Arc<dyn ExecutionEnv>,
-    pub channel: Arc<dyn Channel>,
+    /// 通道表：`ChannelId` → 实现。多通道并存时按 `Inbound.channel` 路由。
+    pub channels: std::collections::HashMap<String, Arc<dyn Channel>>,
+    /// 找不到通道时的兜底（老提醒里可能写着已下线的通道）
+    pub default_channel: String,
     pub cfg: ActorConfig,
     retriever: Option<Arc<dyn crate::retriever::Retriever>>,
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
@@ -177,6 +180,8 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     bg_running: Arc<Mutex<HashMap<String, CancellationToken>>>,
     /// 后台任务编号
     bg_seq: Arc<Mutex<u64>>,
+    /// 未授权提示的节流：`{channel}:{addr}` → 上次提示时刻（每小时最多一次）
+    unauth_notice: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
@@ -186,7 +191,8 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             driver: Arc::clone(&self.driver),
             tools: Arc::clone(&self.tools),
             env: Arc::clone(&self.env),
-            channel: Arc::clone(&self.channel),
+            channels: self.channels.clone(),
+            default_channel: self.default_channel.clone(),
             cfg: self.cfg.clone(),
             retriever: self.retriever.clone(),
             runs: Arc::clone(&self.runs),
@@ -200,6 +206,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             agent_progress: Arc::clone(&self.agent_progress),
             bg_running: Arc::clone(&self.bg_running),
             bg_seq: Arc::clone(&self.bg_seq),
+            unauth_notice: Arc::clone(&self.unauth_notice),
         }
     }
 }
@@ -259,6 +266,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     /// 终稿必须尽量送达：被限流就按 retry_after 等窗口再发，而不是丢掉。
     async fn apply_final(
         &self,
+        ch: &dyn Channel,
         conversation: &str,
         renderer: &mut TurnRenderer,
         action: RenderAction,
@@ -266,7 +274,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match apply_action(&*self.channel, conversation, renderer, action.clone()).await {
+            match apply_action(ch, conversation, renderer, action.clone()).await {
                 Ok(ActionOutcome::Done) => return true,
                 Ok(ActionOutcome::Deferred { retry_after_ms }) => {
                     if attempt >= FINAL_ATTEMPTS {
@@ -287,6 +295,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
 }
 
 impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
+    /// 单通道便捷构造（测试与单通道部署用）。
     pub fn new(
         store: Arc<S>,
         driver: Arc<D>,
@@ -296,12 +305,36 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         cfg: ActorConfig,
         retriever: Option<Arc<dyn crate::retriever::Retriever>>,
     ) -> Self {
+        Self::with_channels(store, driver, tools, env, vec![channel], cfg, retriever)
+    }
+
+    /// 多通道并存：第一个是默认通道。
+    pub fn with_channels(
+        store: Arc<S>,
+        driver: Arc<D>,
+        tools: Arc<ToolRegistry>,
+        env: Arc<dyn ExecutionEnv>,
+        channels: Vec<Arc<dyn Channel>>,
+        cfg: ActorConfig,
+        retriever: Option<Arc<dyn crate::retriever::Retriever>>,
+    ) -> Self {
+        let mut map: std::collections::HashMap<String, Arc<dyn Channel>> =
+            std::collections::HashMap::new();
+        let mut default_channel = String::new();
+        for (i, c) in channels.into_iter().enumerate() {
+            if i == 0 {
+                default_channel = c.id().0.clone();
+            }
+            map.insert(c.id().0.clone(), c);
+        }
+        assert!(!default_channel.is_empty(), "至少需要一个通道");
         Self {
             store,
             driver,
             tools,
             env,
-            channel,
+            channels: map,
+            default_channel,
             cfg,
             retriever,
             runs: Arc::new(Mutex::new(HashMap::new())),
@@ -315,6 +348,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             agent_progress: Arc::new(Mutex::new(HashMap::new())),
             bg_running: Arc::new(Mutex::new(HashMap::new())),
             bg_seq: Arc::new(Mutex::new(0)),
+            unauth_notice: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -340,6 +374,19 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     let Some(mut inb) = msg else { break };
                     // 只有"人在说话"才算前台活动。查状态、取消这类指令不该把后台任务饿死
                     // （真实事故：用户每分钟 /tasks 一次，任务一直 pending）。
+                    // 授权只认 `[identity]` 绑定（D26）：一人多账号 / 多人都是多条绑定，
+                    // 未绑定一律不处理，并回一句"未授权"（每小时最多一次，防刷屏）。
+                    // 身份表为空 = 没配置身份（内核保持中立，空表不做拦截）；应用层在启动时拒绝空表。
+                    if !self.cfg.identity.users.is_empty()
+                        && self
+                            .cfg
+                            .identity
+                            .lookup(&inb.channel.0, &inb.actor)
+                            .is_none()
+                    {
+                        self.notice_unauthorized(&inb).await;
+                        continue;
+                    }
                     if inb.kind == InboundKind::Text {
                         *self.last_active.lock().unwrap() = crate::ids::now_ms();
                     }
@@ -370,10 +417,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         let ahead = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         if ahead > 0 {
                             let me = Arc::clone(&self);
+                            let ch = self.channel_for(&inb.channel);
                             let conv = inb.conversation.clone();
                             let m = inb.msg.clone();
                             tokio::spawn(async move {
-                                me.mark(&conv, m.as_ref(), EMOJI_QUEUED).await;
+                                me.mark(&*ch, &conv, m.as_ref(), EMOJI_QUEUED).await;
                             });
                         }
                         let me = Arc::clone(&self);
@@ -397,6 +445,24 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         }
         while tasks.join_next().await.is_some() {}
         Ok(())
+    }
+
+    /// 按 `ChannelId` 取通道；找不到回落到默认通道（并留一条 warn）。
+    pub fn channel_for(&self, id: &ChannelId) -> Arc<dyn Channel> {
+        if let Some(c) = self.channels.get(&id.0) {
+            return Arc::clone(c);
+        }
+        tracing::warn!(channel = %id.0, default = %self.default_channel, "未注册的通道，回落到默认");
+        Arc::clone(
+            self.channels
+                .get(&self.default_channel)
+                .expect("至少有一个通道"),
+        )
+    }
+
+    /// 同一会话的键：**通道 + 地址**。两个人同名地址（如都是 "1000"）不会互相抢锁。
+    fn conv_key(inb: &Inbound) -> String {
+        format!("{}:{}", inb.channel.0, inb.conversation)
     }
 
     fn lock_for(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -503,6 +569,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         match cmd {
             "start" | "help" => {
                 self.reply(
+                    &inb.channel.0,
                     &inb.conversation,
                     "可用指令：\n\
                      /new — 开启新会话（保留长期记忆）\n\
@@ -524,7 +591,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             }
             "new" => {
                 let e = self.bump_epoch(&inb).await;
-                self.reply(&inb.conversation, &format!("已开启新会话（epoch {e}）。之前的记录仍保留。"))
+                self.reply(&inb.channel.0, &inb.conversation, &format!("已开启新会话（epoch {e}）。之前的记录仍保留。"))
                     .await
             }
             "cancel" => {
@@ -532,11 +599,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 // 以前 /cancel 只认前台，用户对着 pending 的后台任务按 /cancel 会得到
                 // "当前没有进行中的任务"，只能再记一遍 /tasks cancel <id>。
                 let mut stopped_run = false;
-                if let Some(t) = self.runs.lock().unwrap().get(&inb.conversation).cloned() {
+                let key = Self::conv_key(&inb);
+                if let Some(t) = self.runs.lock().unwrap().get(&key).cloned() {
                     t.cancel();
                     stopped_run = true;
                     if let Some(typing) =
-                        self.typing.lock().unwrap().get(&inb.conversation).cloned()
+                        self.typing.lock().unwrap().get(&key).cloned()
                     {
                         typing.cancel();
                     }
@@ -588,12 +656,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         s
                     }
                 };
-                self.reply(&inb.conversation, &msg).await
+                self.reply(&inb.channel.0, &inb.conversation, &msg).await
             }
             "approve" | "deny" => {
                 let rest = text.trim().split_whitespace().nth(1).unwrap_or("");
                 if rest.is_empty() {
-                    return self.reply(&inb.conversation, "用法：/approve <id> 或 /deny <id>").await;
+                    return self.reply(&inb.channel.0, &inb.conversation, "用法：/approve <id> 或 /deny <id>").await;
                 }
                 let yes = cmd == "approve";
                 let sender = self.approvals.lock().unwrap().remove(rest);
@@ -605,18 +673,20 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                             .await;
                         let _ = tx.send(yes);
                         self.reply(
+                            &inb.channel.0,
                             &inb.conversation,
                             if yes { "✅ 已允许（记录见账本）" } else { "❌ 已拒绝" },
                         )
                         .await
                     }
-                    None => self.reply(&inb.conversation, "审批不存在或已过期").await,
+                    None => self.reply(&inb.channel.0, &inb.conversation, "审批不存在或已过期").await,
                 }
             }
             "facts" => {
-                let docs = self.list_facts(&inb.actor).await;
+                let user_id = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
+                let docs = self.list_facts(&user_id).await;
                 if docs.is_empty() {
-                    return self.reply(&inb.conversation, "还没有记住任何事实。").await;
+                    return self.reply(&inb.channel.0, &inb.conversation, "还没有记住任何事实。").await;
                 }
                 let mut out = String::from("长期记忆：\n");
                 for d in &docs {
@@ -629,26 +699,26 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     ));
                 }
                 out.push_str("\n用 `/forget <id>` 删除。");
-                self.reply(&inb.conversation, &out).await
+                self.reply(&inb.channel.0, &inb.conversation, &out).await
             }
             "forget" => {
                 let prefix = text.trim().split_whitespace().nth(1).unwrap_or("");
                 if prefix.is_empty() {
-                    return self.reply(&inb.conversation, "用法：/forget <id 前缀>").await;
+                    return self.reply(&inb.channel.0, &inb.conversation, "用法：/forget <id 前缀>").await;
                 }
                 let hits: Vec<_> = self
-                    .list_facts(&inb.actor)
+                    .list_facts(&self.cfg.identity.resolve(&inb.channel.0, &inb.actor))
                     .await
                     .into_iter()
                     .filter(|d| d.id.0.starts_with(prefix))
                     .collect();
                 if hits.is_empty() {
-                    return self.reply(&inb.conversation, "没有匹配的事实。用 /facts 看 id。").await;
+                    return self.reply(&inb.channel.0, &inb.conversation, "没有匹配的事实。用 /facts 看 id。").await;
                 }
                 for d in &hits {
                     let _ = self.store.delete_doc(&d.id).await;
                 }
-                self.reply(&inb.conversation, &format!("已删除 {} 条事实。", hits.len())).await
+                self.reply(&inb.channel.0, &inb.conversation, &format!("已删除 {} 条事实。", hits.len())).await
             }
             "reminders" => {
                 let rest = text.trim().trim_start_matches("/reminders").trim();
@@ -664,7 +734,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     } else {
                         format!("没有找到 {id}")
                     };
-                    return self.reply(&inb.conversation, &msg).await;
+                    return self.reply(&inb.channel.0, &inb.conversation, &msg).await;
                 }
                 let me = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
                 let docs = {
@@ -691,7 +761,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     })
                     .collect();
                 if docs.is_empty() {
-                    return self.reply(&inb.conversation, "还没有定时任务。").await;
+                    return self.reply(&inb.channel.0, &inb.conversation, "还没有定时任务。").await;
                 }
                 let mut out = String::from("定时任务：\n");
                 for d in &docs {
@@ -717,10 +787,14 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     out.push_str(&format!("  {text}\n"));
                 }
                 out.push_str("\n取消：/reminders del <id>");
-                self.reply(&inb.conversation, &out).await
+                self.reply(&inb.channel.0, &inb.conversation, &out).await
             }
             "status" => {
-                let running = self.runs.lock().unwrap().contains_key(&inb.conversation);
+                let running = self
+                    .runs
+                    .lock()
+                    .unwrap()
+                    .contains_key(&Self::conv_key(&inb));
                 let epoch = self.epoch(&inb).await;
                 let state = if running { "运行中" } else { "空闲" };
                 let limits = self.cfg.lanes.limits();
@@ -735,7 +809,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     limits.agent - self.cfg.lanes.available(crate::lanes::Lane::Agent),
                     limits.agent,
                 );
-                self.reply(&inb.conversation, &format!("{state} · 会话 epoch {epoch}\n车道 {busy}")).await
+                self.reply(&inb.channel.0, &inb.conversation, &format!("{state} · 会话 epoch {epoch}\n车道 {busy}")).await
             }
             "agents" => {
                 let rest = text.trim().trim_start_matches("/agents").trim().to_owned();
@@ -743,7 +817,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     let id = id.trim().to_owned();
                     let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == id);
                     let Some(doc) = doc else {
-                        return self.reply(&inb.conversation, &format!("没有这个任务：{id}")).await;
+                        return self.reply(&inb.channel.0, &inb.conversation, &format!("没有这个任务：{id}")).await;
                     };
                     let p = &doc.payload;
                     let spec = crate::agent::AgentSpec {
@@ -774,13 +848,14 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     return match self.enqueue_agent_task(spec).await {
                         Ok(new_id) => {
                             self.reply(
+                                &inb.channel.0,
                                 &inb.conversation,
                                 &format!("已重排为 `{new_id}`（接续 `{id}` 的进展，前台静默后开跑）。"),
                             )
                             .await
                         }
                         Err(e) => {
-                            self.reply(&inb.conversation, &format!("重排失败：{e}")).await
+                            self.reply(&inb.channel.0, &inb.conversation, &format!("重排失败：{e}")).await
                         }
                     };
                 }
@@ -788,7 +863,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     let id = id.trim().to_owned();
                     if !id.starts_with("sub:") {
                         return self
-                            .reply(&inb.conversation, "用法：/agents show <子会话 id>（列表里带 `sub:` 的那串）")
+                            .reply(&inb.channel.0, &inb.conversation, "用法：/agents show <子会话 id>（列表里带 `sub:` 的那串）")
                             .await;
                     }
                     let page = match self.store.begin_read().await {
@@ -797,7 +872,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     };
                     let Some(page) = page.filter(|p| !p.msgs.is_empty()) else {
                         return self
-                            .reply(&inb.conversation, &format!("没有这个子会话：{id}（可能已被清理）"))
+                            .reply(&inb.channel.0, &inb.conversation, &format!("没有这个子会话：{id}（可能已被清理）"))
                             .await;
                     };
                     let mut out = format!("子会话 `{id}` 的最近记录：\n\n");
@@ -843,7 +918,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     }
                     out.push_str("（推理/thinking 不落账本，只有正文与工具轨迹）");
                     for part in shard_text(&out, 3_000) {
-                        let _ = self.reply(&inb.conversation, &part).await;
+                        let _ = self.reply(&inb.channel.0, &inb.conversation, &part).await;
                     }
                     return Ok(());
                 }
@@ -862,7 +937,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         }
                         None => format!("没有运行中的子 agent：{id}"),
                     };
-                    return self.reply(&inb.conversation, &msg).await;
+                    return self.reply(&inb.channel.0, &inb.conversation, &msg).await;
                 }
                 let me = format!("{}:{}", inb.channel.0, inb.conversation);
                 let now = crate::ids::now_ms();
@@ -882,7 +957,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 } else {
                     format!("运行中的子 agent：\n{}\n\n取消：/agents cancel <id>　看详情：/agents show <id>", lines.join("\n"))
                 };
-                self.reply(&inb.conversation, &msg).await
+                self.reply(&inb.channel.0, &inb.conversation, &msg).await
             }
             "tasks" => {
                 let rest = text.trim().trim_start_matches("/tasks").trim().to_owned();
@@ -892,7 +967,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         .cancel_one_task(&id)
                         .await
                         .unwrap_or_else(|| format!("没有这个任务：{id}"));
-                    return self.reply(&inb.conversation, &msg).await;
+                    return self.reply(&inb.channel.0, &inb.conversation, &msg).await;
                 }
 
                 let now = now_ms();
@@ -925,7 +1000,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 } else {
                     format!("后台任务：\n{}\n\n取消：/tasks cancel <id>", lines.join("\n"))
                 };
-                self.reply(&inb.conversation, &msg).await
+                self.reply(&inb.channel.0, &inb.conversation, &msg).await
             }
             "prompt" => {
                 // 让主人能核对"你到底给模型喂了什么"。核心段写死，配置只能追加。
@@ -938,9 +1013,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     } else {
                         String::new()
                     };
-                    let _ = self.reply(&inb.conversation, &format!("{head}{part}")).await;
+                    let _ = self.reply(&inb.channel.0, &inb.conversation, &format!("{head}{part}")).await;
                 }
                 self.reply(
+                    &inb.channel.0,
                     &inb.conversation,
                     "以上是配置文件与内置核心段。\n\
                      另有每轮动态注入（不在这里）：技能目录、MCP 工具目录、角色清单、长期记忆、时间锚点。",
@@ -978,25 +1054,52 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         short_tokens(split.agent.completion_tokens)
                     ));
                 }
-                self.reply(&inb.conversation, &text).await
+                self.reply(&inb.channel.0, &inb.conversation, &text).await
             }
             other => {
-                self.reply(&inb.conversation, &format!("未知指令 /{other}，试试 /help")).await
+                self.reply(&inb.channel.0, &inb.conversation, &format!("未知指令 /{other}，试试 /help")).await
             }
         }
     }
 
+    /// 未绑定地址的提示：每小时最多一次，避免被当成回音壁，也避免刷微信额度。
+    async fn notice_unauthorized(&self, inb: &Inbound) {
+        let now = now_ms();
+        let key = format!("{}:{}", inb.channel.0, inb.actor);
+        {
+            let mut g = self.unauth_notice.lock().unwrap();
+            if now - g.get(&key).copied().unwrap_or(0) < 3_600_000 {
+                return;
+            }
+            g.insert(key, now);
+        }
+        tracing::warn!(channel = %inb.channel.0, actor = %inb.actor, "未绑定的地址");
+        let ch = self.channel_for(&inb.channel);
+        if let Some(cb) = &inb.callback_id {
+            let _ = ch.ack(cb, "未授权").await;
+            return;
+        }
+        let _ = self
+            .reply(
+                &inb.channel.0,
+                &inb.conversation,
+                "⛔ 未授权：这个账号还没有绑定。请主人在 [identity] 里加上这条通道地址。",
+            )
+            .await;
+    }
+
     /// best-effort 打状态反应：失败只记 trace，绝不影响 run（D24）。
     /// `emoji` 为空表示清空（取消时用）。
-    async fn mark(&self, conversation: &str, msg: Option<&MsgRef>, emoji: &str) {
+    async fn mark(&self, ch: &dyn Channel, conversation: &str, msg: Option<&MsgRef>, emoji: &str) {
         let Some(m) = msg else { return };
-        if let Err(e) = self.channel.react(conversation, m, emoji).await {
+        if let Err(e) = ch.react(conversation, m, emoji).await {
             tracing::debug!(error = %e, emoji, "状态反应失败");
         }
     }
 
     /// 收尾时统一打状态：所有 `?` 早退、panic 之外的分支都从这里出去（D24）。
     async fn handle_run(&self, inb: Inbound) -> Result<(), ChannelError> {
+        let ch = self.channel_for(&inb.channel);
         let msg = inb.msg.clone();
         let conv = inb.conversation.clone();
         let res = self.handle_run_inner(inb).await;
@@ -1005,25 +1108,28 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Ok(RunEnd::Failed) | Err(_) => EMOJI_FAIL,
             Ok(RunEnd::Cancelled) => "", // 取消 = 清空
         };
-        self.mark(&conv, msg.as_ref(), emoji).await;
+        self.mark(&*ch, &conv, msg.as_ref(), emoji).await;
         res.map(|_| ())
     }
 
     async fn handle_run_inner(&self, inb: Inbound) -> Result<RunEnd, ChannelError> {
+        let ch = self.channel_for(&inb.channel);
+        // 记忆归属用 **user id**，与通道无关（D26）：同一个人两个账号看到同一份
+        let user_id = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
         if let Some(msg) = self.budget_exceeded().await {
-            self.reply(&inb.conversation, &format!("⛔ {msg}")).await?;
+            self.reply(&inb.channel.0, &inb.conversation, &format!("⛔ {msg}")).await?;
             return Ok(RunEnd::Failed);
         }
-        let key = inb.conversation.clone();
+        let key = Self::conv_key(&inb);
         let lock = self.lock_for(&key);
         let _guard = lock.lock().await;
         // 拿到锁才开始真正处理；此前的状态是"未开始"（D24）
-        self.mark(&inb.conversation, inb.msg.as_ref(), EMOJI_RUNNING).await;
+        self.mark(&*ch, &inb.conversation, inb.msg.as_ref(), EMOJI_RUNNING).await;
 
         // 收到即显示"输入中"，之后每 4s 续一次（Telegram 的 typing 约 5s 过期）
         let typing_cancel = CancellationToken::new();
         let typing_task = {
-            let channel = Arc::clone(&self.channel);
+            let channel = Arc::clone(&ch);
             let conv_key = inb.conversation.clone();
             let stop = typing_cancel.clone();
             tokio::spawn(async move {
@@ -1052,7 +1158,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let mut scope = RunScope {
             runs: Arc::clone(&self.runs),
             typing_map: Arc::clone(&self.typing),
-            conversation: inb.conversation.clone(),
+            conversation: key.clone(),
             typing: typing_cancel,
             typing_task: Some(typing_task),
         };
@@ -1060,7 +1166,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         self.typing
             .lock()
             .unwrap()
-            .insert(inb.conversation.clone(), scope.typing.clone());
+            .insert(key.clone(), scope.typing.clone());
 
         tracing::info!(conv = %inb.conversation, "run: 已拿到会话锁，开始准备");
         // 前置步骤都加超时：卡在存储上不该让"正在输入"一直转
@@ -1068,13 +1174,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Ok(e) => e,
             Err(_) => {
                 tracing::warn!(conv = %inb.conversation, "epoch 读取超时");
-                let _ = self.reply(&inb.conversation, "⏱ 读取会话状态超时，请稍后再试（已取消）。").await;
+                let _ = self.reply(&inb.channel.0, &inb.conversation, "⏱ 读取会话状态超时，请稍后再试（已取消）。").await;
                 return Ok(RunEnd::Cancelled);
             }
         };
         let conv = ConversationId(format!("{}:{}:{}", inb.channel.0, inb.conversation, epoch));
         let run = RunId(format!("{}-{}", conv.0, inb.dedupe_key));
-        let caps = self.channel.caps();
+        let caps = ch.caps();
         let mut renderer = TurnRenderer::new(caps.clone());
         let pair = EventSink::channel(256);
         let sink = pair.sink;
@@ -1119,7 +1225,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         }
         if let Ok(mut rd) = self.store.begin_read().await {
             let q = crate::record::DocQuery {
-                scopes: vec!["family".into(), format!("user:{}", inb.actor)],
+                scopes: vec!["family".into(), format!("user:{user_id}")],
                 kinds: vec!["fact".into()],
                 limit: 50,
             };
@@ -1128,7 +1234,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     if let Some(r) = &self.retriever {
                         let query = crate::retriever::Query {
                             text: inb.text.clone().unwrap_or_default(),
-                            scopes: vec!["family".into(), format!("user:{}", inb.actor)],
+                            scopes: vec!["family".into(), format!("user:{user_id}")],
                             kinds: vec!["fact".into()],
                             k: 10,
                         };
@@ -1195,7 +1301,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             token_budget: None,
         };
 
-        let outbox = RunOutbox { channel: &*self.channel, conversation: inb.conversation.clone() };
+        let outbox = RunOutbox { channel: &*ch, conversation: inb.conversation.clone() };
         let docs = StoreDocs { store: &*self.store };
         let runner = Runner {
             store: &*self.store,
@@ -1252,7 +1358,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         child_shown = false;
                     }
                     let action = renderer.flush(now_ms());
-                    if let Err(e) = apply_action(&*self.channel, &inb.conversation, &mut renderer, action).await {
+                    if let Err(e) = apply_action(&*ch, &inb.conversation, &mut renderer, action).await {
                         if matches!(e, ChannelError::RateLimited { .. }) {
                             // 进度刷新发不出去不是失败：跳过这一拍，run 继续跑
                             tracing::warn!(error = %e, "进度刷新被限流，跳过本轮");
@@ -1296,7 +1402,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             }
         }
         for action in renderer.finish(status) {
-            if !self.apply_final(&inb.conversation, &mut renderer, action).await {
+            if !self.apply_final(&*ch, &inb.conversation, &mut renderer, action).await {
                 break;
             }
         }
@@ -1312,7 +1418,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
 
         match outcome {
             Ok(o) if o.status == RunStatus::Cancelled => {
-                self.reply(&inb.conversation, "已取消。").await.map(|_| RunEnd::Cancelled)
+                self.reply(&inb.channel.0, &inb.conversation, "已取消。").await.map(|_| RunEnd::Cancelled)
             }
             Ok(o) if o.status == RunStatus::Failed => Ok(RunEnd::Failed),
             Ok(_) => Ok(RunEnd::Done),
@@ -1344,7 +1450,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     ),
                     other => format!("出错了：{other}"),
                 };
-                self.reply(&inb.conversation, &msg).await.map(|_| RunEnd::Failed)
+                self.reply(&inb.channel.0, &inb.conversation, &msg).await.map(|_| RunEnd::Failed)
             }
         }
     }
@@ -1365,6 +1471,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     }
 
     async fn handle_callback(self: &Arc<Self>, inb: Inbound) {
+        let ch = self.channel_for(&inb.channel);
         let data = inb.text.clone().unwrap_or_default();
         if let Some(run_id) = data.strip_prefix("skill:") {
             self.start_distill(inb, run_id.to_owned());
@@ -1373,7 +1480,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let parts: Vec<&str> = data.split(':').collect();
         if parts.len() != 3 || parts[0] != "appr" {
             if let Some(cb) = &inb.callback_id {
-                let _ = self.channel.ack(cb, "无效操作").await;
+                let _ = ch.ack(cb, "无效操作").await;
             }
             return;
         }
@@ -1391,15 +1498,15 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let _ = tx.send(yes);
                 if let Some((chat, msg)) = &card {
                     let note = if yes { "✅ 已允许（记录见账本）" } else { "❌ 已拒绝" };
-                    let _ = self.channel.clear_prompt(chat, msg, note).await;
+                    let _ = ch.clear_prompt(chat, msg, note).await;
                 }
                 if let Some(cb) = &inb.callback_id {
-                    let _ = self.channel.ack(cb, if yes { "已允许" } else { "已拒绝" }).await;
+                    let _ = ch.ack(cb, if yes { "已允许" } else { "已拒绝" }).await;
                 }
             }
             None => {
                 if let Some(cb) = &inb.callback_id {
-                    let _ = self.channel.ack(cb, "已过期").await;
+                    let _ = ch.ack(cb, "已过期").await;
                 }
             }
         }
@@ -1675,7 +1782,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             crate::schedule::format_local(now, self.cfg.tz_offset_min)
         );
         let Some(tool) = self.tools.get("run_skill") else {
-            let _ = self.reply(chat, "❌ 定时任务失败：没有 run_skill 工具").await;
+            let _ = self.reply(channel, chat, "❌ 定时任务失败：没有 run_skill 工具").await;
             return;
         };
         let run = RunId(format!("job-{now}"));
@@ -1715,7 +1822,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let msg = e.message.clone();
                 self.record_job_end(&conv, &run, &call, "error", msg.clone(), started_ms)
                     .await;
-                let _ = self.reply(chat, &format!("{header}\n\n❌ 技能执行失败：{msg}")).await;
+                let _ = self.reply(channel, chat, &format!("{header}\n\n❌ 技能执行失败：{msg}")).await;
                 return;
             }
         };
@@ -1752,23 +1859,25 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
 
     fn start_distill(self: &Arc<Self>, mut inb: Inbound, run_id: String) {
         let me = Arc::clone(self);
+        let ch = self.channel_for(&inb.channel);
         if me.cfg.distill_prompt.trim().is_empty() {
+            let ch = Arc::clone(&ch);
             tokio::spawn(async move {
                 if let Some(cb) = &inb.callback_id {
-                    let _ = me.channel.ack(cb, "未配置沉淀流程").await;
+                    let _ = ch.ack(cb, "未配置沉淀流程").await;
                 }
             });
             return;
         }
         tokio::spawn(async move {
             if let Some(cb) = &inb.callback_id {
-                let _ = me.channel.ack(cb, "开始沉淀…").await;
+                let _ = ch.ack(cb, "开始沉淀…").await;
             }
             // 按钮已点过：就地撤掉 keyboard，正文保留
             let key = format!("skill.btn:{run_id}");
             if let Ok(Some(msg_id)) = me.store.kv_get(&key).await {
                 if !msg_id.is_empty() {
-                    let _ = me.channel.clear_buttons(&inb.conversation, &MsgRef(msg_id)).await;
+                    let _ = ch.clear_buttons(&inb.conversation, &MsgRef(msg_id)).await;
                 }
                 let _ = me.store.kv_set(&key, "").await;
             }
@@ -1812,10 +1921,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 .await;
             let _ = tx.commit().await;
         }
-        self.reply(conversation, text).await
+        self.reply(channel, conversation, text).await
     }
 
-    async fn reply(&self, conversation: &str, text: &str) -> Result<(), ChannelError> {
+    async fn reply(&self, channel: &str, conversation: &str, text: &str) -> Result<(), ChannelError> {
         let view = View {
             shard: 0,
             is_last: true,
@@ -1823,7 +1932,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             status: None,
             buttons: Vec::new(),
         };
-        self.channel.deliver(conversation, view).await.map(|_| ())
+        self.channel_for(&ChannelId(channel.to_owned()))
+            .deliver(conversation, view)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -2144,6 +2256,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 doc.payload["text"].as_str().unwrap_or("").lines().next().unwrap_or("")
             );
             let conv = doc.payload["conv"].as_str().unwrap_or_default().to_owned();
+            let chan = conv.split(':').next().unwrap_or_default().to_owned();
             if !conv.is_empty() {
                 if let Ok(mut tx) = self.store.begin_write().await {
                     let _ = tx
@@ -2165,6 +2278,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             if !chat.is_empty() {
                 let _ = self
                     .reply(
+                        &chan,
                         &chat,
                         &format!(
                             "⚠️ 后台任务 `{}` 被服务重启打断，结果未知（没有自动重跑，避免重复副作用）。\n需要的话说一声，我重新派一次。",
@@ -2216,6 +2330,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     async fn run_agent_task(self: Arc<Self>, id: String, payload: serde_json::Value, token: CancellationToken) {
         let conv = payload["conv"].as_str().unwrap_or_default().to_owned();
         let chat = payload["chat"].as_str().unwrap_or_default().to_owned();
+        let chan = conv.split(':').next().unwrap_or_default().to_owned();
         let text = payload["text"].as_str().unwrap_or_default().to_owned();
         let role = payload["role"].as_str().unwrap_or("inherit").to_owned();
         let inputs: Vec<String> = payload["inputs"]
@@ -2307,7 +2422,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Ok(c) => format!("⚠️ 后台任务未完成（{}）· {first}\n\n{}", c.status.as_str(), c.render()),
             Err(e) => format!("⚠️ 后台任务失败 · {first}\n{e}"),
         };
-        let _ = self.reply(&chat, &msg).await;
+        let _ = self.reply(&chan, &chat, &msg).await;
     }
 }
 
@@ -2796,8 +2911,10 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
             Some(h) => format!("🔐 需要确认\n\n{h}\n\n参数：{brief}"),
             None => format!("🔐 需要确认\n\n工具：{tool}\n参数：{brief}"),
         };
-        let card = self
-            .channel
+        let ch = self.channel_for(&ChannelId(
+            conv.0.split(':').next().unwrap_or_default().to_owned(),
+        ));
+        let card = ch
             .deliver_prompt(
                 &chat,
                 crate::view::Prompt {
@@ -2830,8 +2947,7 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
             _ => {
                 self.approvals.lock().unwrap().remove(&id.0);
                 let _ = self.store.resolve_approval(&id, false, "timeout").await;
-                let _ = self
-                    .channel
+                let _ = ch
                     .clear_prompt(&chat, &card, "⏱ 审批超时，已拒绝执行。")
                     .await;
                 Ok(false)

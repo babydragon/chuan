@@ -223,6 +223,11 @@ impl Renderer for TurnRenderer {
     }
 
     fn flush(&mut self, now: Timestamp) -> RenderAction {
+        // 没有编辑能力的通道（微信 iLink，WEIXIN F6）：流式阶段一律不发，
+        // 只在 finish() 发一次终稿。否则每一拍都是一条新消息，而额度是 10 条/入站。
+        if !self.caps.edit {
+            return RenderAction::None;
+        }
         // 通道刚给过 429：窗口内一次都别发，否则等于自己把洪水控制续上
         if now < self.send_after {
             return RenderAction::None;
@@ -316,7 +321,7 @@ impl Renderer for TurnRenderer {
                 status: None,
                 buttons,
             };
-            return vec![if self.msg.is_some() && !self.need_send {
+            return vec![if self.caps.edit && self.msg.is_some() && !self.need_send {
                 RenderAction::Edit(view)
             } else {
                 RenderAction::Send(view)
@@ -334,7 +339,7 @@ impl Renderer for TurnRenderer {
                 status: None,
                 buttons: if last { buttons.clone() } else { Vec::new() },
             };
-            if i == 0 && self.msg.is_some() && !self.need_send {
+            if i == 0 && self.caps.edit && self.msg.is_some() && !self.need_send {
                 actions.push(RenderAction::Edit(view));
             } else {
                 actions.push(RenderAction::Send(view));
@@ -491,6 +496,19 @@ mod tests {
 
     /// 内容静止时不要一直 edit：板上实测每秒一次 editMessageText 会被 Telegram 洪水控制，
     /// 一次 429(retry_after=43s) 就曾把整轮 run 打死。
+    /// 无编辑能力的通道：流式期间不发，定稿发一次（微信走这条）。
+    #[test]
+    fn no_edit_channel_only_sends_final() {
+        let mut r = TurnRenderer::new(Caps { edit: false, ..caps() });
+        r.push(RenderEvent::Stream(StreamEvent::TextDelta("半句".into())));
+        assert!(matches!(r.flush(0), RenderAction::None), "流式阶段不该发消息");
+        r.push(RenderEvent::Stream(StreamEvent::TextDelta("，说完了".into())));
+        assert!(matches!(r.flush(10_000), RenderAction::None), "还是不该发");
+        let acts = r.finish(RunStatus::Done);
+        assert_eq!(acts.len(), 1);
+        assert!(matches!(acts[0], RenderAction::Send(_)), "定稿必须发一条");
+    }
+
     #[test]
     fn skips_edit_when_nothing_changed() {
         let mut r = TurnRenderer::new(caps());

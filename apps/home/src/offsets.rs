@@ -1,9 +1,9 @@
-//! 用 Store 的 kv 持久化 Telegram offset。
+//! 用 Store 的 kv 持久化通道游标（Telegram offset / 微信 get_updates_buf）。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use harness_channels::telegram::OffsetStore;
+use harness_channels::offsets::OffsetStore;
 use harness_kernel::Store;
 use harness_store::SqliteStore;
 
@@ -20,17 +20,12 @@ impl StoreOffsets {
 
 #[async_trait]
 impl OffsetStore for StoreOffsets {
-    async fn get(&self, _key: &str) -> Option<i64> {
-        self.store
-            .kv_get(&self.key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok())
+    async fn get(&self, _key: &str) -> Option<String> {
+        self.store.kv_get(&self.key).await.ok().flatten()
     }
 
-    async fn set(&self, _key: &str, value: i64) {
-        if let Err(e) = self.store.kv_set(&self.key, &value.to_string()).await {
+    async fn set(&self, _key: &str, value: &str) {
+        if let Err(e) = self.store.kv_set(&self.key, value).await {
             tracing::warn!(error = %e, "persist offset failed");
         }
     }

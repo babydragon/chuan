@@ -1,6 +1,6 @@
 # 家庭智能管家 Harness · 文档索引
 
-> 运行在单块 RISC-V SBC（riscv64 / 8GB）上的个人助理 harness。Rust 单二进制，Telegram 为主入口。
+> 运行在单块 RISC-V SBC（riscv64 / 8GB）上的个人助理 harness。Rust 单二进制，Telegram 与微信两个入口。
 > 核心特征：**账本即真相的状态模型** + **沙盒化执行** + **可沉淀技能**。
 >
 > 当前状态：P0–P3 主体已实现；**已在 riscv64 目标板上跑通**（沙盒隔离、两条 lane、代理、
@@ -17,7 +17,10 @@
 > `approval = "always"` 真正生效（预览免问、真装逐条问）；快照改成数据 `snapshot_argv`。
 > **rc.23**：`%U` 按服务账号展开（hostd 是 root，曾展开成 `/run/user/0` 导致整表失效）；
 > host lane 补 DNS（`/etc/resolv.conf` 软链悬空）；授权表两段独立失效。
-> 预发布到 `v0.1.0-rc.23`，正式版待定。
+> **rc.24**：微信通道（ClawBot/iLink，**只做文本**）、多通道并存（锁键 `{channel}:{addr}`）、
+> 身份与记忆按人归属、提醒按通道投递（D25–D27）。
+> **不兼容**：`[identity]` 成为白名单唯一来源，通道级 `allowed_users` 与 `default_user` 移除。
+> 预发布到 `v0.1.0-rc.24`，正式版待定。
 
 ---
 

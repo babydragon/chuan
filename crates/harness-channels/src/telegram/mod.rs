@@ -4,7 +4,6 @@ pub mod api;
 pub mod fake;
 pub mod http;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +22,6 @@ use api::{Api, ApiError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TelegramConfig {
-    /// 允许的 Telegram user id；为空表示不限制（仅用于本地调试）。
-    pub allowed_users: Vec<i64>,
     /// 附件落盘目录（宿主路径，沙盒里以 /media 只读可见）
     pub media_dir: std::path::PathBuf,
     /// 超过该秒数的入站消息直接丢弃（断网恢复后不追更）。
@@ -34,40 +31,17 @@ pub struct TelegramConfig {
 impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
-            allowed_users: Vec::new(),
             media_dir: std::env::temp_dir().join("chuan-media"),
             stale_after_s: 300,
         }
     }
 }
 
-/// offset 持久化：接口在通道层，持久化实现由应用层提供
-/// （`apps/home/src/offsets.rs` 写 store 的 kv；测试/独立通道可用内存实现）。
-#[async_trait]
-pub trait OffsetStore: Send + Sync {
-    async fn get(&self, key: &str) -> Option<i64>;
-    async fn set(&self, key: &str, value: i64);
-}
-
-#[derive(Default)]
-pub struct MemoryOffsets {
-    value: std::sync::Mutex<Option<i64>>,
-}
-
-#[async_trait]
-impl OffsetStore for MemoryOffsets {
-    async fn get(&self, _key: &str) -> Option<i64> {
-        *self.value.lock().unwrap()
-    }
-    async fn set(&self, _key: &str, value: i64) {
-        *self.value.lock().unwrap() = Some(value);
-    }
-}
+pub use crate::offsets::{MemoryOffsets, OffsetStore};
 
 pub struct TelegramChannel<A: Api> {
     api: Arc<A>,
     media_dir: std::path::PathBuf,
-    allowed: HashSet<i64>,
     offsets: Arc<dyn OffsetStore>,
     stale_after_s: i64,
     caps: Caps,
@@ -78,7 +52,6 @@ impl<A: Api> TelegramChannel<A> {
         Self {
             api,
             media_dir: cfg.media_dir,
-            allowed: cfg.allowed_users.into_iter().collect(),
             offsets,
             stale_after_s: cfg.stale_after_s,
             caps: Caps {
@@ -117,7 +90,12 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
         tx: mpsc::Sender<Inbound>,
         cancel: CancellationToken,
     ) -> Result<(), ChannelError> {
-        let mut offset = self.offsets.get("tg.offset").await.unwrap_or(0);
+        let mut offset: i64 = self
+            .offsets
+            .get("tg.offset")
+            .await
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
 
         loop {
             if cancel.is_cancelled() {
@@ -130,13 +108,10 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
                             continue;
                         }
                         offset = u.update_id + 1;
-                        self.offsets.set("tg.offset", offset).await;
+                        self.offsets.set("tg.offset", &offset.to_string()).await;
 
                         if let Some(cb) = u.callback_query {
                             let actor = cb.from.as_ref().map(|f| f.id).unwrap_or_default();
-                            if !self.allowed.is_empty() && !self.allowed.contains(&actor) {
-                                continue;
-                            }
                             let conv = cb
                                 .message
                                 .as_ref()
@@ -167,12 +142,7 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
                         if Self::now_secs() - msg.date > self.stale_after_s {
                             continue;
                         }
-                        // 白名单：非白名单静默丢弃
-                        if !self.allowed.is_empty()
-                            && !msg.from.as_ref().map(|f| self.allowed.contains(&f.id)).unwrap_or(false)
-                        {
-                            continue;
-                        }
+                        // 授权不在这里做：通道只负责收，`[identity]` 的校验在 actor（D26）。
                         let text = msg
                             .text
                             .clone()

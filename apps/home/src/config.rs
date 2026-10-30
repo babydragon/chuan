@@ -9,6 +9,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Default)]
 pub struct Cli {
+    /// 位置子命令（目前只有 `weixin-login`）
+    pub command: Option<String>,
     pub config: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -24,6 +26,7 @@ impl Cli {
         while let Some(a) = args.next() {
             match a.as_str() {
                 "backup" => cli.backup = true,
+                "weixin-login" => cli.command = Some("weixin-login".into()),
                 "--config" => cli.config = args.next().map(PathBuf::from),
                 "--provider" => cli.provider = args.next(),
                 "--model" => cli.model = args.next(),
@@ -49,7 +52,9 @@ impl Cli {
 }
 
 fn usage() -> String {
-    "用法: chuan [backup] [--config <toml>] [--provider <p>] [--model <m>] [--db <path>]".into()
+    "用法: chuan [backup] [weixin-login] [--config <toml>] [--provider <p>] [--model <m>] [--db <path>]\n\
+     \n\
+     \x20 weixin-login   扫码登录微信（ClawBot/iLink），凭据写入 [weixin] credential_file".into()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -57,7 +62,11 @@ pub struct FileConfig {
     #[serde(default)]
     pub app: AppFile,
     #[serde(default)]
+    pub channels: ChannelsFile,
+    #[serde(default)]
     pub telegram: TelegramFile,
+    #[serde(default)]
+    pub weixin: WeixinFile,
     #[serde(default)]
     pub engine: EngineFile,
     #[serde(default)]
@@ -198,7 +207,7 @@ pub struct MediaFile {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct IdentityFile {
-    /// 找不到绑定时的兜底用户
+    /// **已废弃**（D26）：只用于启动时提示删除，不再参与任何判定
     pub default_user: Option<String>,
     #[serde(default)]
     pub user: Vec<UserFile>,
@@ -313,6 +322,26 @@ impl Default for AppFile {
     fn default() -> Self {
         Self { name: default_name(), utc_offset: default_utc_offset(), timezone: default_tz() }
     }
+}
+
+/// `[channels]`：可以同时开多条（同一个会话仍然只跑一个 run）
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct ChannelsFile {
+    /// 例如 `["telegram", "weixin"]`；空 = telegram
+    #[serde(default)]
+    pub enabled: Vec<String>,
+}
+
+/// `[weixin]`：ClawBot / iLink（docs/WEIXIN.md）
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct WeixinFile {
+    /// 扫码登录写下的凭据文件（JSON，0600）
+    pub credential_file: Option<String>,
+    /// 允许的发送者（`xxx@im.wechat`）；空 = 不限制（仅调试）
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    #[serde(default = "default_stale")]
+    pub stale_after_s: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -566,7 +595,10 @@ fn default_max_mb() -> u64 { 256 }
 pub struct Config {
     pub app_name: String,
     pub timezone: String,
-    pub allowed_users: Vec<i64>,
+    /// 启用的通道（按顺序；第一个是默认通道）
+    pub enabled_channels: Vec<String>,
+    pub weixin_credential: String,
+    pub weixin_stale_s: i64,
     pub stale_after_s: i64,
     pub token: String,
     pub provider: String,
@@ -791,7 +823,62 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     let token_file = token_file.or_else(|| {
         Some(format!("{}/.config/chuan/secrets/telegram_token", std::env::var("HOME").unwrap_or_default()))
     });
-    let token = read_secret(&token, &token_file, "telegram token")?;
+    let identity = std::sync::Arc::new(harness_kernel::Directory {
+        users: file
+            .identity
+            .user
+            .iter()
+            .map(|u| harness_kernel::User {
+                id: u.id.clone(),
+                name: u.name.clone(),
+                channels: u
+                    .channels
+                    .iter()
+                    .filter_map(|c| harness_kernel::Binding::parse(c))
+                    .collect(),
+            })
+            .collect(),
+    });
+
+    // 白名单只有一个来源：`[identity]` 绑定（D26）。通道级白名单已废弃，明确报错而不是静默忽略。
+    if !file.telegram.allowed_users.is_empty() {
+        return Err("配置错误：[telegram] allowed_users 已废弃；请改用 [identity] 的 channels = [\"telegram:<id>\"]".into());
+    }
+    if !file.weixin.allowed_users.is_empty() {
+        return Err("配置错误：[weixin] allowed_users 已废弃；请改用 [identity] 的 channels = [\"weixin:<addr>\"]".into());
+    }
+    if file.identity.default_user.is_some() {
+        eprintln!(
+            "config: [identity] default_user 已废弃并忽略——未绑定的地址现在会收到「未授权」，             不再被当成主人（D26）。请删掉这一行。"
+        );
+    }
+
+    // 通道列表：环境变量 CHUAN_CHANNEL 可以临时收成单通道（调试用）
+    let mut enabled_channels: Vec<String> = std::env::var("CHUAN_CHANNEL")
+        .ok()
+        .map(|v| vec![v])
+        .unwrap_or_else(|| file.channels.enabled.clone());
+    if enabled_channels.is_empty() {
+        enabled_channels.push("telegram".into());
+    }
+    for c in &mut enabled_channels {
+        *c = c.trim().to_lowercase();
+        if !matches!(c.as_str(), "telegram" | "weixin") {
+            return Err(format!(
+                "[channels] enabled 里有不认识的通道 \"{c}\"（可选 telegram / weixin）"
+            ));
+        }
+    }
+    enabled_channels.dedup();
+    // 只开微信时不需要 Telegram token：缺了不该挡住启动
+    let token = match read_secret(&token, &token_file, "telegram token") {
+        Ok(t) => t,
+        Err(e) if !enabled_channels.iter().any(|c| c == "telegram") => {
+            eprintln!("config: 未配置 telegram token（当前通道={enabled_channels:?}，忽略）：{e}");
+            String::new()
+        }
+        Err(e) => return Err(e),
+    };
     let api_key = if provider == "echo" {
         String::new()
     } else {
@@ -812,8 +899,17 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     let home = std::env::var("HOME").unwrap_or_default();
     Ok(Config {
         app_name: file.app.name,
+        enabled_channels,
+        weixin_credential: expand_tilde(
+            file.weixin
+                .credential_file
+                .as_deref()
+                .unwrap_or("~/.config/chuan/secrets/weixin.json"),
+        )
+        .to_string_lossy()
+        .into_owned(),
+        weixin_stale_s: file.weixin.stale_after_s,
         timezone: file.app.timezone,
-        allowed_users: allowed,
         stale_after_s: file.telegram.stale_after_s,
         token,
         provider,
@@ -934,23 +1030,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .playbooks_dir
             .unwrap_or_else(|| config_dir.join("playbooks").to_string_lossy().into_owned()),
         tz_offset_min: parse_offset(&file.app.utc_offset)?,
-        identity: std::sync::Arc::new(harness_kernel::Directory {
-            users: file
-                .identity
-                .user
-                .iter()
-                .map(|u| harness_kernel::User {
-                    id: u.id.clone(),
-                    name: u.name.clone(),
-                    channels: u
-                        .channels
-                        .iter()
-                        .filter_map(|c| harness_kernel::Binding::parse(c))
-                        .collect(),
-                })
-                .collect(),
-            default_user: file.identity.default_user.clone(),
-        }),
+        identity: std::sync::Arc::clone(&identity),
         net_log: file
             .net
             .log

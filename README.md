@@ -76,6 +76,7 @@ curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.2.0-rc.1/ins
   长活走后台任务，重启只通知不重跑；接手时带上次结论，不必从零开始。配置与日常话术见 [`docs/ROLES.md`](docs/ROLES.md) |
 | 安全 | 沙盒无网络、`/home` 与宿主 `/tmp` 不可见、`/tmp` 限 256MB、超时 killpg（服务级 `MemoryMax=1G` 兜底） |
 | 指令 | `/new` `/cancel` `/status` `/usage` `/prompt` `/agents` `/tasks` `/facts` `/reminders` `/forget` `/approve` `/deny` `/help` |
+| 通道 | Telegram 与**微信（ClawBot/iLink）**可同时开；一人可绑多个账号，也可多人。白名单只认 `[identity]`，未绑定会收到「未授权」 |
 
 家庭成员默认只能会话级使用；宿主/提权执行需要主人显式授权并逐条审批（见 `docs/DECISIONS.md` D15）。
 
@@ -111,8 +112,17 @@ chmod 600 ~/.config/chuan/secrets/*_key ~/.config/chuan/secrets/telegram_token
 `~/.config/chuan/chuan.toml`（完整示例见 `deploy/chuan.toml.example`）：
 
 ```toml
+# 谁能用：白名单唯一来源。一人可以绑多个账号，也可以写多个人。
+[[identity.user]]
+id = "owner"
+name = "主人"
+channels = ["telegram:123456789"]     # 以后加 "weixin:o9cq...@im.wechat" 就是同一个人的第二个入口
+
+# 开哪些通道（可以同时开；第一个是默认通道）
+[channels]
+enabled = ["telegram"]
+
 [telegram]
-allowed_users = [123456789]          # 只有这些人能用
 token_file = "~/.config/chuan/secrets/telegram_token"
 
 [engine]
@@ -125,6 +135,9 @@ db = "~/.local/share/chuan/chuan.db"
 ```
 
 **优先级**：CLI > 环境变量 > TOML > 内置默认。
+
+> `[identity]` **不能为空**：没有绑定就没人能用，启动会直接报错。
+> 通道级的 `allowed_users` 与 `default_user` 已移除（见 D26），写了会报错/告警。
 
 ### 2.3.1 让 agent 处理本地文件
 
@@ -472,37 +485,83 @@ mounts = [
 **要不要识别、怎么识别，由模型自己决定**：PDF 让它 `exec` 里用 `pdftotext`/pypdf，图片目前只能当文件处理
 （还没有视觉能力，模型会直说“看不到图片内容”）。这样通道不绑定任何解析逻辑，以后接 webui / 飞书只是换个下载实现。
 
+### 微信通道（ClawBot / iLink）
+
+微信是**第二条通道**，和 Telegram 并列，同一个人的两个入口各算各的会话。
+
+**它是什么**：微信客户端内置的「ClawBot」插件，底层是腾讯官方的 iLink 协议——
+扫码登录、长轮询收消息，**不需要公网入口、不需要域名备案、不需要公众号**。
+协议事实见 `docs/WEIXIN.md`，定位见 `docs/DECISIONS.md` D25。
+
+**它不是什么**：**不是推送通道**。出站额度是「**每条入站消息给 10 条**」，而且**不随时间恢复**：
+
+| 用法 | 上限 | 会枯竭吗 |
+|---|---|---|
+| 对话（你说 → 它答） | 每条消息重置为 10 | ❌ 不会，只要一轮回复不超过 10 条 |
+| 推送（你不说 → 它主动发） | 只剩最后一次入站之后的余量 | ✅ 会，最多 10 条，然后必须等你开口 |
+
+所以：**定时提醒默认留在 Telegram**；微信这边只做"你问它答"。
+
+**怎么开**：
+
+```bash
+# 1) 扫码（终端会画出二维码，8 分钟有效）
+sudo -u chuan chuan weixin-login
+#    成功后会打印 bot id 与「主人 id」，并写入 [weixin] credential_file（0600）
+
+# 2) 把它加进身份与通道列表
+#    [[identity.user]] channels = [..., "weixin:o9cq...@im.wechat"]
+#    [channels] enabled = ["telegram", "weixin"]
+
+# 3) 重启
+sudo systemctl restart chuan
+```
+
+**当前能力边界**（文本优先，其余逐步补）：
+
+- ✅ 收文本、发文本（超长按 4000 字分片）
+- ❌ 图片 / 文件 / 语音：收到会记一条 debug 日志并跳过（语音方案见 `docs/VOICE.md`）
+- ❌ 编辑已发消息：协议没有这个接口，所以**一轮只发一条终稿**，没有流式过程
+- ❌ "正在输入"：接口有（`sendtyping`），通道暂未接
+- ❌ 状态反应（表情回执）：协议没有 reaction 接口
+
 ### 身份与通道（identity）
 
-用户（User）与通道（Channel）是分开的，一个人可以绑多个通道地址：
+用户（User）与通道（Channel）是分开的：**一个人可以绑多个地址，也可以有多个人**。
 
 ```toml
-[identity]
-default_user = "owner"
-
 [[identity.user]]
 id = "owner"
 name = "主人"
-channels = ["telegram:123456789"]      # 以后再加 "webui:u1"、"feishu:ou_xxx"
+channels = [
+  "telegram:123456789",
+  "telegram:987654321",            # 同一个人的第二个 TG 号
+  "weixin:o9cq...@im.wechat",      # 同一个人的微信入口
+]
+
+[[identity.user]]
+id = "kid"
+name = "小孩"
+channels = ["telegram:555555555"]
 ```
 
-- 入站消息用 `(channel, addr)` 解析成 user；查不到就落到 `default_user`，再没有就退化成地址本身。
-- **提醒记在 user 名下**：`/reminders` 只列自己的，投递默认走这个人绑定的通道。
-- **暂不做隔离**：`/ws`、技能目录、facts 的 `family` scope 仍是全局共享；`user:<actor>` scope 已按人分开。
-- 要做多用户隔离时动三处：`/ws` 挂载按 user 分目录、审批卡固定发给 owner、facts 去掉 family 共享。结构上都留了口子。
+规则（`docs/DECISIONS.md` D26）：
 
-**账号从哪来（预留，未实现）**
+- **`[identity]` 是白名单的唯一来源**。通道配置里不再有 `allowed_users`，也没有 `default_user` 兜底。
+- **未绑定的地址**会收到一句「⛔ 未授权」，**不会跑模型**；同一地址每小时最多提示一次。
+- **隔离是会话级的**：`{通道}:{地址}` 就是一个会话，各自的 `/new`、`/cancel`、`/status` 互不影响。
+  同一个人的 Telegram 与微信是**两个独立会话**，不共享上下文。
+- **记忆按人归属，不按通道**：`family`（全家共享）或 `user:<user id>`。
+  同一个人换通道、换账号，看到的个人记忆是同一份。
+  写哪一类**由模型自己判断**——"全家都适用的写 family，只跟某一个人有关的写 user"。
+- **提醒（remind）默认投当前通道**：你能建提醒，说明你刚在这个通道说过话，所以它就是"最近活跃"的那个。
+  要投别处就显式给 `channel`（如 `channel="weixin"`），没绑过的通道会报错并列出可用绑定。
 
-现在是**配置即授权**：`[identity]` 里写了谁，谁就能用；改配置 = 加人。`default_user` 是兜底，
-加第二个真人前必须删掉，否则新地址会直接继承 owner 权限。
+**账号从哪来**：现在是**配置即授权**——改文件、重启，就加/删了人。
+运行期自助接入（审批卡、邀请码、`/revoke`）见 `docs/DECISIONS.md` D16，目前**未实现**。
 
-以后要做自助接入，分两层（见 `docs/DECISIONS.md` D16）：
-
-- **种子**：`[identity]` 里的绑定 = 引导（bootstrap），是唯一的信任起点，只能改文件；
-- **运行期**：`users` / `bindings` 落库；陌生地址第一次说话 → 给 owner 弹一张"是否接入"的卡，
-  批准才写绑定；owner 也可以 `/invite` 发一次性邀请码给家人。撤销用 `/revoke`。
-
-原则：**任何新地址都不能自助获得权限**，必须由 owner 批一次。
+**暂不做隔离**：`/ws`、技能目录仍是全局共享；真要多用户隔离，动三处（`/ws` 按 user 分目录、
+审批卡固定发 owner、facts 去掉 family 共享），结构上都留了口子。
 
 ### 出网取数与审计（web_fetch / net_log）
 
@@ -538,6 +597,8 @@ channels = ["telegram:123456789"]      # 以后再加 "webui:u1"、"feishu:ou_xx
 - 模型收到的每条消息都带一行 `（现在：2026-10-26 周一 17:40（UTC+08:00））`，所以它能自己把“本周五”算成具体时间；
 - 只支持**固定时区偏移**（`[app] utc_offset`，默认 `+08:00`），不做夏令时；
 - 关机错过的任务：2 小时内补跑一次，超过就跳过，只排下一次；
+- **投到哪**：默认就是你说话的这个通道（等于"最近活跃"）；要多通道时显式 `remind(channel="weixin")`，
+  没绑过的通道会报错并列出可用绑定。`/reminders` 会显示「投到：weixin · …」（D27）。
 - 创建要确认（`self_modify = "ask"`）；查看/取消：`/reminders`、`/reminders del <id>`。
 - 模型侧现在也能自己管：`reminders`（list/get，只读不审批）看得到**技能与参数**，`remind(action="update")` 只改给定字段（改技能参数别删了重建——重建会因 id 哈希变了变成两条任务）。
 
@@ -614,7 +675,9 @@ sudo systemctl restart chuan
 | 段 | 关键项 |
 |---|---|
 | `[app]` | `name`、`timezone`（展示用）、`utc_offset`（定时任务，`+08:00`） |
-| `[telegram]` | `allowed_users`、`token_file`、`stale_after_s` |
+| **`[channels]`** | `enabled`（如 `["telegram","weixin"]`，可同时开；第一个是默认通道） |
+| `[telegram]` | `token_file`、`stale_after_s`（白名单已移到 `[identity]`） |
+| **`[weixin]`** | `credential_file`（`chuan weixin-login` 写入）、`stale_after_s` |
 | `[engine]` | `provider`、`model`、`base_url`、`api_key_file`、`proxy`（模型专用，默认直连）、`system_prompt_file`（整体替换）、`system_prompt_extra_file`（追加，调教用）、`max_retries`、`retry_backoff_ms` |
 | `[actor]` | `max_turns`、`wall_clock_ms`（0=不限）、`workspace`、`workspace_keep_days`、`workspace_max_mb`、`inbox`、`context_budget_tokens` |
 | **`[proxy]`** | `url`（留空沿用 `https_proxy`）、`sandbox`、`web_fetch`、`services` |
@@ -627,7 +690,7 @@ sudo systemctl restart chuan
 | **`[media]`** | `dir`、`keep_days` |
 | **`[library]`** | `dir`（文件库，永久） |
 | **`[net]`** | `log`（出网审计 JSONL） |
-| **`[identity]`** | `default_user` + `[[identity.user]]`（user ↔ 多通道） |
+| **`[identity]`** | `[[identity.user]]`：`id`、`name`、`channels`（一人多账号 / 多人）；**白名单唯一来源** |
 | `[storage]` | `db`、`lock` |
 | `[backup]` | `dir`、`keep_days`、`keep_min`、`max_total_mb` |
 
