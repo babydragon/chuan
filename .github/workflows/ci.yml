@@ -115,7 +115,8 @@ jobs:
             mkdir -p "$dist"
             cp "artifacts/chuan-$arch/chuan" "$dist/chuan"
             cp deploy/install.sh deploy/chuan.toml.example \
-               deploy/chuan.service deploy/chuan-backup.service deploy/chuan-backup.timer \
+               deploy/chuan.service deploy/chuan-hostd.service \
+               deploy/chuan-backup.service deploy/chuan-backup.timer \
                README.md LICENSE "$dist/"
             chmod +x "$dist/chuan" "$dist/install.sh"
             tar -czf "out/chuan-$TAG-$arch-linux-gnu.tar.gz" -C "$dist" .

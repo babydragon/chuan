@@ -21,7 +21,7 @@ cp "$REPO_ROOT/deploy/install.sh" "$WORK/pkg/install.sh"
 printf '#!/bin/sh\necho fake\n' > "$WORK/pkg/chuan"
 cp "$REPO_ROOT/deploy/chuan.toml.example" "$WORK/pkg/"
 cp "$REPO_ROOT/deploy/chuan.service" "$REPO_ROOT/deploy/chuan-backup.service" \
-   "$REPO_ROOT/deploy/chuan-backup.timer" "$WORK/pkg/"
+   "$REPO_ROOT/deploy/chuan-backup.timer" "$REPO_ROOT/deploy/chuan-hostd.service" "$WORK/pkg/"
 chmod +x "$WORK/pkg/chuan" "$WORK/pkg/install.sh"
 tar -czf "$REL/chuan-v0.0.0-test-x86_64-linux-gnu.tar.gz" -C "$WORK/pkg" .
 cp "$REL/chuan-v0.0.0-test-x86_64-linux-gnu.tar.gz" "$REL/chuan-x86_64-linux-gnu.tar.gz"
@@ -106,6 +106,11 @@ if sudo -n true 2>/dev/null; then
   expect "服务 token" /etc/chuan/secrets/weread_token   "440 root:$G"
   expect "二进制"     /usr/local/bin/chuan        "755 root:root"
   expect "unit"       /etc/systemd/system/chuan.service "644 root:root"
+  # 提权单元：uid/gid 占位符必须被替换成数字（rc.20 的包漏了它，见 install.sh 的警告分支）
+  hostd="$ROOT/etc/systemd/system/chuan-hostd.service"
+  [[ -f $hostd ]] || fail "chuan-hostd.service 没被安装"
+  grep -q "@CHUAN_UID@" "$hostd" && fail "chuan-hostd.service 的 uid 占位符没替换"
+  grep -qE -- "--allow-uid [0-9]+" "$hostd" || fail "chuan-hostd.service 缺 --allow-uid"
 
   # 幂等：第二次跑不应该再报任何"校正"（stat 的 750 vs 配置的 0750 必须按数值比）
   sudo env CHUAN_ROOT="$ROOT" CHUAN_USER="$U" CHUAN_GROUP="$G" \

@@ -258,16 +258,23 @@ for u in chuan.service chuan-backup.service chuan-backup.timer; do
 done
 # hostd：提到 root 的单元要按服务账号的 uid/gid 生成（unit 里没有"别的用户"的 uid 占位符）
 HOSTD="$(asset chuan-hostd.service)" || true
-if [[ -n $HOSTD ]]; then
+if [[ -z $HOSTD ]]; then
+  # 静默跳过过一次：rc.20 的发布包漏了这个文件，装完 chuan-hostd 一直是 inactive，
+  # 表现是 pkg 报"连接失败"，查半天才发现 unit 根本不存在。
+  say "警告：包里没有 chuan-hostd.service —— 提权通道（pkg/apt）不会安装。\n     这是打包清单遗漏，请反馈；需要的话可先用 --root 安装补上"
+else
   UID_SVC="$(id -u "$SVC_USER" 2>/dev/null || echo 1000)"
   GID_SVC="$(id -g "$SVC_GROUP" 2>/dev/null || id -g "$SVC_USER" 2>/dev/null || echo 1000)"
-  sed -e "s/@CHUAN_UID@/$UID_SVC/g" -e "s/@CHUAN_GID@/$GID_SVC/g" "$HOSTD" > "$ETC/chuan-hostd.service.tmp"
+  # 用 mktemp 而不是往 $ETC 里写：dry-run 时 $ETC 可能真的指向 /etc/chuan，
+  # 那里没有目录就会失败（第一次就踩了），而且 dry-run 不该碰系统目录。
+  tmp_unit="$(mktemp)"
+  sed -e "s/@CHUAN_UID@/$UID_SVC/g" -e "s/@CHUAN_GID@/$GID_SVC/g" "$HOSTD" > "$tmp_unit"
   if [[ -z $R ]]; then
-    run install -Dm644 "$ETC/chuan-hostd.service.tmp" /etc/systemd/system/chuan-hostd.service
+    run install -Dm644 "$tmp_unit" /etc/systemd/system/chuan-hostd.service
   else
-    run install -Dm644 "$ETC/chuan-hostd.service.tmp" "$UNITDIR/chuan-hostd.service"
+    run install -Dm644 "$tmp_unit" "$UNITDIR/chuan-hostd.service"
   fi
-  rm -f "$ETC/chuan-hostd.service.tmp"
+  rm -f "$tmp_unit"
 fi
 
 if [[ -z $R ]]; then
