@@ -10,8 +10,10 @@
 > B（user timer 上板）与 C（`chuan hostd` 提权）未做。
 > 逐条见 `ROADMAP.md §5`，板上验证清单见 `SBC-VERIFY.md §11`。
 > 逐条实测值见 `SBC-VERIFY.md`——它是唯一权威，概览与此冲突时以它为准。
-> **rc.20 新增**：入站消息状态反应（Telegram 表情回执：😐 未开始 / 👀 处理中 / 👍 成功 / 👎 失败，D24）。
-> 预发布到 `v0.1.0-rc.20`，正式版待定。
+> **rc.20**：入站消息状态反应（Telegram 表情回执 😐/👀/👍/👎，D24）。
+> **rc.21**：`pkg` 增加只读 `search`/`show`；修复发布包漏装 `chuan-hostd.service`（提权通道起不来）；
+> `host` 逐次审计；`remind` 回执标明「生效形态」；`playbook` 默认目录改为 `<config>/playbooks`。
+> 预发布到 `v0.1.0-rc.21`，正式版待定。
 
 ---
 
