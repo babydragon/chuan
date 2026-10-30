@@ -394,6 +394,8 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 - `loginctl enable-linger chuan`——`systemctl --user` 与 `systemd-run --user` 的前提（`§3` 已有此条）；
 - `/run/chuan/host.sock`：`0660 root:chuan`，`chuan hostd` 负责创建（目录 0755 让 chuan 穿得进来，
   真正的闸是 socket 权限 + `SO_PEERCRED`）；socket 存在但 hostd 没跑 → **拒绝**，不是降级；
+- **只有 `User=chuan` 的 unit 才能声明 `StateDirectory=chuan`，且必须写 `StateDirectoryMode=0750`**
+  （`chuan.service` 与 `chuan-backup.service` 都满足；漏写 mode 会被默认的 0755 放宽）；
 - **`chuan-hostd.service` 不能写 `StateDirectory=chuan`**：systemd 会把该目录 chown 给
   本 unit 的 `User=`（= root），`/var/lib/chuan` 变成 `root:root 0750`，chuan 失去 `x` 位
   → 沙盒与宿主 lane 绑 `/ws` 时 `bwrap: Can't chdir to /ws: Permission denied`

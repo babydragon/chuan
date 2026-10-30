@@ -9,6 +9,8 @@ Group=chuan
 WorkingDirectory=/var/lib/chuan
 ExecStart=/usr/local/bin/chuan --config /etc/chuan/chuan.toml backup
 StateDirectory=chuan
+# 必须与 chuan.service 一致：默认是 0755，会把这个目录的权限放宽一格
+StateDirectoryMode=0750
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/chuan
