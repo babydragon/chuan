@@ -693,6 +693,36 @@ fn read_secret(inline: &Option<String>, file: &Option<String>, label: &str) -> R
 }
 
 /// 查找配置文件：CLI > CHUAN_CONFIG > ~/.config/chuan/chuan.toml > /etc/chuan/chuan.toml
+/// `weixin-login` 专用：只读 `[weixin]` 与 `[proxy]`。
+///
+/// 登录发生在"配置还没填全"的时候（身份、通道、telegram token 都可能缺），
+/// 所以不能走 `load()` 的全量校验——否则第一次绑定永远卡在无关的报错上。
+pub struct LoginConfig {
+    pub credential_file: String,
+    pub proxy: Option<String>,
+}
+
+pub fn login_config(cli: &Cli) -> Result<LoginConfig, String> {
+    let path = find_config(cli);
+    let mut file = FileConfig::default();
+    if let Some(p) = &path {
+        let text = std::fs::read_to_string(p)
+            .map_err(|e| format!("读取配置 {}: {e}", p.display()))?;
+        file = toml::from_str(&text).map_err(|e| format!("解析 {}: {e}", p.display()))?;
+    }
+    Ok(LoginConfig {
+        credential_file: expand_tilde(
+            file.weixin
+                .credential_file
+                .as_deref()
+                .unwrap_or("~/.config/chuan/secrets/weixin.json"),
+        )
+        .to_string_lossy()
+        .into_owned(),
+        proxy: std::env::var("CHUAN_PROXY").ok().or(file.proxy.url.clone()),
+    })
+}
+
 fn find_config(cli: &Cli) -> Option<PathBuf> {
     if let Some(p) = &cli.config {
         return Some(p.clone());

@@ -73,21 +73,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
-    let cfg = match config::load(&cli) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("配置错误: {e}");
-            std::process::exit(2);
-        }
-    };
-
-    if let Some(parent) = std::path::Path::new(&cfg.db).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     if cli.command.as_deref() == Some("weixin-login") {
         use harness_channels::weixin::login::{Hooks, qr_login};
-        let proxy = std::env::var("CHUAN_PROXY").ok().or_else(|| cfg.proxy.url.clone());
+        // 只读 [weixin]/[proxy]：登录时配置还没填全，不能走全量校验
+        let lc = match config::login_config(&cli) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("配置错误: {e}");
+                std::process::exit(2);
+            }
+        };
+        let credential_path = lc.credential_file.clone();
+        let proxy = lc.proxy.clone();
         // 渲染在应用层：通道层只给二维码内容
         let hooks = Hooks {
             on_qr: Box::new(|img: &str| {
@@ -116,11 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cred = qr_login("https://ilinkai.weixin.qq.com", proxy.as_deref(), hooks)
             .await
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        cred.save(std::path::Path::new(&cfg.weixin_credential))
+        cred.save(std::path::Path::new(&credential_path))
             .map_err(|e| -> Box<dyn std::error::Error> {
-                format!("写凭据 {} 失败：{e}", cfg.weixin_credential).into()
+                format!("写凭据 {credential_path} 失败：{e}").into()
             })?;
-        println!("\n登录成功：{}（0600）", cfg.weixin_credential);
+        println!("\n登录成功：{credential_path}（0600）");
         println!("  bot  : {}", cred.bot_id);
         println!("  主人 : {}", cred.user_id);
         println!(
@@ -128,6 +125,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
+
+    let cfg = match config::load(&cli) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("配置错误: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    if let Some(parent) = std::path::Path::new(&cfg.db).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
 
     if cli.backup {
         return cmd_backup(&cfg).await;
