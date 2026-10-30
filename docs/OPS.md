@@ -167,6 +167,28 @@ enabled = true     # 默认 false
 - 隐私：**开这个等于把图片发给模型提供商**。家里有小孩照片，想清楚再开；
 - 关闭时模型只拿到文件路径，会明确说"看不到图片内容"。
 
+## 微信多账号（每个家人一个 bot）
+
+ClawBot 是"每人一个"：一个 bot 只服务扫码的那个微信号。所以加人 = **让他自己扫一次码**。
+
+```json
+{ "accounts": [
+    { "bot_token": "…", "bot_id": "f381…@im.bot", "user_id": "o9cq80_…@im.wechat", "base_url": "https://ilinkai.weixin.qq.com" },
+    { "bot_token": "…", "bot_id": "a72b…@im.bot", "user_id": "o9cqXY_…@im.wechat", "base_url": "https://ilinkai.weixin.qq.com" }
+] }
+```
+
+流程：
+
+1. `sudo chuan --config /etc/chuan/chuan.toml weixin-login`，让对方用**他自己的手机**扫；
+2. 成功后 `accounts` 里自动多一条（同一个人重扫是**覆盖**那一条，不会重复）；
+3. 把打印的 `user_id` 写进 `[identity]` 对应人的 `channels`：`"weixin:o9cq…@im.wechat"`；
+4. `systemctl restart chuan`。
+
+- **加新人不用停服务**（服务还不认识新 token，互不影响）。
+- **重扫已有的人要先停**：旧 token 可能被作废，而服务把 token 读在内存里。
+- 每个账号的游标独立（`wx.buf:<bot_id>`），额度也按各自会话算，互不挤占。
+
 ## 启动失败与退出码
 
 | 退出码 | 含义 | 行为 |
@@ -213,7 +235,7 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 | 东西 | 位置 | 谁创建 |
 |---|---|---|
 | 凭据（token/key） | `<config>/secrets/<name>`，目录 `0750 root:chuan`，文件见下 | **主人**（agent 只使用，永不读取内容） |
-| 微信凭据 | `<weixin.credential_file>`（`chuan weixin-login` 写，0640，**归属跟随目录**），含 bot_token / bot_id / 主人 id | 扫码登录 |
+| 微信凭据 | `<weixin.credential_file>`（`chuan weixin-login` 写，0640，**归属跟随目录**），`accounts` 数组，每项一个 bot（bot_token / bot_id / 主人 id） | 扫码登录 |
 | 主配置 | `<config>/chuan.toml` | 主人 |
 | 运行期新增服务 | `<config>/services.d/<name>.toml`（目录 `0770 root:chuan`） | agent 通过 `service` 工具写；安装脚本预建，缺了会导致"本进程可用、重启丢失" |
 | playbook（SOP/API 说明） | `<config>/playbooks/<topic>.md` | agent 或主人 |

@@ -45,6 +45,8 @@ impl FakeApi {
         if g.is_empty() {
             g.push(Updates::default());
         }
+        // 游标每批都前进，便于断言"每个 bot 各存各的游标"
+        g[0].get_updates_buf = format!("buf-{message_id}");
         g[0].msgs.push(WeixinMessage {
             seq: message_id,
             message_id,

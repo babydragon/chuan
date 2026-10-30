@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use harness_channels::weixin::api::Item;
 use harness_channels::weixin::fake::FakeApi;
-use harness_channels::weixin::{WeixinChannel, WeixinConfig};
+use harness_channels::weixin::{Account, WeixinChannel, WeixinConfig};
 use harness_kernel::{Block, Channel, Inbound, InboundKind, MsgRef, View};
-use harness_channels::offsets::MemoryOffsets;
+use harness_channels::offsets::{MemoryOffsets, OffsetStore};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -19,9 +19,20 @@ fn now_ms() -> i64 {
 }
 
 fn channel(api: Arc<FakeApi>) -> Arc<WeixinChannel<FakeApi>> {
+    channel_with(vec![("u1@im.wechat", "b1@im.bot", api)], Arc::new(MemoryOffsets::default()))
+}
+
+fn channel_with(
+    accounts: Vec<(&str, &str, Arc<FakeApi>)>,
+    offsets: Arc<MemoryOffsets>,
+) -> Arc<WeixinChannel<FakeApi>> {
+    let accs = accounts
+        .into_iter()
+        .map(|(user, bot, api)| Account { user_id: user.into(), bot_id: bot.into(), api })
+        .collect();
     Arc::new(WeixinChannel::new(
-        api,
-        Arc::new(MemoryOffsets::default()),
+        accs,
+        offsets,
         WeixinConfig { stale_after_s: 300, cursor_key: "wx.buf".into() },
     ))
 }
@@ -124,4 +135,64 @@ async fn caps_match_weixin_reality() {
     assert!(!caps.buttons, "协议没有按钮");
     assert!(!caps.markdown, "微信不解析 Markdown");
     assert_eq!(caps.max_text, 4000);
+}
+
+/// 两个 bot（两个微信号）：各收各的、各发各的，游标也各存各的。
+#[tokio::test]
+async fn two_accounts_do_not_cross_talk() {
+    let api_a = Arc::new(FakeApi::new());
+    let api_b = Arc::new(FakeApi::new());
+    let now = now_ms();
+    api_a.push_text(11, "alice@im.wechat", "我是 A", "ctx-a", now);
+    api_b.push_text(22, "bob@im.wechat", "我是 B", "ctx-b", now);
+
+    let offsets = Arc::new(MemoryOffsets::default());
+    let ch = channel_with(
+        vec![
+            ("alice@im.wechat", "botA@im.bot", Arc::clone(&api_a)),
+            ("bob@im.wechat", "botB@im.bot", Arc::clone(&api_b)),
+        ],
+        Arc::clone(&offsets),
+    );
+
+    let got = collect(Arc::clone(&ch), 2).await;
+    assert_eq!(got.len(), 2, "两个账号的消息都要收到");
+    assert!(got.iter().all(|i| i.channel.0 == "weixin"), "通道 id 仍是 weixin");
+
+    // 回复走各自的 token
+    let view = || View {
+        shard: 0,
+        is_last: true,
+        blocks: vec![Block::Paragraph("回你".into())],
+        status: None,
+        buttons: vec![],
+    };
+    ch.deliver("alice@im.wechat", view()).await.unwrap();
+    ch.deliver("bob@im.wechat", view()).await.unwrap();
+
+    assert_eq!(api_a.sent_texts(), vec!["回你".to_string()], "A 的回复只能走 A 的 api");
+    assert_eq!(api_b.sent_texts(), vec!["回你".to_string()], "B 的回复只能走 B 的 api");
+
+    // 游标按 bot 分开
+    assert!(offsets.get("wx.buf:botA@im.bot").await.is_some(), "A 的游标");
+    assert!(offsets.get("wx.buf:botB@im.bot").await.is_some(), "B 的游标");
+}
+
+/// 会话在账号簿里找不到 → 明确报错，而不是随便挑一个 bot 发出去。
+#[tokio::test]
+async fn unknown_conversation_is_rejected() {
+    let api = Arc::new(FakeApi::new());
+    let ch = channel(api);
+    let view = View {
+        shard: 0,
+        is_last: true,
+        blocks: vec![Block::Paragraph("x".into())],
+        status: None,
+        buttons: vec![],
+    };
+    let err = ch.deliver("stranger@im.wechat", view).await.unwrap_err();
+    assert!(
+        format!("{err}").contains("没有绑定这个微信号的 bot"),
+        "应明确说没这个账号：{err}"
+    );
 }

@@ -530,6 +530,19 @@ sudo systemctl restart chuan
 - ❌ 编辑已发消息：协议没有这个接口，所以**一轮只发一条终稿**，没有流式过程
 - ❌ "正在输入"：接口有（`sendtyping`），通道暂未接
 - ❌ 状态反应（表情回执）：协议没有 reaction 接口
+- ✅ **加人**：ClawBot 是"每人一个"——一个 bot 只服务扫码的那个微信号，没有分享入口。
+  所以加人不是"往一个 bot 里加"，而是**让他自己扫一次码**：
+
+  ```bash
+  # 家人用他自己的手机扫（你跑命令，他扫码）
+  sudo chuan --config /etc/chuan/chuan.toml weixin-login
+  # 成功后账号簿里多一条，并打印他的 user_id
+  # 把它写进 [[identity.user]].channels = [..., "weixin:o9cq...@im.wechat"]
+  sudo systemctl restart chuan
+  ```
+
+  一个凭据文件、`accounts` 数组，**每人一个 bot、一个 token**；每条独立长轮询、独立游标。
+  加新人时**不用停服务**（服务还不认识这个新 token）；**重扫已有的人要先停**（旧 token 可能作废）
 
 ### 身份与通道（identity）
 

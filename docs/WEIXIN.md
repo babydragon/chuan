@@ -24,6 +24,9 @@
 | 官方 npm 包 `@tencent-weixin/openclaw-weixin` 2.4.10（2026-10-11），MIT，maintainers 均为 `@tencent.com` | 〔实测〕npm registry |
 | 官方协议文档 `docs/protocol_zh_CN.md` 明确面向「实现或对接兼容微信后端的开发者」 | 〔官方〕 |
 | 入站发送者 id 形如 `o9cq80_...@im.wechat` | 〔实测〕`listen` 输出 |
+| **ClawBot 是"每人一个"**：没绑定过的微信账号打开插件只会被要求扫码绑定；没有分享/推荐入口，看不到别人的 bot 会话 | 〔实测观察（UI）2026-10-30〕 |
+| 推论：**一个 bot 只服务扫码的那个微信号**——所以"加人"不是往一个 bot 里加，而是**每人各绑一个 bot**（每个 bot 一个 token） | 〔推论〕 |
+| 一个实例可同时持有**多个 bot 的 token**：一个凭据文件、`accounts` 数组，每个 bot 一条 | 〔已实现〕`weixin-login` 按 `user_id` 合并追加；每条独立长轮询、独立游标 |
 
 ---
 
@@ -178,7 +181,7 @@ POST /ilink/bot/get_bot_qrcode?bot_type=3
 | U7 | 额度是否计入媒体消息 / typing / `state=1` | 决定预算算法 | 逐类计数 |
 | U8 | 安卓 / 低版本微信的渲染一致性 | 只在一台 iOS 上验过 | 换设备 |
 | U9 | 多 bot / 多账号是否互不影响 | 多通道时可能碰到 | 再扫一个号 |
-| U10 | 额度是 per-conversation 还是 per-bot | 只有一个会话，暂时无法区分 | 需要第二个对话方 |
+| ~~U10~~ | ~~额度是 per-conversation 还是 per-bot~~ | ✅ 不再重要：一个 bot 只有一个对话方（见 §1），两种口径等价 | — |
 
 ---
 

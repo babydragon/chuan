@@ -27,7 +27,7 @@ use harness_channels::offsets::OffsetStore;
 use harness_channels::telegram::http::HttpApi;
 use harness_channels::telegram::{TelegramChannel, TelegramConfig};
 use harness_channels::weixin::http::HttpApi as WeixinHttpApi;
-use harness_channels::weixin::{Credential, WeixinChannel, WeixinConfig};
+use harness_channels::weixin::{Account, Accounts, WeixinChannel, WeixinConfig};
 use harness_kernel::{ActorConfig, Channel, ConversationActor, Store, ToolRegistry};
 use harness_store::SqliteStore;
 use offsets::StoreOffsets;
@@ -120,18 +120,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cred = qr_login("https://ilinkai.weixin.qq.com", proxy.as_deref(), hooks)
             .await
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        cred.save(std::path::Path::new(&credential_path))
+        let path = std::path::Path::new(&credential_path);
+        // 合并而不是覆盖：同一个微信号重扫 → 更新那一条；新的人 → 追加
+        let mut book = match Accounts::load(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Accounts::default(),
+            Err(e) => die_config(format!("读取 {credential_path} 失败：{e}")),
+        };
+        let who = cred.user_id.clone();
+        let bot = cred.bot_id.clone();
+        book.upsert(cred);
+        book.save(path)
             .map_err(|e| -> Box<dyn std::error::Error> {
                 format!("写凭据 {credential_path} 失败：{e}").into()
             })?;
-        println!("\n登录成功：{credential_path}（0600）");
-        println!("  bot  : {}", cred.bot_id);
-        println!("  主人 : {}", cred.user_id);
+        println!("\n登录成功：{credential_path}（0640，归属跟随目录）");
+        println!("账号簿里现在有 {} 个微信账号", book.accounts.len());
+        println!("  bot  : {bot}");
+        println!("  主人 : {who}");
         println!("\n下一步（两处配置，改完重启）：");
         println!("  1) [channels] enabled 里加上 \"weixin\"");
         println!(
             "  2) [identity] 里对应的人，channels 加上 \"weixin:{}\"",
-            cred.user_id
+            who
         );
         println!("  3) systemctl restart chuan");
         return Ok(());
@@ -235,24 +246,39 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     for name in &cfg.enabled_channels {
         match name.as_str() {
         "weixin" => {
-            let cred = match Credential::load(std::path::Path::new(&cfg.weixin_credential)) {
-                Ok(c) => c,
+            let book = match Accounts::load(std::path::Path::new(&cfg.weixin_credential)) {
+                Ok(b) => b,
                 Err(e) => die_config(format!(
                     "读取微信凭据 {} 失败：{e}（先跑 `chuan weixin-login`）",
                     cfg.weixin_credential
                 )),
             };
-            if cred.bot_token.is_empty() {
-                die_config(format!("微信凭据 {} 里没有 bot_token", cfg.weixin_credential));
+            if book.accounts.is_empty() {
+                die_config(format!(
+                    "微信凭据 {} 里没有任何账号（先跑 `chuan weixin-login`）",
+                    cfg.weixin_credential
+                ));
             }
-            let api = Arc::new(WeixinHttpApi::new(
-                cred.bot_token.clone(),
-                cred.base_url.clone(),
-                tg_proxy.as_deref(),
-            )?);
+            let mut accs = Vec::new();
+            for c in &book.accounts {
+                if c.bot_token.is_empty() || c.user_id.is_empty() {
+                    die_config(format!("微信凭据里有一条缺 bot_token 或 user_id：{}", c.bot_id));
+                }
+                let api = Arc::new(WeixinHttpApi::new(
+                    c.bot_token.clone(),
+                    c.base_url.clone(),
+                    tg_proxy.as_deref(),
+                )?);
+                accs.push(Account {
+                    user_id: c.user_id.clone(),
+                    bot_id: c.bot_id.clone(),
+                    api,
+                });
+            }
+            println!("weixin: {} 个账号", accs.len());
             let offsets = Arc::new(StoreOffsets::new(Arc::clone(&store), "wx.buf"));
             channels.push(Arc::new(WeixinChannel::new(
-                api,
+                accs,
                 offsets as Arc<dyn OffsetStore>,
                 WeixinConfig {
                     stale_after_s: cfg.weixin_stale_s,

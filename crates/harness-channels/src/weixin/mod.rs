@@ -38,11 +38,29 @@ pub struct Credential {
     pub base_url: String,
 }
 
-impl Credential {
+/// 凭据文件：**一个文件、多个账号**。一个 bot 只服务扫码的那个微信号，
+/// 所以"多人"就是多条记录，各自一个 token（`WEIXIN.md` §1）。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Accounts {
+    #[serde(default)]
+    pub accounts: Vec<Credential>,
+}
+
+impl Accounts {
+    /// 读凭据。兼容旧格式：顶层直接是一个对象时当作一条。
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        serde_json::from_str(&text)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // 有 `accounts` 键 → 新格式；否则当作旧格式的单对象。
+        // （不能靠 untagged：`#[serde(default)]` 会让空对象也匹配成 Accounts）
+        let bad = |e: serde_json::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        if v.get("accounts").is_some() {
+            serde_json::from_value(v).map_err(bad)
+        } else {
+            let one: Credential = serde_json::from_value(v).map_err(bad)?;
+            Ok(Accounts { accounts: vec![one] })
+        }
     }
 
     /// 写凭据。**归属跟随所在目录**：`/var/lib/chuan` 属于服务账号，文件就归它，
@@ -56,15 +74,21 @@ impl Credential {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
-            if let Some(dir) = path.parent() {
-                if let Ok(meta) = std::fs::metadata(dir) {
-                    use std::os::unix::fs::MetadataExt;
-                    // 目录属主是谁，文件就归谁（root 跑也能被 chuan 读）
-                    let _ = std::os::unix::fs::chown(path, Some(meta.uid()), Some(meta.gid()));
-                }
+            if let Some(meta) = path.parent().and_then(|d| std::fs::metadata(d).ok()) {
+                use std::os::unix::fs::MetadataExt;
+                // 目录属主是谁，文件就归谁（root 跑也能被 chuan 读）
+                let _ = std::os::unix::fs::chown(path, Some(meta.uid()), Some(meta.gid()));
             }
         }
         Ok(())
+    }
+
+    /// 登录成功后合并：同一个人（`user_id`）覆盖，新的人追加。
+    pub fn upsert(&mut self, c: Credential) {
+        match self.accounts.iter_mut().find(|a| a.user_id == c.user_id) {
+            Some(slot) => *slot = c,
+            None => self.accounts.push(c),
+        }
     }
 }
 
@@ -89,20 +113,31 @@ impl Default for WeixinConfig {
     }
 }
 
+/// 一个账号 = 一个 bot（服务一个微信号）。
+#[derive(Clone)]
+pub struct Account<A: Api> {
+    /// 绑定这个 bot 的微信号（`xxx@im.wechat`）——回复时按它反查用哪个 token
+    pub user_id: String,
+    /// `xxx@im.bot`，只用于游标 key 与日志
+    pub bot_id: String,
+    pub api: Arc<A>,
+}
+
 pub struct WeixinChannel<A: Api> {
-    api: Arc<A>,
+    accounts: Vec<Account<A>>,
     offsets: Arc<dyn OffsetStore>,
     stale_after_s: i64,
     cursor_key: String,
     caps: Caps,
     /// conversation → 最近一条入站消息的 `context_token`；回复必须原样带回（WEIXIN §3.2）
-    ctx: Mutex<HashMap<String, String>>,
+    ctx: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl<A: Api> WeixinChannel<A> {
-    pub fn new(api: Arc<A>, offsets: Arc<dyn OffsetStore>, cfg: WeixinConfig) -> Self {
+    pub fn new(accounts: Vec<Account<A>>, offsets: Arc<dyn OffsetStore>, cfg: WeixinConfig) -> Self {
+        assert!(!accounts.is_empty(), "至少需要一个微信账号");
         Self {
-            api,
+            accounts,
             offsets,
             stale_after_s: cfg.stale_after_s,
             cursor_key: cfg.cursor_key,
@@ -118,8 +153,13 @@ impl<A: Api> WeixinChannel<A> {
                 // 不发中间态，这个值实际用不到
                 min_edit_interval_ms: 5_000,
             },
-            ctx: Mutex::new(HashMap::new()),
+            ctx: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 这条会话该用哪个账号发：**按绑定者 id 反查**（一个 bot 只服务一个微信号）。
+    fn account_of(&self, conversation: &str) -> Option<&Account<A>> {
+        self.accounts.iter().find(|a| a.user_id == conversation)
     }
 
     fn ctx_of(&self, conversation: &str) -> String {
@@ -147,89 +187,58 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
         tx: mpsc::Sender<Inbound>,
         cancel: CancellationToken,
     ) -> Result<(), ChannelError> {
-        let mut cursor = self.offsets.get(&self.cursor_key).await.unwrap_or_default();
-        let mut longpoll_ms = 35_000i64;
+        // 每个账号一条独立的长轮询：游标分开（`wx.buf:<bot_id>`），
+        // 一个账号掉线（-14）不能把其它账号一起带走。
+        let mut set = tokio::task::JoinSet::new();
+        for acc in &self.accounts {
+            set.spawn(poll_account(
+                Arc::clone(&acc.api),
+                acc.bot_id.clone(),
+                format!("{}:{}", self.cursor_key, acc.bot_id),
+                Arc::clone(&self.offsets),
+                self.stale_after_s,
+                tx.clone(),
+                cancel.clone(),
+                Arc::clone(&self.ctx),
+            ));
+        }
 
+        let total = self.accounts.len();
+        let mut errored = 0usize;
+        let mut last_err: Option<ChannelError> = None;
         loop {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            match self.api.get_updates(&cursor, longpoll_ms).await {
-                Ok(u) => {
-                    if !u.get_updates_buf.is_empty() {
-                        cursor = u.get_updates_buf.clone();
-                        self.offsets.set(&self.cursor_key, &cursor).await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                r = set.join_next() => match r {
+                    None => break,
+                    Some(Ok(Err(e))) => {
+                        errored += 1;
+                        tracing::error!(error = %e, "微信账号的轮询结束");
+                        last_err = Some(e);
                     }
-                    if u.longpolling_timeout_ms > 0 {
-                        longpoll_ms = u.longpolling_timeout_ms.min(60_000);
+                    Some(Ok(Ok(()))) => {}
+                    Some(Err(e)) => {
+                        errored += 1;
+                        tracing::error!(error = %e, "微信轮询任务异常退出");
                     }
-                    for m in u.msgs {
-                        let Some(text) = m.text() else {
-                            // 本步只做文本：图片/文件/语音/视频一律跳过并留痕
-                            let kinds: Vec<&str> =
-                                m.item_list.iter().map(|i| i.kind_name()).collect();
-                            tracing::debug!(id = m.message_id, ?kinds, "微信消息非文本，跳过");
-                            continue;
-                        };
-                        let from = m.from_user_id.clone();
-                        if from.is_empty() {
-                            continue;
-                        }
-                        // 授权在 actor 统一做（D26）：这里必须先把 context_token 记下来，
-                        // 否则未绑定的用户连"未授权"都收不到。
-                        // 新鲜度：断网恢复后不补发旧消息
-                        if self.stale_after_s > 0
-                            && m.create_time_ms > 0
-                            && now_ms() - m.create_time_ms > self.stale_after_s * 1000
-                        {
-                            continue;
-                        }
-                        if !m.context_token.is_empty() {
-                            self.ctx
-                                .lock()
-                                .unwrap()
-                                .insert(from.clone(), m.context_token.clone());
-                        }
-                        let kind = if text.starts_with('/') {
-                            InboundKind::Command
-                        } else {
-                            InboundKind::Text
-                        };
-                        let inbound = Inbound {
-                            channel: self.id(),
-                            conversation: from.clone(),
-                            actor: from.clone(),
-                            kind,
-                            text: Some(text),
-                            dedupe_key: m.message_id.to_string(),
-                            callback_id: None,
-                            msg: Some(MsgRef(m.message_id.to_string())),
-                            received_at: if m.create_time_ms > 0 {
-                                m.create_time_ms
-                            } else {
-                                now_ms()
-                            },
-                            attachments: Vec::new(),
-                        };
-                        if tx.send(inbound).await.is_err() {
-                            return Err(ChannelError::Closed);
-                        }
-                    }
-                }
-                Err(ApiError::SessionExpired) => {
-                    // -14 只能重扫（WEIXIN F17 之外的已知状态）；不要静默重试，否则永远转圈
-                    tracing::error!("微信会话失效（-14），需要重新执行 weixin-login");
-                    return Err(ChannelError::BadRequest("weixin session expired".into()));
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "微信轮询失败，2s 后重试");
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
         }
+        set.shutdown().await;
+        // 只有"所有账号都失败"才算整条通道挂了；部分失败继续用剩下的
+        if errored == total {
+            return Err(last_err.unwrap_or(ChannelError::BadRequest("weixin: 全部账号停止".into())));
+        }
+        Ok(())
     }
 
     async fn deliver(&self, conversation: &str, view: View) -> Result<MsgRef, ChannelError> {
+        // 先确认"这个微信号有没有对应的 bot"——这比"缺令牌"更能说明问题
+        let acc = self.account_of(conversation).ok_or_else(|| {
+            ChannelError::BadRequest(format!(
+                "没有绑定这个微信号的 bot：{conversation}（先 weixin-login）"
+            ))
+        })?;
         let ctx = self.ctx_of(conversation);
         if ctx.is_empty() {
             // 没有入站就没有 context_token（协议硬约束），只能等用户开口
@@ -244,7 +253,7 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
         let mut last = MsgRef::default();
         for (i, part) in chunk(&body, self.caps.max_text).into_iter().enumerate() {
             let client_id = format!("chuan-{}-{i}", now_ms());
-            let id = self
+            let id = acc
                 .api
                 .send_text(conversation, &ctx, &part, &client_id)
                 .await
@@ -274,6 +283,93 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
         // TODO(下一步)：getconfig 拿 typing_ticket + sendtyping。
         // 现在不做：typing 只用几秒就自动消失，而 trait 还没有"停止"钩子。
         Ok(())
+    }
+}
+
+/// 单个账号的长轮询。游标按 `bot_id` 分开，各存各的。
+#[allow(clippy::too_many_arguments)]
+async fn poll_account<A: Api + 'static>(
+    api: Arc<A>,
+    bot_id: String,
+    cursor_key: String,
+    offsets: Arc<dyn OffsetStore>,
+    stale_after_s: i64,
+    tx: mpsc::Sender<Inbound>,
+    cancel: CancellationToken,
+    ctx: Arc<Mutex<HashMap<String, String>>>,
+) -> Result<(), ChannelError> {
+    let mut cursor = offsets.get(&cursor_key).await.unwrap_or_default();
+    let mut longpoll_ms = 35_000i64;
+
+    loop {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        match api.get_updates(&cursor, longpoll_ms).await {
+            Ok(u) => {
+                if !u.get_updates_buf.is_empty() {
+                    cursor = u.get_updates_buf.clone();
+                    offsets.set(&cursor_key, &cursor).await;
+                }
+                if u.longpolling_timeout_ms > 0 {
+                    longpoll_ms = u.longpolling_timeout_ms.min(60_000);
+                }
+                for m in u.msgs {
+                    let Some(text) = m.text() else {
+                        // 本步只做文本：图片/文件/语音/视频一律跳过并留痕
+                        let kinds: Vec<&str> = m.item_list.iter().map(|i| i.kind_name()).collect();
+                        tracing::debug!(bot = %bot_id, id = m.message_id, ?kinds, "微信消息非文本，跳过");
+                        continue;
+                    };
+                    let from = m.from_user_id.clone();
+                    if from.is_empty() {
+                        continue;
+                    }
+                    // 授权在 actor 统一做（D26）：这里必须先把 context_token 记下来，
+                    // 否则未绑定的用户连"未授权"都收不到。
+                    if stale_after_s > 0
+                        && m.create_time_ms > 0
+                        && now_ms() - m.create_time_ms > stale_after_s * 1000
+                    {
+                        continue;
+                    }
+                    if !m.context_token.is_empty() {
+                        ctx.lock()
+                            .unwrap()
+                            .insert(from.clone(), m.context_token.clone());
+                    }
+                    let kind = if text.starts_with('/') {
+                        InboundKind::Command
+                    } else {
+                        InboundKind::Text
+                    };
+                    let inbound = Inbound {
+                        channel: ChannelId("weixin".into()),
+                        conversation: from.clone(),
+                        actor: from.clone(),
+                        kind,
+                        text: Some(text),
+                        dedupe_key: m.message_id.to_string(),
+                        callback_id: None,
+                        msg: Some(MsgRef(m.message_id.to_string())),
+                        received_at: if m.create_time_ms > 0 { m.create_time_ms } else { now_ms() },
+                        attachments: Vec::new(),
+                    };
+                    if tx.send(inbound).await.is_err() {
+                        return Err(ChannelError::Closed);
+                    }
+                }
+            }
+            Err(ApiError::SessionExpired) => {
+                // 一个 bot 失效只停它自己；其它账号继续（多账号时尤其重要）
+                tracing::error!(bot = %bot_id, "微信会话失效（-14），需要重新执行 weixin-login");
+                return Err(ChannelError::BadRequest(format!("weixin session expired: {bot_id}")));
+            }
+            Err(e) => {
+                tracing::warn!(bot = %bot_id, error = %e, "微信轮询失败，2s 后重试");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
     }
 }
 
@@ -307,7 +403,7 @@ fn chunk(text: &str, max: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk, Credential};
+    use super::{Accounts, Credential, chunk};
 
     #[test]
     fn chunk_splits_by_chars() {
@@ -324,22 +420,53 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("weixin.json");
-        let c = Credential {
-            bot_token: "tok".into(),
-            bot_id: "b@im.bot".into(),
-            user_id: "u@im.wechat".into(),
-            base_url: "https://ilinkai.weixin.qq.com".into(),
+        let book = Accounts {
+            accounts: vec![Credential {
+                bot_token: "tok".into(),
+                bot_id: "b@im.bot".into(),
+                user_id: "u@im.wechat".into(),
+                base_url: "https://ilinkai.weixin.qq.com".into(),
+            }],
         };
-        c.save(&path).unwrap();
+        book.save(&path).unwrap();
 
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o640, "组可读，服务账号才能读");
         let dm = std::fs::metadata(dir.path()).unwrap();
         assert_eq!((meta.uid(), meta.gid()), (dm.uid(), dm.gid()), "归属跟随目录");
 
-        let back = Credential::load(&path).unwrap();
-        assert_eq!(back.bot_token, "tok");
-        assert_eq!(back.user_id, "u@im.wechat");
+        let back = Accounts::load(&path).unwrap();
+        assert_eq!(back.accounts.len(), 1);
+        assert_eq!(back.accounts[0].bot_token, "tok");
+        assert_eq!(back.accounts[0].user_id, "u@im.wechat");
+    }
+
+    /// 账号簿：同一个微信号重扫 → 覆盖那一条；新的人 → 追加；旧格式（单对象）也能读。
+    #[test]
+    fn accounts_merge_by_user_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weixin.json");
+        let mk = |token: &str, user: &str| Credential {
+            bot_token: token.into(),
+            bot_id: format!("{user}-bot"),
+            user_id: user.into(),
+            base_url: "https://x".into(),
+        };
+
+        let mut book = Accounts::default();
+        book.upsert(mk("t1", "a@im.wechat"));
+        book.upsert(mk("t2", "b@im.wechat"));
+        assert_eq!(book.accounts.len(), 2);
+        book.upsert(mk("t1-new", "a@im.wechat"));
+        assert_eq!(book.accounts.len(), 2, "同一个人不该变成两条");
+        assert_eq!(book.accounts[0].bot_token, "t1-new");
+        book.save(&path).unwrap();
+
+        // 旧格式：顶层是单个对象
+        std::fs::write(&path, r#"{"bot_token":"old","bot_id":"b","user_id":"c@im.wechat","base_url":"https://x"}"#).unwrap();
+        let legacy = Accounts::load(&path).unwrap();
+        assert_eq!(legacy.accounts.len(), 1);
+        assert_eq!(legacy.accounts[0].bot_token, "old");
     }
 
     #[test]
