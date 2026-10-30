@@ -13,7 +13,10 @@ ExecStart=/usr/local/bin/chuan hostd --socket /run/chuan/host.sock --config /etc
 # 目录 0755：chuan 要能穿进来（真正拦人的是 socket 的 0660 + SO_PEERCRED）
 RuntimeDirectory=chuan
 RuntimeDirectoryMode=0755
-StateDirectory=chuan
+# 不要写 StateDirectory=chuan：systemd 会把它 chown 给本 unit 的 User=（root），
+# 于是 /var/lib/chuan 变成 root:root 0750，chuan 失去 x 位 →
+# 沙盒与宿主 lane 绑 /ws 时 chdir 报 "Permission denied"（2026-10-30 板上）。
+# hostd 以 root 写审计/快照，本来就不需要"拥有"这个目录。
 # hostd 自己就是 root；这里只做防误伤，不要限制它的写权限（apt 要动 /usr /var /etc）
 PrivateTmp=yes
 ProtectHome=read-only

@@ -293,6 +293,10 @@ if [[ -z $R ]]; then
     else
       run systemctl start chuan-hostd.service
     fi
+    # 防御：历史上 hostd 的 unit 写过 StateDirectory=chuan，systemd 会把 /var/lib/chuan
+    # chown 成 root，导致 chuan 绑不上 /ws。每次装完再校正一次属主。
+    run chown "$SVC_USER:$SVC_GROUP" "$STATE"
+    run chmod 0750 "$STATE"
   fi
   if command -v loginctl >/dev/null 2>&1; then
     run loginctl enable-linger "$SVC_USER"
