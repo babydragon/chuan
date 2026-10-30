@@ -34,6 +34,13 @@ use offsets::StoreOffsets;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// 配置类错误：直接退出码 2。unit 里配了 `RestartPreventExitStatus=2`，
+/// 所以「凭据缺失 / 身份为空」这类**重启一万次也没用**的错误不会把服务打成 failed 循环。
+fn die_config(msg: impl std::fmt::Display) -> ! {
+    eprintln!("配置错误: {msg}");
+    std::process::exit(2);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 之前没装 subscriber：所有 tracing::* 都被丢掉了，卡住时无迹可查。
@@ -218,10 +225,9 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // 空身份表 = 谁都不能用（D26）。放在这里而不是 config::load，
     // 否则 `weixin-login` 也会被挡住——而那时恰恰还没有 id 可填。
     if cfg.identity.users.is_empty() {
-        return Err(
+        die_config(
             "[identity] 里没有任何绑定：至少要有一条 [[identity.user]] + channels = [\"telegram:<id>\"]，\
-             否则所有消息都会被当成未授权"
-                .into(),
+             否则所有消息都会被当成未授权",
         );
     }
 
@@ -229,15 +235,15 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     for name in &cfg.enabled_channels {
         match name.as_str() {
         "weixin" => {
-            let cred = Credential::load(std::path::Path::new(&cfg.weixin_credential))
-                .map_err(|e| {
-                    format!(
-                        "读取微信凭据 {} 失败：{e}（先跑 `chuan weixin-login`）",
-                        cfg.weixin_credential
-                    )
-                })?;
+            let cred = match Credential::load(std::path::Path::new(&cfg.weixin_credential)) {
+                Ok(c) => c,
+                Err(e) => die_config(format!(
+                    "读取微信凭据 {} 失败：{e}（先跑 `chuan weixin-login`）",
+                    cfg.weixin_credential
+                )),
+            };
             if cred.bot_token.is_empty() {
-                return Err(format!("微信凭据 {} 里没有 bot_token", cfg.weixin_credential).into());
+                die_config(format!("微信凭据 {} 里没有 bot_token", cfg.weixin_credential));
             }
             let api = Arc::new(WeixinHttpApi::new(
                 cred.bot_token.clone(),
@@ -266,7 +272,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
                 },
             )) as Arc<dyn Channel>);
         }
-        other => return Err(format!("未实现的通道：{other}").into()),
+        other => die_config(format!("未实现的通道：{other}")),
         }
     }
     println!(
