@@ -22,5 +22,9 @@ ProtectControlGroups=yes
 Restart=on-failure
 RestartSec=2
 
-# 没有 [Install]：由 install.sh 显式 enable，避免"装完就自动获得提权通道"
+# 必须要有 [Install]：`systemctl enable` 就是靠 WantedBy 建 .wants 链接，
+# 缺了它 enable 会失败、开机也不会自启（`--now` 只是当场起一次，重启就没了）。
+# "是否拥有提权通道"由 install.sh 是否执行 enable 决定，而不是靠删掉这一节。
+[Install]
+WantedBy=multi-user.target
 
