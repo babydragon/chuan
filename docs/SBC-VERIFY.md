@@ -262,15 +262,17 @@
 
 - [ ] socket 权限 `0660 root:chuan`；`sudo -u nobody` 连接被拒（`SO_PEERCRED` 生效）
 - [ ] 授权表**热加载**：改一行后不重启即生效；把 TOML 写坏 → 全部拒绝（fail-closed，不是回退旧版）
-- [ ] `apt-get install` 条目：审批卡上是 `-s` 预览，真落后 `dpkg -l <pkg>` 存在
+- [ ] 提权条目：`elevated(argv=["/usr/bin/apt-get","install","-s","figlet"])` 这类**只读预览**
+      应命中 `approval = "always"` 的条目、不弹卡；去掉 `-s` 真装时才弹卡
 - [ ] hostd 子进程 `env -i`：`/run/credentials/chuan.service` 不可读、环境里无 `*_KEY` / `*_FILE`
 - [ ] `host-access.jsonl`：权限 `0600`；L1 的行有 `via=host`/`grants`/`ephemeral`，
       L2 的行有 `grant_index`。验法：让 agent 跑一次 `host`（`systemctl --user list-timers`）
-      和一次 `pkg install`，然后 `tail -2` 看两条记录字段对不对
-- [ ] `pkg` 全链路：`plan` 拿到 `apt-get -s` 预览 → 审批卡上写着包名与"已预览"
-      → `install` 成功 → `/var/lib/chuan/pkg-snapshots/` 出现变更前清单
+      和一次 `elevated`（带 -s 或真装），然后 `tail -2` 看两条记录字段对不对
+- [ ] `elevated` 全链路：先跑 `apt-get install -s <pkg>` 看摘要（免卡）→ 再去掉 `-s` 真装
+      （弹卡，卡片写明"第几条授权、为什么、变更前快照命令"）→ 成功
+      → `/var/lib/chuan/pkg-snapshots/` 出现变更前清单
 - [ ] 没预览就 `install` → 直接被拒（不发请求到 hostd）
-- [ ] `systemctl disable --now chuan-hostd` 后 `pkg` 报"连接失败，确认 chuan-hostd 在跑"
+- [ ] `systemctl disable --now chuan-hostd` 后 `elevated` 报"连接失败，确认 chuan-hostd 在跑"
 
 **L3（`sys`）与自毁防护**：
 

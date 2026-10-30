@@ -84,7 +84,11 @@ pub struct ArgvGrant {
     /// 前缀匹配：`["/usr/bin/apt-get", "install"]` 命中 `apt-get install -y foo`
     pub argv: Vec<String>,
     pub approval: Approval,
-    /// 变更前快照类型（目前只有 `dpkg`）
+    /// 变更前快照的**命令**（data，不是发行版判断）：例如 `["/usr/bin/dpkg","--get-selections"]`、
+    /// `["/usr/bin/qlist","-I"]`。hostd 执行前跑它、把 stdout 存进 pkg-snapshots。
+    /// 旧写法 `snapshot = "dpkg"` 仍然认，等价于内置的 dpkg 命令。
+    pub snapshot_argv: Option<Vec<String>>,
+    /// 兼容旧配置：`snapshot = "dpkg"`
     pub snapshot: Option<String>,
     pub note: Option<String>,
 }
@@ -395,6 +399,8 @@ struct GrantFile {
     #[serde(default)]
     snapshot: Option<String>,
     #[serde(default)]
+    snapshot_argv: Option<Vec<String>>,
+    #[serde(default)]
     note: Option<String>,
 }
 
@@ -456,9 +462,30 @@ pub fn from_toml(text: &str) -> Result<Grants, String> {
                     gr.argv[0]
                 ));
             }
+            let snap_argv = match (&gr.snapshot_argv, gr.snapshot.as_deref()) {
+                (Some(a), None) => {
+                    if a.is_empty() || !a[0].starts_with('/') {
+                        return Err("host_elevated.grant.snapshot_argv 必须是绝对路径命令".into());
+                    }
+                    Some(a.clone())
+                }
+                (Some(_), Some(_)) => {
+                    return Err("snapshot 与 snapshot_argv 只能写一个（前者是旧的别名）".into())
+                }
+                (None, Some("dpkg")) => {
+                    Some(vec!["/usr/bin/dpkg".into(), "--get-selections".into()])
+                }
+                (None, Some(other)) => {
+                    return Err(format!(
+                        "未知的 snapshot 类型：{other}；请改用 snapshot_argv = [\"/path/to/cmd\"]"
+                    ))
+                }
+                (None, None) => None,
+            };
             g.elevated.push(ArgvGrant {
                 argv: gr.argv.clone(),
                 approval: Approval::parse_argv(gr.approval.as_deref())?,
+                snapshot_argv: snap_argv,
                 snapshot: gr.snapshot.clone(),
                 note: gr.note.clone(),
             });

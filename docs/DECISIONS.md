@@ -354,7 +354,8 @@ MITM（自签 CA 进沙盒信任库）；要覆盖两条 lane 就得在离线 ne
    **不** `--unshare-pid`，且 `--ro-bind /proc /proc`（要的是宿主进程视图，不是新 procfs）。
 2. **`HostElevated`（L2）**：同二进制第二单元 `chuan hostd`（`User=root`），unix socket +
    `SO_PEERCRED` 校验对端 uid；只做「argv 前缀匹配 → `env -i` 执行 → 写审计」，
-   **不含** `pkg.install` / `unit.start` 这类动词。
+   **不含** `pkg.install` / `unit.start` 这类动词（连"包管理器是谁"都不该由它判断——
+   客户端只发 argv，语义由授权表与 playbook 承载）。
 3. **`sys`（L3）**：只读观测。`/proc`、`/sys` 进程内直接读；`journalctl` / `systemctl show`
    这类固定命令由内核**自己**以 `env -i` 直连执行，不经 bwrap。理由不是"bwrap 连不上总线"
    （那是漏挂 `/run/systemd/system` 的误判，已修正），而是：**固定读接口不需要通用 lane**——

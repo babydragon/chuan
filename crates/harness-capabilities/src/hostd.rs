@@ -73,15 +73,19 @@ pub fn match_grant<'a>(grants: &'a Grants, argv: &[String]) -> Option<(usize, &'
 
 /// 变更前把已装包清单落盘。失败不阻断（宁可真跑失败也能回滚知道原状？不——失败就说明
 /// 状态不可知，仍然继续执行但记 WARN：apt 自己有事务性，回滚信息缺失是可见的代价）。
-fn take_dpkg_snapshot(dir: &Path) -> Option<String> {
+fn take_snapshot(dir: &Path, argv: &[String]) -> Option<String> {
     let _ = std::fs::create_dir_all(dir);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let path = dir.join(format!("{ts}.txt"));
-    match std::process::Command::new("/usr/bin/dpkg")
-        .arg("--get-selections")
+    if argv.is_empty() {
+        return None;
+    }
+    match std::process::Command::new(&argv[0]).args(&argv[1..]).env_clear()
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("LANG", "C.UTF-8")
         .output()
     {
         Ok(o) if o.status.success() => {
@@ -89,15 +93,15 @@ fn take_dpkg_snapshot(dir: &Path) -> Option<String> {
                 tracing::warn!(error = %e, "hostd: 写 dpkg 快照失败");
                 return None;
             }
-            tracing::info!(path = %path.display(), "hostd: 已存 dpkg 快照");
+            tracing::info!(path = %path.display(), argv = ?argv, "hostd: 已存变更前快照");
             Some(path.display().to_string())
         }
         Ok(o) => {
-            tracing::warn!(code = ?o.status.code(), "hostd: dpkg --get-selections 失败");
+            tracing::warn!(code = ?o.status.code(), argv = ?argv, "hostd: 快照命令失败");
             None
         }
         Err(e) => {
-            tracing::warn!(error = %e, "hostd: 跑不了 dpkg，跳过快照");
+            tracing::warn!(error = %e, argv = ?argv, "hostd: 跑不了快照命令");
             None
         }
     }
@@ -201,12 +205,8 @@ async fn handle(mut stream: UnixStream, cfg: &HostdConfig, grants: &GrantsCache)
                 }
                 Some((idx, g)) => {
                     // 快照不算提权：它由 hostd 自己决定，不需要主人再授权一条 argv。
-                    let snapshot = match g.snapshot.as_deref() {
-                        Some("dpkg") => take_dpkg_snapshot(&cfg.snapshot_dir),
-                        Some(other) => {
-                            tracing::warn!(other, "hostd: 未知的 snapshot 类型，跳过");
-                            None
-                        }
+                    let snapshot = match &g.snapshot_argv {
+                        Some(argv) => take_snapshot(&cfg.snapshot_dir, argv),
                         None => None,
                     };
                     let mut cmd = tokio::process::Command::new(&req.argv[0]);

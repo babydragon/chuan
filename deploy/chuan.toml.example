@@ -129,11 +129,22 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 # 要读别的目录就点名（只读、弹卡）：host(grant=["/home/you/report.csv"])
 # "/home" = { mode = "ro", approval = "once" }
 
-# 提权命令（hostd 实现前无效）：argv 前缀匹配，没有 shell
+# 提权授权：argv 前缀匹配，没有 shell。**换发行版只改这里，不改代码**。
+# `approval = "always"` 的条目免审批——只读预览（apt -s / emerge --pretend）适合放进去；
+# `once` 是真会改系统的动作。`snapshot_argv` 会在执行前把 stdout 存进 pkg-snapshots。
 # [[host_elevated.grant]]
 # argv = ["/usr/bin/apt-get", "install"]
 # approval = "once"
-# snapshot = "dpkg"
+# snapshot_argv = ["/usr/bin/dpkg", "--get-selections"]
+#
+# Gentoo 示意：
+# [[host_elevated.grant]]
+# argv = ["/usr/bin/emerge", "--pretend"]
+# approval = "always"
+# [[host_elevated.grant]]
+# argv = ["/usr/bin/emerge"]
+# approval = "once"
+# snapshot_argv = ["/usr/bin/qlist", "-I"]
 
 # 命名服务（可选）。kind = "http"（默认）或 "mcp"；token 只放凭据文件，权限 0600
 # 运行时新增的服务由 agent 通过 service 工具写到 <config>/services.d/<name>.toml，

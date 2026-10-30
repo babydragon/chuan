@@ -44,7 +44,7 @@ pub use proxy::{Mode as ProxyMode, ProxyConfig};
 pub use sandbox::{BwrapEnv, Mount, validate_mount};
 pub use skills::{PublishSkillTool, RollbackSkillTool, RunSkillTool, SkillCatalog};
 pub use tools::{
-    CapabilityTool, DelegateTool, ExecTool, HostTool, PkgTool, ReadTool, RememberTool, SysTool,
+    CapabilityTool, DelegateTool, ElevatedTool, ExecTool, HostTool, ReadTool, RememberTool, SysTool,
     WriteTool,
 };
 

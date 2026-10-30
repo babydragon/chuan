@@ -319,11 +319,21 @@ net = "host"        # 共享宿主 netns：能连 127.0.0.1 的代理与 D-Bus
 # "/var/lib/chuan/share" = { mode = "rw" }
 
 # 提权授权（argv 前缀，无 shell）。被 /etc/sudoers 取代的是这张表，不是脚本。
+# 提权授权：argv 前缀（不带 shell）。换发行版只改这里，不改代码。
 [[host_elevated.grant]]
 argv     = ["/usr/bin/apt-get", "install"]
 approval = "once"
-snapshot = "dpkg"
+snapshot_argv = ["/usr/bin/dpkg", "--get-selections"]   # 变更前存清单（旧写法 snapshot="dpkg" 等价）
 note     = "装系统包，替代 pip 编译"
+
+# Gentoo 的写法（示意）：预览免问，真装逐条问
+# [[host_elevated.grant]]
+# argv     = ["/usr/bin/emerge", "--pretend"]
+# approval = "always"
+# [[host_elevated.grant]]
+# argv     = ["/usr/bin/emerge"]
+# approval = "once"
+# snapshot_argv = ["/usr/bin/qlist", "-I"]
 
 [host.conversation]
 ttl_s = 1800        # 审批卡勾「本对话有效」时的上限
@@ -387,7 +397,7 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 - `chuan-hostd.service`：`User=root`，**有 `[Install] WantedBy=multi-user.target`**
   （没有它 `systemctl enable` 会失败、开机不自启——`--now` 只是当场起一次）；
   是否开提权通道由 `install.sh` 是否 enable 决定；不需要就
-  `systemctl disable --now chuan-hostd`（不影响聊天，只影响 `pkg`）；
+  `systemctl disable --now chuan-hostd`（不影响聊天，只影响 `elevated`）；
 - **`/run/user` 只读就够**：`systemctl --user` 只需要**连** `/run/user/<uid>/systemd/private`
   （socket `srw-rw-rw-`，只读挂载也能连），unit 文件写在 `/var/lib/chuan/.config`（`StateDirectory` 已放开）。
   **不要**在 unit 里写 `ReadWritePaths=/run/user/%U`——system 单元里 `%U` 恒为 `0`
