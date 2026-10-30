@@ -267,16 +267,23 @@ impl Grants {
 /// 规范化为绝对路径：拒绝 `..`（防"用相对路径跳出授权目录"），
 /// 不强制要求存在（会写入新文件的路径也要能判断），但会解析存在的部分。
 pub fn normalize(raw: &str) -> Result<PathBuf, String> {
+    normalize_for_uid(raw, unsafe { libc::getuid() })
+}
+
+/// `%U` 展开成**服务账号**的 uid，而不是"读这份配置的进程"的 uid。
+///
+/// 这一点踩过：`hostd` 以 root 运行，也读同一份 TOML；用 `getuid()` 会展开成
+/// `/run/user/0`，命中强制遮蔽 → 整张表判解析失败，连 `host_elevated` 一起废掉
+/// （2026-10-30 板上：elevated 报"授权表不可用 /run/user/0"）。
+pub fn normalize_for_uid(raw: &str, uid: u32) -> Result<PathBuf, String> {
     if raw.is_empty() {
         return Err("路径为空".into());
     }
     if raw.contains('\0') {
         return Err("路径包含 NUL".into());
     }
-    // `%U` → 当前 uid：配置里写 `/run/user/%U` 才能在服务账号下正确解析
-    // （写死 1000/996 一旦换账号就变成"授权了不存在的目录"）。
     let raw = if raw.contains("%U") {
-        raw.replace("%U", &unsafe { libc::getuid() }.to_string())
+        raw.replace("%U", &uid.to_string())
     } else {
         raw.to_owned()
     };
@@ -414,6 +421,11 @@ struct RootFile {
 
 /// 从一个 TOML 文本构造授权表。任何一项写错都整体拒绝（不做"部分生效"）。
 pub fn from_toml(text: &str) -> Result<Grants, String> {
+    from_toml_for_uid(text, unsafe { libc::getuid() })
+}
+
+/// `uid` 用于展开 `%U`：主进程传自己的 uid，`hostd` 传 `--allow-uid`。
+pub fn from_toml_for_uid(text: &str, uid: u32) -> Result<Grants, String> {
     let f: RootFile = toml::from_str(text).map_err(|e| e.to_string())?;
     let mut g = Grants {
         net_host: f.host.net.as_deref() == Some("host"),
@@ -430,7 +442,7 @@ pub fn from_toml(text: &str) -> Result<Grants, String> {
         }
     }
     for (raw, entry) in &f.host.path {
-        let p = normalize(raw)?;
+        let p = normalize_for_uid(raw, uid)?;
         ensure_not_protected(&p)?;
         ensure_no_symlink_components(&p)?;
         let mode = Mode::parse(entry.mode.as_deref().unwrap_or("ro"))?;
@@ -497,12 +509,22 @@ pub fn from_toml(text: &str) -> Result<Grants, String> {
 /// 带 mtime 缓存的授权表。改文件后**下一次调用**就生效，无需重启。
 pub struct GrantsCache {
     path: PathBuf,
+    /// 展开 `%U` 用的 uid（主进程 = 自己；hostd = --allow-uid）
+    uid: u32,
     state: Mutex<(Option<SystemTime>, Grants)>,
 }
 
 impl GrantsCache {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), state: Mutex::new((None, Grants::locked("尚未加载"))) }
+        Self::with_uid(path, unsafe { libc::getuid() })
+    }
+
+    pub fn with_uid(path: impl Into<PathBuf>, uid: u32) -> Self {
+        Self {
+            path: path.into(),
+            uid,
+            state: Mutex::new((None, Grants::locked("尚未加载"))),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -524,7 +546,7 @@ impl GrantsCache {
         }
         let fresh = match (&mtime, std::fs::read_to_string(&self.path)) {
             (None, _) => Grants::locked(format!("授权表 {} 不存在", self.path.display())),
-            (_, Ok(text)) => match from_toml(&text) {
+            (_, Ok(text)) => match from_toml_for_uid(&text, self.uid) {
                 Ok(g) => g,
                 Err(e) => Grants::locked(format!("{} 解析失败：{e}", self.path.display())),
             },

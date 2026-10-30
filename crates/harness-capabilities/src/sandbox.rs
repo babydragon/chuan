@@ -378,6 +378,21 @@ impl BwrapEnv {
                 }
             }
         }
+        // DNS：`/etc/resolv.conf` 常是指向 `/run/systemd/resolve/...` 的软链，而宿主 lane
+        // 不挂 `/run` → 软链悬空 → 所有域名解析失败（板上 2026-10-30：apt-get update 全 fetch 失败）。
+        // 只补它指向的那个目录，别把整个 /run 暴露（里面有 credentials 与 docker.sock）。
+        if h.net {
+            if let Ok(target) = std::fs::canonicalize("/etc/resolv.conf") {
+                let covered = h.mounts.iter().any(|m| target.starts_with(&m.dst));
+                if !covered {
+                    if let Some(dir) = target.parent() {
+                        if dir.exists() && !h.mounts.iter().any(|m| dir.starts_with(&m.dst)) {
+                            cmd.arg("--ro-bind").arg(dir).arg(dir);
+                        }
+                    }
+                }
+            }
+        }
         // 宿主进程视图：这是 L3 能读到别的进程的前提
         if !h.mounts.iter().any(|m| m.dst == Path::new("/proc")) {
             cmd.args(["--ro-bind", "/proc", "/proc"]);

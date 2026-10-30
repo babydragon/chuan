@@ -256,6 +256,8 @@
 - [ ] `/etc/chuan/secrets` 是空目录、`$CREDENTIALS_DIRECTORY` 不存在：
       `ls -A /etc/chuan/secrets; echo $CREDENTIALS_DIRECTORY`
 - [ ] 能连宿主 loopback 的代理：`curl -x http://127.0.0.1:7890 -sI https://example.com`
+- [ ] **DNS**：`host` 里 `getent hosts baidu.com` 有结果（2026-10-30 曾因 `/etc/resolv.conf`
+      是指向 `/run/systemd/resolve/...` 的软链、而 `/run` 没挂而全部失败）
 - [ ] 未授权路径的报错是**结构化**的（`NotGranted` + 精确路径），不是泛泛的 `Permission denied`
 
 **L2（hostd）**：

@@ -296,7 +296,8 @@ pub async fn serve(cfg: HostdConfig) -> Result<(), String> {
         std::os::unix::fs::PermissionsExt::from_mode(0o660),
     );
 
-    let grants = Arc::new(GrantsCache::new(&cfg.config));
+    // 用 --allow-uid 展开 `%U`：hostd 是 root，拿自己 uid 展开会得到 /run/user/0
+    let grants = Arc::new(GrantsCache::with_uid(&cfg.config, cfg.allow_uid));
     tracing::info!(
         socket = %cfg.socket.display(),
         config = %cfg.config.display(),

@@ -404,6 +404,9 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
   （指"运行 service manager 的用户"），会变成 `/run/user/0`，启动直接 `226/NAMESPACE`；
   真要可写就写死实际 uid。bwrap 的 `--bind` 也不清除继承的 `MS_RDONLY`（实测），
   所以"挂成 rw"本身在只读父挂载下不成立。
+- **`%U` 按服务账号展开**：`hostd` 以 root 运行也读同一份 TOML，若用"读的人"的 uid 会展开成
+  `/run/user/0`，命中强制遮蔽 → **整张表**判解析失败（连 `host_elevated` 一起废）；
+  现在 `hostd` 用 `--allow-uid` 展开；
 - 热加载：授权表按 mtime 读，改完**不用** `systemctl restart chuan`——重启会打断 agent 正在跑的那一轮。
   每次（重新）加载都会写一行 `INFO ... host 授权表已加载/重新加载 path=… paths=N elevated=M`；
   解析失败写 `WARN ... 加载失败（全部拒绝）`。排查"改了没生效"先看这一行，再用
