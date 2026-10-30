@@ -7,7 +7,7 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 预发布到 `v0.1.0-rc.25`。
+> 预发布到 `v0.1.0-rc.26`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；
 > **通知类流程 P4.7：A 由主人写 SOP（零代码），B/C 触发式暂不做**（见 D23）。

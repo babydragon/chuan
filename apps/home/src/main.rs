@@ -120,9 +120,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n登录成功：{credential_path}（0600）");
         println!("  bot  : {}", cred.bot_id);
         println!("  主人 : {}", cred.user_id);
+        println!("\n下一步（两处配置，改完重启）：");
+        println!("  1) [channels] enabled 里加上 \"weixin\"");
         println!(
-            "\n把 [channels] enabled 加上 \"weixin\"，并把主人 id 写进 [weixin] allowed_users，然后重启。"
+            "  2) [identity] 里对应的人，channels 加上 \"weixin:{}\"",
+            cred.user_id
         );
+        println!("  3) systemctl restart chuan");
         return Ok(());
     }
 

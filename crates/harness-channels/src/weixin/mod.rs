@@ -45,6 +45,8 @@ impl Credential {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
+    /// 写凭据。**归属跟随所在目录**：`/var/lib/chuan` 属于服务账号，文件就归它，
+    /// 所以用 root 跑登录也不用事后 chown。权限 0640（组可读，配合 0750 的目录）。
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -53,7 +55,14 @@ impl Credential {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
+            if let Some(dir) = path.parent() {
+                if let Ok(meta) = std::fs::metadata(dir) {
+                    use std::os::unix::fs::MetadataExt;
+                    // 目录属主是谁，文件就归谁（root 跑也能被 chuan 读）
+                    let _ = std::os::unix::fs::chown(path, Some(meta.uid()), Some(meta.gid()));
+                }
+            }
         }
         Ok(())
     }
@@ -298,7 +307,7 @@ fn chunk(text: &str, max: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::chunk;
+    use super::{chunk, Credential};
 
     #[test]
     fn chunk_splits_by_chars() {
@@ -307,6 +316,30 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].chars().count(), 4);
         assert_eq!(parts.concat(), t);
+    }
+
+    /// 凭据文件：0640，归属跟随所在目录——这样用 root 跑登录也不用事后 chown。
+    #[test]
+    fn credential_save_inherits_dir_owner() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("weixin.json");
+        let c = Credential {
+            bot_token: "tok".into(),
+            bot_id: "b@im.bot".into(),
+            user_id: "u@im.wechat".into(),
+            base_url: "https://ilinkai.weixin.qq.com".into(),
+        };
+        c.save(&path).unwrap();
+
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640, "组可读，服务账号才能读");
+        let dm = std::fs::metadata(dir.path()).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), (dm.uid(), dm.gid()), "归属跟随目录");
+
+        let back = Credential::load(&path).unwrap();
+        assert_eq!(back.bot_token, "tok");
+        assert_eq!(back.user_id, "u@im.wechat");
     }
 
     #[test]

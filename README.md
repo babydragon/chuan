@@ -505,17 +505,23 @@ mounts = [
 **怎么开**：
 
 ```bash
-# 1) 扫码（终端会画出二维码，8 分钟有效）
-sudo -u chuan chuan weixin-login
-#    成功后会打印 bot id 与「主人 id」，并写入 [weixin] credential_file（0600）
+# 0) 先指定凭据路径（绝对路径，别用 ~：服务账号的 HOME 不是你的）
+#    [weixin]
+#    credential_file = "/var/lib/chuan/weixin.json"
 
-# 2) 把它加进身份与通道列表
-#    [[identity.user]] channels = [..., "weixin:o9cq...@im.wechat"]
+# 1) 扫码（终端会画出二维码，8 分钟有效）
+sudo chuan --config /etc/chuan/chuan.toml weixin-login
+
+# 2) 按它打印的两行改配置（主人 id 会打印出来）
 #    [channels] enabled = ["telegram", "weixin"]
+#    [[identity.user]] channels = [..., "weixin:o9cq...@im.wechat"]
 
 # 3) 重启
 sudo systemctl restart chuan
 ```
+
+> 凭据文件的**归属跟随所在目录**（`/var/lib/chuan` 属于 `chuan`），权限 0640。
+> 所以用 `sudo` 跑登录即可，**不需要事后 chown/chmod**；重新登录只会覆盖同一个文件。
 
 **当前能力边界**（文本优先，其余逐步补）：
 
