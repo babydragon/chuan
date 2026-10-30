@@ -150,6 +150,8 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
                                 text: cb.data,
                                 dedupe_key: u.update_id.to_string(),
                                 callback_id: Some(cb.id),
+                                // 回调挂在自己发的卡片上，没有"用户那条消息"可标记
+                                msg: None,
                                 received_at: Self::now_secs() * 1000,
                                 attachments: Vec::new(),
                             };
@@ -211,6 +213,7 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
                             text: Some(text.clone()),
                             dedupe_key: u.update_id.to_string(),
                             callback_id: None,
+                            msg: Some(MsgRef(msg.message_id.to_string())),
                             received_at: msg.date * 1000,
                             attachments,
                         };
@@ -362,6 +365,18 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
                 .await
                 .map_err(map_err),
         }
+    }
+
+    async fn react(
+        &self,
+        conversation: &str,
+        msg: &MsgRef,
+        emoji: &str,
+    ) -> Result<(), ChannelError> {
+        let chat: i64 = conversation
+            .parse()
+            .map_err(|_| ChannelError::BadRequest("bad chat".into()))?;
+        self.api.set_reaction(chat, msg, emoji).await.map_err(map_err)
     }
 
     async fn typing(&self, conversation: &str) -> Result<(), ChannelError> {

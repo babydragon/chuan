@@ -236,6 +236,21 @@ impl Drop for RunScope {
     }
 }
 
+/// 状态反应的四个 emoji（D24）。都在 Telegram 的 73 个白名单内；
+/// ⏳/✅/❌ 不在白名单，用了会被 400 REACTION_INVALID 拒掉。
+const EMOJI_QUEUED: &str = "😐";
+const EMOJI_RUNNING: &str = "👀";
+const EMOJI_OK: &str = "👍";
+const EMOJI_FAIL: &str = "👎";
+
+/// 一轮 run 的结局，只用于决定状态反应。`Cancelled` 是清空而不是失败：
+/// 用户主动取消既不是成功也不是失败。
+enum RunEnd {
+    Done,
+    Failed,
+    Cancelled,
+}
+
 /// 终稿重发预算：run 已经结束，等满 retry_after 不会拖累 run（与流式刷新不同）。
 const FINAL_ATTEMPTS: usize = 3;
 const FINAL_WAIT_CAP_MS: u64 = 60_000;
@@ -314,6 +329,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             tracing::warn!(tasks = resumed, "后台任务被重启打断，已通知主人");
         }
         let mut tasks = tokio::task::JoinSet::new();
+        // 每个会话的"在跑 + 排队"计数。只在 `run()` 里维护：入站全从这里进，
+        // 拿它判"是不是排队"比看 `runs` 可靠（`runs` 要等拿到锁才写入，同批消息会漏判）。
+        let mut inflight: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>> =
+            std::collections::HashMap::new();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -341,9 +360,28 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     } else if inb.kind == InboundKind::Callback {
                         self.handle_callback(inb).await;
                     } else {
+                        // 会话里已经有别的 run（在跑或排队）→ 这条要等锁。
+                        // 先把"未开始"标出来，否则界面上只看到上一条在动（D24）。
+                        let counter = Arc::clone(
+                            inflight
+                                .entry(inb.conversation.clone())
+                                .or_insert_with(|| Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+                        );
+                        let ahead = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if ahead > 0 {
+                            let me = Arc::clone(&self);
+                            let conv = inb.conversation.clone();
+                            let m = inb.msg.clone();
+                            tokio::spawn(async move {
+                                me.mark(&conv, m.as_ref(), EMOJI_QUEUED).await;
+                            });
+                        }
                         let me = Arc::clone(&self);
+                        let done = Arc::clone(&counter);
                         tasks.spawn(async move {
-                            if let Err(e) = me.handle_run(inb).await {
+                            let r = me.handle_run(inb).await;
+                            done.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            if let Err(e) = r {
                                 tracing::warn!(error = %e, "run failed");
                             }
                         });
@@ -948,14 +986,39 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         }
     }
 
+    /// best-effort 打状态反应：失败只记 trace，绝不影响 run（D24）。
+    /// `emoji` 为空表示清空（取消时用）。
+    async fn mark(&self, conversation: &str, msg: Option<&MsgRef>, emoji: &str) {
+        let Some(m) = msg else { return };
+        if let Err(e) = self.channel.react(conversation, m, emoji).await {
+            tracing::debug!(error = %e, emoji, "状态反应失败");
+        }
+    }
+
+    /// 收尾时统一打状态：所有 `?` 早退、panic 之外的分支都从这里出去（D24）。
     async fn handle_run(&self, inb: Inbound) -> Result<(), ChannelError> {
+        let msg = inb.msg.clone();
+        let conv = inb.conversation.clone();
+        let res = self.handle_run_inner(inb).await;
+        let emoji = match &res {
+            Ok(RunEnd::Done) => EMOJI_OK,
+            Ok(RunEnd::Failed) | Err(_) => EMOJI_FAIL,
+            Ok(RunEnd::Cancelled) => "", // 取消 = 清空
+        };
+        self.mark(&conv, msg.as_ref(), emoji).await;
+        res.map(|_| ())
+    }
+
+    async fn handle_run_inner(&self, inb: Inbound) -> Result<RunEnd, ChannelError> {
         if let Some(msg) = self.budget_exceeded().await {
             self.reply(&inb.conversation, &format!("⛔ {msg}")).await?;
-            return Ok(());
+            return Ok(RunEnd::Failed);
         }
         let key = inb.conversation.clone();
         let lock = self.lock_for(&key);
         let _guard = lock.lock().await;
+        // 拿到锁才开始真正处理；此前的状态是"未开始"（D24）
+        self.mark(&inb.conversation, inb.msg.as_ref(), EMOJI_RUNNING).await;
 
         // 收到即显示"输入中"，之后每 4s 续一次（Telegram 的 typing 约 5s 过期）
         let typing_cancel = CancellationToken::new();
@@ -1006,7 +1069,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Err(_) => {
                 tracing::warn!(conv = %inb.conversation, "epoch 读取超时");
                 let _ = self.reply(&inb.conversation, "⏱ 读取会话状态超时，请稍后再试（已取消）。").await;
-                return Ok(());
+                return Ok(RunEnd::Cancelled);
             }
         };
         let conv = ConversationId(format!("{}:{}:{}", inb.channel.0, inb.conversation, epoch));
@@ -1249,9 +1312,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
 
         match outcome {
             Ok(o) if o.status == RunStatus::Cancelled => {
-                self.reply(&inb.conversation, "已取消。").await
+                self.reply(&inb.conversation, "已取消。").await.map(|_| RunEnd::Cancelled)
             }
-            Ok(_) => Ok(()),
+            Ok(o) if o.status == RunStatus::Failed => Ok(RunEnd::Failed),
+            Ok(_) => Ok(RunEnd::Done),
             Err(e) => {
                 tracing::error!(error = %e, "run failed");
                 let msg = match &e {
@@ -1280,7 +1344,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     ),
                     other => format!("出错了：{other}"),
                 };
-                self.reply(&inb.conversation, &msg).await
+                self.reply(&inb.conversation, &msg).await.map(|_| RunEnd::Failed)
             }
         }
     }
@@ -1497,6 +1561,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 text: Some(format!("（定时任务）{text}")),
                 dedupe_key: format!("task-{now}"),
                 callback_id: None,
+                // 定时任务合成：平台上没有对应的那条消息，不挂状态反应（D24）
+                msg: None,
                 received_at: now,
             attachments: Vec::new(),
             };
@@ -1671,6 +1737,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 )),
                 dedupe_key: format!("polish-{now}"),
                 callback_id: None,
+                msg: None,
                 received_at: now,
                 attachments: Vec::new(),
             };

@@ -15,6 +15,10 @@ pub struct FakeApi {
     pub sent: Mutex<Vec<(i64, String)>>,
     pub edited: Mutex<Vec<(i64, String)>>,
     pub deny_edit: Mutex<bool>,
+    /// 收到过的状态反应：(chat, message_id, emoji)；emoji 为空表示清空
+    pub reactions: Mutex<Vec<(i64, String, String)>>,
+    /// 让 set_reaction 失败（验证 best-effort：失败不能影响 run）
+    pub fail_reaction: Mutex<bool>,
     /// 下一次调用返回 429
     pub rate_limit_once: Mutex<Option<u32>>,
     /// 下一次编辑返回 429
@@ -76,6 +80,17 @@ impl Api for FakeApi {
     }
 
     async fn answer_callback(&self, _id: &str, _text: &str) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    async fn set_reaction(&self, chat: i64, msg: &MsgRef, emoji: &str) -> Result<(), ApiError> {
+        if *self.fail_reaction.lock().unwrap() {
+            return Err(ApiError::BadRequest("REACTION_INVALID".into()));
+        }
+        self.reactions
+            .lock()
+            .unwrap()
+            .push((chat, msg.0.clone(), emoji.to_owned()));
         Ok(())
     }
 

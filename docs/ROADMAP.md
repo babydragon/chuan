@@ -7,7 +7,7 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 预发布到 `v0.1.0-rc.19`。
+> 预发布到 `v0.1.0-rc.20`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；
 > **通知类流程 P4.7：A 由主人写 SOP（零代码），B/C 触发式暂不做**（见 D23）。
@@ -383,6 +383,43 @@ playbook 能不能承载流程、`remind` 的三形态够不够用、记忆的�
 - 可选：`remind.notify = "service:dingtalk"` 零 LLM 路由（触发条件见 D23）
 
 **明确不做**：把通知流程写成技能（判断类工作脚本化只会更脆）；让技能进宿主（D22）。
+
+---
+
+## 5.11 P4.8 · 消息状态回执（✅ 开发机已实现，待上板）
+
+**交付**：一次连发多条时，在 Telegram 上直接看出**每条**的处理状态
+（未开始 `😐` / 处理中 `👀` / 成功 `👍` / 失败 `👎`）。取舍见 `DECISIONS.md` D24，
+契约见 `INTERFACES.md §1.1`。
+
+**为什么需要**：会话内串行（按 `conversation` 的互斥锁），后到的消息在内存里排队，
+界面上却只看到上一条回复在动——多条消息时无法判断"哪些还没开始"。
+
+- `Inbound.msg: Option<MsgRef>`：平台侧消息句柄；合成消息为 `None`
+- `Channel::react()`：默认空实现，其他通道零改动
+- Telegram：`setMessageReaction`（emoji 白名单 73 个，`⏳/✅/❌` 不可用）
+- 三个锚点：收到（判该会话是否已有在跑的 run）→ 拿到锁 → 收尾
+- 取消 = 清空；预算超限 = 失败
+- **微信不做**：iLink 无 reaction 接口，且每条出站消息占 10 条额度中的 1 条
+
+**测试**（`crates/harness-store/tests/runner_flow.rs`，5 条全绿）：
+`reactions_track_queue_then_success`（排队 → 处理中 → 成功）/
+`failed_run_marks_fail`（失败 → 👎）/ `cancel_clears_reaction`（取消 → 清空）/
+`synthesized_inbound_has_no_reaction`（`msg=None` 零反应）/
+`reaction_failure_does_not_break_run`（反应失败不影响送达）。
+
+> 写取消用例时踩到一个坑：actor 的收消息循环必须**并发**跑着（`tokio::spawn`），
+> 否则消息只躺在队列里、run 根本不会开始；另外等"真的开始执行工具"要用工具自带的信号位，
+> 固定 `sleep(250ms)` 在 debug 构建下会抢跑（`runs` 里的令牌是准备阶段末尾才写入的）。
+
+**验收**：
+
+1. 连发 3 条：第 1 条 `👀`，第 2、3 条 `😐`
+2. 第 1 条结束变 `👍`，第 2 条转 `👀`，第 3 条仍 `😐`
+3. 让一轮必然失败（如临时改坏 key）→ 该条 `👎`
+4. `/cancel` 取消 → 该条的 reaction 被**清空**（不是 `👎`）
+5. 定时任务触发的 run 不加任何 reaction（`msg = None`）
+6. 反应失败（如 `REACTION_INVALID`）不改变 run 结果，只留一条 trace
 
 ---
 

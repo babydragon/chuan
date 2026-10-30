@@ -118,6 +118,8 @@ pub trait Api: Send + Sync {
         html: bool,
     ) -> Result<EditOutcome, ApiError>;
     async fn answer_callback(&self, id: &str, text: &str) -> Result<(), ApiError>;
+    /// 给某条消息挂状态反应；`emoji` 为空表示清空（D24）
+    async fn set_reaction(&self, chat: i64, msg: &MsgRef, emoji: &str) -> Result<(), ApiError>;
     async fn set_my_commands(&self, commands: &[(String, String)]) -> Result<(), ApiError>;
     async fn send_chat_action(&self, chat: i64, action: &str) -> Result<(), ApiError>;
     async fn delete_message(&self, chat: i64, msg: &MsgRef) -> Result<(), ApiError>;

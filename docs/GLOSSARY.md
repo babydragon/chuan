@@ -13,6 +13,7 @@
 | **内核** | Kernel / `harness-kernel` | 编排、状态机、治理接口；不碰 IO、不含业务 | 引擎、runtime |
 | **引擎** | Engine / `harness-engine` | `TurnDriver` 的实现：请求构造、SSE 解析、usage 提取 | 内核、客户端库 |
 | **通道** | Channel | 传输适配器：收消息、发/编辑消息、声明能力 | 网关、适配器、connector |
+| **状态反应** | Reaction / `react()` | 通道给某条**入站**消息挂表情的能力，用于表示"处理到哪一步"；无此能力的通道静默 no-op（D24） | 已读回执、表情回执 |
 | **存储** | Store | 持久化后端：事务、seq、CAS、迁移 | 数据库层、DAO |
 | **检索器** | Retriever | 索引与召回；返回 `doc_id` 与分数构成 | 搜索、向量库 |
 | **执行环境** | ExecutionEnv | 工具执行的抽象（接口） | 沙盒（沙盒是它的实现） |

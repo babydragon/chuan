@@ -370,6 +370,10 @@ struct FakeChannel {
     cleared: Mutex<Vec<String>>,
     /// 接下来 N 次 deliver 返回 429（用来验证限流后仍能送达）
     fail_deliver_times: Mutex<usize>,
+    /// 状态反应：(message_id, emoji)；emoji 为空表示清空（D24）
+    reactions: Mutex<Vec<(String, String)>>,
+    /// 让 react 永远失败（验证 best-effort）
+    fail_reactions: Mutex<bool>,
 }
 
 fn view_text(v: &View) -> String {
@@ -431,6 +435,16 @@ impl harness_kernel::Channel for FakeChannel {
     }
     async fn ack(&self, _cb: &str, text: &str) -> Result<(), ChannelError> {
         self.acks.lock().unwrap().push(text.to_owned());
+        Ok(())
+    }
+    async fn react(&self, _c: &str, msg: &MsgRef, emoji: &str) -> Result<(), ChannelError> {
+        if *self.fail_reactions.lock().unwrap() {
+            return Err(ChannelError::BadRequest("REACTION_INVALID".into()));
+        }
+        self.reactions
+            .lock()
+            .unwrap()
+            .push((msg.0.clone(), emoji.to_owned()));
         Ok(())
     }
     async fn deliver_prompt(
@@ -497,6 +511,7 @@ async fn actor_turns_inbound_into_reply() {
         text: Some("说点什么".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -560,6 +575,7 @@ async fn final_message_is_retried_after_rate_limit_window() {
         text: Some("说点什么".into()),
         dedupe_key: "u-rl".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -621,6 +637,7 @@ async fn actor_answers_slash_status() {
         text: Some("/status".into()),
         dedupe_key: "u2".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -702,6 +719,7 @@ async fn over_budget_blocks_run_with_visible_message() {
         text: Some("你好".into()),
         dedupe_key: "u-budget".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -877,6 +895,7 @@ async fn cancel_stops_background_tasks() {
         text: Some("/cancel".into()),
         dedupe_key: "u-cancel-bg".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1150,6 +1169,7 @@ async fn agents_show_dumps_child_transcript() {
         text: Some("/agents show sub:fake:1000:0#1".into()),
         dedupe_key: "u-show".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1209,6 +1229,7 @@ async fn actor_answers_slash_agents() {
         text: Some("/agents".into()),
         dedupe_key: "u-agents".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1272,6 +1293,7 @@ async fn path_like_command_is_treated_as_text() {
         text: Some("/ws/demo 里那个脚本遇到空行会崩，帮我修好".into()),
         dedupe_key: "u-path".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1286,6 +1308,7 @@ async fn path_like_command_is_treated_as_text() {
         text: Some("/statsu".into()),
         dedupe_key: "u-typo".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1346,6 +1369,7 @@ async fn actor_answers_slash_prompt() {
         text: Some("/prompt".into()),
         dedupe_key: "u-prompt".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1406,6 +1430,7 @@ async fn actor_answers_slash_usage() {
         text: Some("/usage".into()),
         dedupe_key: "u-usage".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1695,6 +1720,7 @@ async fn role_catalog_is_visible_and_hot_loaded() {
         text: Some("帮我安排一下".into()),
         dedupe_key: "u-role-cat".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -1977,6 +2003,7 @@ async fn child_agent_is_isolated_and_cannot_self_modify() {
         text: Some("派活".into()),
         dedupe_key: "u-deleg".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -2091,6 +2118,7 @@ async fn approval_gate_allows_after_callback() {
         text: Some("跑一下".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2117,6 +2145,7 @@ async fn approval_gate_allows_after_callback() {
         text: Some(data),
         dedupe_key: "u2".into(),
         callback_id: Some("cb1".into()),
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2235,6 +2264,7 @@ async fn done_run_with_writes_offers_publish_button() {
         text: Some("写个脚本".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2300,6 +2330,7 @@ async fn skill_button_starts_distill_run() {
         text: Some("skill:run-1".into()),
         dedupe_key: "cb1".into(),
         callback_id: Some("cb1".into()),
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2414,6 +2445,7 @@ async fn clicking_publish_button_removes_keyboard() {
         text: Some("写个脚本".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2437,6 +2469,7 @@ async fn clicking_publish_button_removes_keyboard() {
         text: Some("skill:fake:1000:0-u1".into()),
         dedupe_key: "cb1".into(),
         callback_id: Some("cb1".into()),
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2601,6 +2634,7 @@ async fn run_one_tool_call(
         text: Some("做".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -2693,6 +2727,7 @@ async fn slash_facts_empty_and_help_lists_commands() {
             text: Some((*text).into()),
             dedupe_key: format!("c{i}"),
             callback_id: None,
+            msg: None,
             received_at: 0,
             attachments: Vec::new(),
         })
@@ -3099,6 +3134,7 @@ async fn approval_card_uses_tool_hint() {
         text: Some("做".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -3214,6 +3250,7 @@ async fn reminders_are_per_user() {
         text: Some("/reminders".into()),
         dedupe_key: "c1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
             attachments: Vec::new(),
     })
@@ -3399,6 +3436,7 @@ async fn tool_catalog_is_injected_into_system_prompt() {
         text: Some("hi".into()),
         dedupe_key: "u1".into(),
         callback_id: None,
+        msg: None,
         received_at: 0,
         attachments: Vec::new(),
     })
@@ -3412,4 +3450,230 @@ async fn tool_catalog_is_injected_into_system_prompt() {
     assert!(s.contains("BASE"), "{s}");
     assert!(s.contains("MCP-TOOLS-MARKER"), "外部工具目录没注入: {s}");
     assert!(s.contains("HOST-PATHS-MARKER"), "宿主路径块没注入: {s}");
+}
+
+// ---------------- 状态反应（D24）----------------
+
+fn inbound_with_msg(id: &str, platform_msg: Option<&str>, text: &str) -> Inbound {
+    Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Text,
+        text: Some(text.into()),
+        dedupe_key: id.into(),
+        callback_id: None,
+        msg: platform_msg.map(|m| MsgRef(m.into())),
+        received_at: 0,
+        attachments: Vec::new(),
+    }
+}
+
+fn actor_with(steps: Vec<Step>, channel: &Arc<FakeChannel>) -> Arc<ConversationActor<EphemeralStore, FakeDriver>> {
+    actor_with_registry(steps, channel, harness_kernel::ToolRegistry::new())
+}
+
+fn actor_with_registry(
+    steps: Vec<Step>,
+    channel: &Arc<FakeChannel>,
+    registry: harness_kernel::ToolRegistry,
+) -> Arc<ConversationActor<EphemeralStore, FakeDriver>> {
+    let store = Arc::new(EphemeralStore::new());
+    Arc::new(ConversationActor::new(
+        store,
+        Arc::new(FakeDriver::new(steps)),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    ))
+}
+
+fn done_step(text: &str) -> Step {
+    Step::Done { text: text.into(), finish: FinishReason::Stop }
+}
+
+/// 连发三条：后两条先标"未开始"，每条都经历 👀 → 👍。
+#[tokio::test]
+async fn reactions_track_queue_then_success() {
+    let channel = Arc::new(FakeChannel::default());
+    let actor = actor_with(
+        vec![done_step("一"), done_step("二"), done_step("三")],
+        &channel,
+    );
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    for i in 1..=3 {
+        tx.send(inbound_with_msg(&format!("u{i}"), Some(&format!("m{i}")), "说点什么"))
+            .await
+            .unwrap();
+    }
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let r = channel.reactions.lock().unwrap().clone();
+    assert!(r.iter().any(|(m, e)| m == "m2" && e == "😐"), "第二条应先标未开始：{r:?}");
+    assert!(r.iter().any(|(m, e)| m == "m3" && e == "😐"), "第三条应先标未开始：{r:?}");
+    for m in ["m1", "m2", "m3"] {
+        let seq: Vec<&str> = r.iter().filter(|(id, _)| id == m).map(|(_, e)| e.as_str()).collect();
+        assert!(seq.contains(&"👀"), "{m} 应经过处理中：{seq:?}");
+        assert_eq!(seq.last(), Some(&"👍"), "{m} 最终应是成功：{seq:?}");
+    }
+}
+
+/// 跑失败 → 👎。
+#[tokio::test]
+async fn failed_run_marks_fail() {
+    let channel = Arc::new(FakeChannel::default());
+    let actor = actor_with(vec![], &channel); // 没有 step → driver 报 exhausted
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(inbound_with_msg("u1", Some("m1"), "说点什么")).await.unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let r = channel.reactions.lock().unwrap().clone();
+    assert_eq!(r.last().map(|(_, e)| e.as_str()), Some("👎"), "{r:?}");
+}
+
+/// 合成的入站（msg = None）不该有任何状态反应。
+#[tokio::test]
+async fn synthesized_inbound_has_no_reaction() {
+    let channel = Arc::new(FakeChannel::default());
+    let actor = actor_with(vec![done_step("好")], &channel);
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(inbound_with_msg("u1", None, "（定时任务）提醒")).await.unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    assert!(channel.reactions.lock().unwrap().is_empty());
+    assert!(!channel.delivered.lock().unwrap().is_empty(), "回复仍应送达");
+}
+
+/// 反应失败是 best-effort：不影响 run 结果，也不影响回复送达。
+#[tokio::test]
+async fn reaction_failure_does_not_break_run() {
+    let channel = Arc::new(FakeChannel::default());
+    *channel.fail_reactions.lock().unwrap() = true;
+    let actor = actor_with(vec![done_step("照常回复")], &channel);
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(inbound_with_msg("u1", Some("m1"), "说点什么")).await.unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let all = channel.delivered.lock().unwrap().join("\n");
+    assert!(all.contains("照常回复"), "{all}");
+}
+
+/// 慢工具：`Pure` 免审批，进入 execute 就置位，让测试有确定性的起跑信号。
+struct SlowPureTool {
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Tool for SlowPureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec { name: "slow".into(), description: "slow".into(), parameters: serde_json::json!({}) }
+    }
+    fn effect(&self) -> EffectClass {
+        EffectClass::Pure
+    }
+    async fn execute(&self, _a: serde_json::Value, _c: &ToolCtx<'_>) -> Result<ToolOutput, ToolError> {
+        self.started.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        Ok(ToolOutput::default())
+    }
+}
+
+/// 取消 → 清空（既不是成功也不是失败）。走 actor 的 `/cancel` 命令路径，
+/// 而不是直接 cancel token，确保覆盖的是真实链路。
+#[tokio::test]
+async fn cancel_clears_reaction() {
+    let channel = Arc::new(FakeChannel::default());
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(SlowPureTool { started: Arc::clone(&started) }));
+    let actor = actor_with_registry(
+        vec![Step::Tools {
+            text: String::new(),
+            calls: vec![harness_kernel::ToolCallRequest {
+                call: CallId::from("call-slow"),
+                name: "slow".into(),
+                args: serde_json::json!({}),
+            }],
+        }],
+        &channel,
+        registry,
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    // actor 的收消息循环必须**并发**跑着，否则消息只是躺在队列里，
+    // run 永远不会开始（后面还要在它执行中发 /cancel）。
+    let running = {
+        let a = Arc::clone(&actor);
+        tokio::spawn(async move { a.run(rx, CancellationToken::new()).await })
+    };
+    tx.send(inbound_with_msg("u1", Some("m1"), "慢任务")).await.unwrap();
+    // 等 run 真的开始执行工具再取消：`runs` 里的令牌是在准备阶段末尾才写入的，
+    // 固定 sleep 一个值在 debug 构建下会抢跑（第一次写这条测试就踩了：250ms 时令牌还没进表）。
+    for _ in 0..200 {
+        if started.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        started.load(std::sync::atomic::Ordering::SeqCst),
+        "run 没能在 10s 内进入工具执行"
+    );
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Command,
+        text: Some("/cancel".into()),
+        dedupe_key: "u2".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), running)
+        .await
+        .expect("取消应迅速收尾")
+        .unwrap()
+        .unwrap();
+
+    let r = channel.reactions.lock().unwrap().clone();
+    let seq: Vec<&str> = r.iter().filter(|(m, _)| m == "m1").map(|(_, e)| e.as_str()).collect();
+    assert!(seq.contains(&"👀"), "应经过处理中：{seq:?}");
+    assert_eq!(seq.last(), Some(&""), "取消应清空 reaction：{seq:?}");
+    assert!(!seq.contains(&"👎"), "取消不是失败：{seq:?}");
+    assert!(
+        channel.delivered.lock().unwrap().iter().any(|t| t.contains("已取消")),
+        "应回复已取消"
+    );
 }

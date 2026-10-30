@@ -352,6 +352,26 @@ impl Api for HttpApi {
             .map(|_| ())
     }
 
+    async fn set_reaction(&self, chat: i64, msg: &MsgRef, emoji: &str) -> Result<(), ApiError> {
+        // 空串 = 清空。Telegram 每个 bot 对每条消息只能有一个 reaction，
+        // 所以"改状态"和"清空"是同一支接口（D24）。
+        let reaction = if emoji.is_empty() {
+            json!([])
+        } else {
+            json!([{ "type": "emoji", "emoji": emoji }])
+        };
+        let id: i64 = msg
+            .0
+            .parse()
+            .map_err(|_| ApiError::BadRequest(format!("bad message id: {}", msg.0)))?;
+        self.post(
+            "setMessageReaction",
+            json!({ "chat_id": chat, "message_id": id, "reaction": reaction }),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn answer_callback(&self, id: &str, text: &str) -> Result<(), ApiError> {
         self.post("answerCallbackQuery", json!({ "callback_query_id": id, "text": text }))
             .await

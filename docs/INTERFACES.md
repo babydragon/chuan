@@ -34,6 +34,13 @@ pub trait Channel: Send + Sync + 'static {
     async fn update(&self, conversation: &str, msg: &MsgRef, view: View) -> Result<EditOutcome>;
     async fn ack(&self, callback: &str, text: &str) -> Result<()>;
     async fn download(&self, f: &FileRef) -> Result<Media>;
+
+    /// 给**入站消息**挂一个状态标记（表情反应）。
+    /// 通道没有该能力时什么都不做——默认实现即"无能力"。
+    /// 语义是 best-effort：失败只记 trace，不影响 run 成败，也不得阻塞。
+    async fn react(&self, _conversation: &str, _msg: &MsgRef, _emoji: &str) -> Result<()> {
+        Ok(())
+    }
 }
 ```
 
@@ -42,6 +49,72 @@ pub trait Channel: Send + Sync + 'static {
 3. `NotModified` 当成功、`TooOld` 让 Renderer 换新消息、`Rejected` 全局退避。
    **`update` 的 429 必须返回 `Rejected`，不得上抛 `Err`**：上抛会终止整轮 run（板上事故：43s 的洪水控制把 run 打死，界面停在"正在输入"）。
    `typing` 收到 429 同样按 `retry_after` 退避，否则打字提示每 4s 一次会把洪水控制一直续上。
+
+### 1.1 `react` 与 `update` 的分工
+
+| | `update` | `react` |
+|---|---|---|
+| 改的是 | **自己发的**消息 | **对方发的**消息 |
+| 受 `Caps.edit` 约束 | 是 | 否（与 `Caps` 无关） |
+| 失败语义 | `Rejected` → 渲染器退避 / `TooOld` → 换新消息 | 只记 trace，**不重试、不上抛** |
+| 用途 | 流式呈现同一轮回复 | 标记"这条入站消息处理到哪一步" |
+
+`Inbound.msg` 是平台侧消息句柄；`None` 表示这条入站不是"平台上真实存在的一条"
+（定时任务合成、内部派发、polish），此时 `react` 必然 no-op。
+状态映射（未开始/处理中/成功/失败）属于应用策略，见 `DECISIONS.md` D24 与 `ROADMAP.md §5.11`。
+
+### 1.2 接入新通道：状态反应怎么做
+
+以后接别的通道（飞书、Slack、Discord…）时，照这一节判断与落地，不要重新设计。
+
+**判据**：平台有没有"给**已经发出去的那条**消息挂一个标记"的接口？
+
+| 情况 | 做法 |
+|---|---|
+| 有（Telegram `setMessageReaction`、Slack `reactions.add`…） | 实现 `react()` |
+| 没有（微信 iLink） | **什么都不写**。默认实现就是正确行为，不要退化成"再发一条消息" |
+
+**两个前提**（缺一个就别做）：
+
+1. 入站消息带平台 id —— 在 `run()` 里把它填进 `Inbound.msg`（`None` 就别实现 `react`）
+2. 平台能按消息 id **修改**，而不是只能新增
+
+**实现契约**（四条，从 Telegram 实现里抽出来的）：
+
+| 要求 | 为什么 |
+|---|---|
+| 平台侧必须是**替换**语义，不是叠加 | 状态机会反复打状态；叠加会变成一串表情 |
+| 空 `emoji` 表示**清空** | 取消既不是成功也不是失败（D24） |
+| 失败一律吞掉（记 trace 即止） | best-effort：状态是附加信息，不能反过来决定 run 成败 |
+| 不得阻塞 turn | 一次 reaction = 一次额外网络往返 |
+
+**已知平台差异**：
+
+| 平台 | 能力 | 约束 |
+|---|---|---|
+| Telegram | ✅ `setMessageReaction` | 每 bot 每条消息**只能一个**；emoji 只有**73 个白名单**，`⏳/✅/❌` 会被 `400 REACTION_INVALID` 拒；服务类消息不能加；实测返回值是 `true` 不是消息对象 |
+| 微信 iLink | ❌ 无接口 | 只能发消息，而每条出站占 10 条额度中的 1 条 → 明确不做（`WEIXIN.md` F14） |
+| 飞书 / 钉钉 / Slack | ⚠️ 未核 | 各自有 reaction API，但要先确认"bot 能否给**用户发的**消息加"，以及是否有 emoji 白名单 |
+
+**实现索引**（照抄即可）：
+
+| 位置 | 职责 |
+|---|---|
+| `harness-kernel/src/channel.rs` | `Channel::react`（默认空实现）、`Inbound.msg` |
+| `harness-kernel/src/actor.rs` | `RunEnd` / `mark()` / `handle_run` 包装 / `run()` 里的在途计数器 |
+| `telegram/api.rs::set_reaction` → `http.rs` → `mod.rs::react` | 三层：协议方法 → HTTP（空串转 `reaction: []`）→ 通道 |
+| `tests/runner_flow.rs::FakeChannel.reactions` | 测试替身记录 `(msg_id, emoji)` |
+
+**新增通道的验收**（5 条，缺一不算接完；括号里是 Telegram 侧对应的用例，可照着改）：
+
+| # | 验收 | 参考用例 |
+|---|---|---|
+| 1 | 连发 3 条 → 第 2、3 条先 `😐`，每条都经过 `👀` | `reactions_track_queue_then_success` |
+| 2 | 每条最后落到 `👍` | 同上 |
+| 3 | 跑失败 → `👎` | `failed_run_marks_fail` |
+| 4 | 取消 → **清空**（不是 `👎`） | `cancel_clears_reaction` |
+| 5 | 合成入站（`msg=None`）零反应 | `synthesized_inbound_has_no_reaction` |
+| 6 | reaction 接口报错时，正常回复照常送达 | `reaction_failure_does_not_break_run` |
 
 ---
 
@@ -644,7 +717,8 @@ pub struct ExecOutput { pub code: Option<i32>, pub stdout: String, pub stderr: S
 ## 9. 一致性测试
 
 - **Store**：重复 `dedupe_key` 只一条；`append_many` 原子；`lease_task` 并发仅一成功；`resolve_approval` 第二次 `AlreadyResolved`；`seq` 会话内单调唯一；`messages` 分页游标不切半轮；**删投影后 `rebuild` 完全一致**；写事务内无工具执行（日志断言）。
-- **Channel**：caps 兑现；重复 `dedupe_key` 不重投；`NotModified`/`TooOld` 正确；取消能终止 `run()`。
+- **Channel**：caps 兑现；重复 `dedupe_key` 不重投；`NotModified`/`TooOld` 正确；取消能终止 `run()`；
+  有 `react` 的通道另测 5 条（见 §1.2）：排队态、终态、取消清空、`msg=None` 零反应、反应失败不影响送达。
 - **Retriever**：无越权；域内不丢。
 - **TurnDriver**：delta 顺序；`ToolStarted` 参数完整（无分片）；usage 提取；cancel 后 `step()` 返回 `Cancelled` 且无 pending。
 - **子 agent**：父上下文只增一条结论；`depth > 1` 拒绝；子工具集无 `delegate` 与 `tier=1`；

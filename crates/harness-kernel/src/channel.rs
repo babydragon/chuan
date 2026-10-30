@@ -40,6 +40,9 @@ pub struct Inbound {
     pub dedupe_key: String,
     /// 回调 ID（仅 Callback 类需要，用于 answerCallbackQuery）
     pub callback_id: Option<String>,
+    /// 平台侧的消息句柄（用于给这条消息挂状态反应）。
+    /// `None` = 这条入站不是平台上真实存在的一条（定时任务合成、内部派发），此时 `react` 必然 no-op。
+    pub msg: Option<MsgRef>,
     pub received_at: Timestamp,
     #[allow(missing_docs)]
     pub attachments: Vec<Attachment>,
@@ -168,6 +171,19 @@ pub trait Channel: Send + Sync + 'static {
 
     /// 显示"对方正在输入"。默认无操作；Telegram 需每 ~4s 续一次。
     async fn typing(&self, _conversation: &str) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// 给**入站消息**挂一个状态标记（表情反应）。语义是 best-effort：
+    /// 失败只该记 trace，不得影响 run 的成败，也不得阻塞 turn（D24）。
+    ///
+    /// 默认实现即"没有该能力"——不支持 reaction 的通道什么都不用写。
+    async fn react(
+        &self,
+        _conversation: &str,
+        _msg: &MsgRef,
+        _emoji: &str,
+    ) -> Result<(), ChannelError> {
         Ok(())
     }
 
