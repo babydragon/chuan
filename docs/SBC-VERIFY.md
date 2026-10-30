@@ -283,6 +283,16 @@
 - [ ] `chuan.service` 的 `restart`：本轮结束后才执行，且先收到一条消息
 - [ ] user timer 一分钟实跑一次：journal 有输出，且**不吃** `chuan.service` 的 `MemoryMax=1G`
 
+**2026-10-30 · 提权与宿主执行收尾验证（rc.23）**：
+
+- ✅ `elevated` 全链路：`apt-get update`（6 个源、63.3 kB）、`apt-get install -y figlet` 成功；
+  审批卡显示「第 N 条授权 + 为什么 + 变更前快照命令」，`/var/lib/chuan/pkg-snapshots/` 有清单
+- ✅ `host-access.jsonl`：L2 行含 `grant_index`/`argv`/`code`
+- ✅ host lane DNS：`/etc/resolv.conf` 软链的目标目录已补挂（此前全站解析失败）
+- ⚠️ 踩过的坑：`chuan-hostd.service` 曾写 `StateDirectory=chuan`，systemd 把 `/var/lib/chuan`
+  chown 成 `root:root 0755` → chuan 绑不上 `/ws`，`exec`/`host` 全报
+  `bwrap: Can't chdir to /ws: Permission denied`（daemon 已有句柄不受影响，`elevated` 也不受影响）
+
 **2026-10-29 · 首次上板实测（`deploy/verify-host-lane.sh`）**：
 
 | 项 | 结果 |

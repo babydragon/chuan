@@ -322,7 +322,9 @@ B、C 未做。
 `host-access.jsonl` + 可配置快照）、`chuan-hostd.service`、install.sh 装配、
 通用客户端 `elevated`（**无发行版语义**：能跑什么只看 `[[host_elevated.grant]]`，
 `approval="always"` 的条目免问，因此 `--pretend`/`-s` 这类只读预览可以零审批，
-真装才弹卡）。**apt 专用工具 `pkg` 已删除**——不为单一发行版写定制指令。**未上板验证**。
+真装才弹卡）。**apt 专用工具 `pkg` 已删除**——不为单一发行版写定制指令。
+**2026-10-30 上板验证通过**：`apt-get update` 与 `install -y figlet` 经 `elevated` 成功，
+变更前 dpkg 快照落地，`host-access.jsonl` 有 L2 记录（命中第几条、argv、退出码）。
 
 - `chuan hostd` 子命令 + 第二单元（`User=root`）+ `/run/chuan/host.sock`（`0660 root:chuan`）
 - `SO_PEERCRED` 校验、argv 前缀匹配、`env -i`、`host-access.jsonl`、`dpkg` 快照
