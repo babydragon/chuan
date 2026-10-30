@@ -13,8 +13,9 @@
 > **rc.20**：入站消息状态反应（Telegram 表情回执 😐/👀/👍/👎，D24）。
 > **rc.21**：修复发布包漏装 `chuan-hostd.service`（提权通道起不来）；
 > `host` 逐次审计；`remind` 回执标明「生效形态」；`playbook` 默认目录改为 `<config>/playbooks`。
-> **待发**：删除 apt 专用 `pkg`，改为通用的 `elevated`（argv 授权表驱动，无发行版语义）。
-> 预发布到 `v0.1.0-rc.21`，正式版待定。
+> **rc.22**：**删除 apt 专用 `pkg`**，改为通用 `elevated`（argv 授权表驱动，无发行版语义）；
+> `approval = "always"` 真正生效（预览免问、真装逐条问）；快照改成数据 `snapshot_argv`。
+> 预发布到 `v0.1.0-rc.22`，正式版待定。
 
 ---
 
