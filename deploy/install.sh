@@ -285,7 +285,14 @@ if [[ -z $R ]]; then
   run systemctl reset-failed chuan.service || true
   if [[ -n $HOSTD && $ENABLE -eq 1 ]]; then
     run systemctl reset-failed chuan-hostd.service || true
-    run systemctl enable --now chuan-hostd.service
+    run systemctl enable chuan-hostd.service
+    # 必须 restart 而不是 --now：unit 已在跑时 `--now` 不会重启，
+    # 结果就是"二进制换了、root 那个进程还跑着旧代码"（rc.22→rc.23 踩过）。
+    if systemctl is-active --quiet chuan-hostd.service; then
+      run systemctl restart chuan-hostd.service
+    else
+      run systemctl start chuan-hostd.service
+    fi
   fi
   if command -v loginctl >/dev/null 2>&1; then
     run loginctl enable-linger "$SVC_USER"
