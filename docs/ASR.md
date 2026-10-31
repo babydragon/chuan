@@ -48,22 +48,44 @@ tar xjf sherpa-onnx-v2.0.1-linux-riscv64-spacemit-shared.tar.bz2
 wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2
 tar xjf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09.tar.bz2
 
-# 3) 测试音频：10 秒中文，转成 16k 单声道
-ffmpeg -i test.m4a -ar 16000 -ac 1 -c:a pcm_s16le test10s.wav
+# 3) 测试音频
+#    优先用模型包里自带的 test_wavs/zh.wav（已经是 16k 单声道，不需要任何转换工具）
+#    想用自己的录音再转（需要 ffmpeg）：
+#      ffmpeg -i test.m4a -ar 16000 -ac 1 -c:a pcm_s16le test10s.wav
+ls sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09/test_wavs/   # 一般自带 zh.wav / en.wav
 
-# 4) 计时（分别试 4 线程 / 8 线程）
+# 4) 计时：**用 bash 内建 time**（不需要装 time 包）
+BIN=./sherpa-onnx-v2.0.1-linux-riscv64-spacemit-shared/bin/sherpa-onnx-offline
+MDL=sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09
+WAV=$MDL/test_wavs/zh.wav
+DUR=$(python3 -c "import wave,sys; w=wave.open(sys.argv[1]); print(w.getnframes()/w.getframerate())" "$WAV")
+
 for t in 4 8; do
-  /usr/bin/time -f "threads=$t  %e s" \
-    ./sherpa-onnx-v2.0.1-linux-riscv64-spacemit-shared/bin/sherpa-onnx-offline \
-      --sense-voice-model=sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09/model.int8.onnx \
-      --tokens=sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09/tokens.txt \
-      --sense-voice-use-itn=1 \
-      --num-threads=$t \
-      test10s.wav
+  TIMEFORMAT="threads=$t  %3R s"      # %3R = 墙钟秒数，3 位小数
+  time "$BIN" \
+    --sense-voice-model=$MDL/model.int8.onnx \
+    --tokens=$MDL/tokens.txt \
+    --sense-voice-use-itn=1 \
+    --num-threads=$t \
+    "$WAV"
 done
 ```
 
-**RTF = 耗时 ÷ 音频时长**（10 秒音频跑 3 秒 → RTF 0.3）。
+> `TIMEFORMAT` + `time` 是 **bash 内建**，不依赖 `/usr/bin/time`（那是 `time` 包）。
+> 如果连 `python3` 都想省，用 bash 5 的 `$EPOCHREALTIME` 也能自己算：
+> `t0=${EPOCHREALTIME/./}; ...; t1=${EPOCHREALTIME/./}; echo $(( (t1-t0)/1000 ))ms`
+>
+> 如果模型包里**没有** `test_wavs/`（版本差异），就用 `ffmpeg -ar 16000 -ac 1` 转一段自己的录音；
+> `ffmpeg` 也装不上时，用手机录一段 16k wav，或让另一台机器转好再拷过来。
+
+**RTF = 耗时 ÷ 音频时长**（10 秒音频跑 3 秒 → RTF 0.3）。要自动算：
+
+```bash
+TIMEFORMAT='%3R'
+el=$( { time "$BIN" --sense-voice-model=$MDL/model.int8.onnx --tokens=$MDL/tokens.txt \
+        --num-threads=4 "$WAV" >/dev/null; } 2>&1 )
+python3 -c "print(f'RTF={$el/$DUR:.2f}  ({$el:.2f}s / {$DUR:.1f}s)')"
+```
 
 | RTF | 结论 |
 |---|---|
@@ -99,7 +121,7 @@ done
 
 | # | 项 | 怎么验 |
 |---|---|---|
-| A1 | **K1 上的真实 RTF** | 上面第 4 节的命令；这是唯一的决策依据 |
+| A1 | **K1 上的真实 RTF** | 上面第 4 节的命令（bash 内建 `time` + `TIMEFORMAT`）；这是唯一的决策依据 |
 | A2 | int8 量化后中文准确率（专名、数字、方言） | 用 5–10 条真实语音比对 |
 | A3 | 4 线程 vs 8 线程的收益与对 bot 的影响 | 两组 `time` + 观察同时聊天是否卡顿 |
 | A4 | 长语音（>30s）是否要切段 | 试一条 60s |
