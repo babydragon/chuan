@@ -167,6 +167,7 @@ filekey = 16 字节随机(hex)；aeskey = 16 字节随机
   → POST 密文到 upload_full_url（优先；否则用 upload_param + filekey 拼）
      Content-Type: application/octet-stream
   → 成功判据：HTTP 200 且响应头 x-encrypted-param 非空；4xx 立即放弃，其它最多重试 3 次
+     （实现只支持 `upload_full_url`；`upload_param` 拼接未做，见 §5 M2）
   → sendmessage: item.media = { encrypt_query_param: 该响应头,
                                 aes_key: base64(hex 字符串),   ← 注意是"hex 的 base64"
                                 encrypt_type: 1 }

@@ -372,3 +372,43 @@ async fn inbound_pdf_keeps_name_and_mime() {
     assert_eq!(a.name, "成绩单.pdf");
     assert_eq!(a.mime, "application/pdf");
 }
+
+/// 出站：图片走 image_item、PDF 走 file_item；说明文字先单独发一条。
+#[tokio::test]
+async fn send_file_uploads_then_sends_item() {
+    let api = Arc::new(FakeApi::new());
+    let ch = channel(Arc::clone(&api));
+
+    // 先收一条消息拿到 context_token
+    api.push_text(1, "u1@im.wechat", "在吗", "ctx-1", now_ms());
+    let _ = collect(Arc::clone(&ch), 1).await;
+
+    let dir = std::env::temp_dir().join("chuan-wx-sendfile-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("a.png");
+    std::fs::write(&png, [0x89, b'P', b'N', b'G', 0, 0]).unwrap();
+    let pdf = dir.join("b.pdf");
+    std::fs::write(&pdf, b"%PDF-1.7 hello").unwrap();
+
+    // 图片 + 说明
+    ch.send_file("u1@im.wechat", png.to_str().unwrap(), "a.png", "image/png", "图来了")
+        .await
+        .unwrap();
+    // PDF 不带说明
+    ch.send_file("u1@im.wechat", pdf.to_str().unwrap(), "b.pdf", "application/pdf", "")
+        .await
+        .unwrap();
+
+    let ups = api.uploads.lock().unwrap().clone();
+    assert_eq!(ups.len(), 2, "两次上传：{ups:?}");
+    assert_eq!(ups[0].0, 1, "png → media_type=1（图片）");
+    assert_eq!(ups[1].0, 3, "pdf → media_type=3（文件）");
+
+    let items = api.items.lock().unwrap().clone();
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0].0, "image");
+    assert!(items[1].0.starts_with("file:b.pdf:"), "{}", items[1].0);
+
+    // 说明文字单独发了一条
+    assert_eq!(api.sent_texts(), vec!["图来了".to_string()]);
+}

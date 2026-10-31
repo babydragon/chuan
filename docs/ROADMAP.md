@@ -7,7 +7,7 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 预发布到 `v0.1.0-rc.33`。
+> 预发布到 `v0.1.0-rc.34`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；
 > **通知类流程 P4.7：A 由主人写 SOP（零代码），B/C 触发式暂不做**（见 D23）。
@@ -455,7 +455,8 @@ playbook 能不能承载流程、`remind` 的三形态够不够用、记忆的�
   `Channel::typing_stop` 在收尾时显式关闭（rc.29）
 - `Caps.edit = false` → 渲染器只在定稿发一次；`react` 保持默认空实现（协议无接口）
 
-**未实现**：出站文件（CDN 上传）、视频、群聊、按人隔离 workspace、TG 语音（需自建 ASR）。
+**未实现**：视频、群聊、按人隔离 workspace、TG 语音（ASR 已实测可行，见 `ASR.md`）。
+**出站文件已支持**：图片/PDF 走 CDN 上传（AES-128-ECB），说明文字单独一条。
 **入站媒体已支持**：图片（视觉）/ PDF（解析或打印）——下载 + AES-128-ECB 解密 + 落盘 `/media`；
 只发附件不跑模型，先收着等指令（D29）。
 

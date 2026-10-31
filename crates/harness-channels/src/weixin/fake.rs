@@ -18,6 +18,10 @@ pub struct FakeApi {
     pub typings: Mutex<Vec<(String, bool)>>,
     /// `download_media` 返回的内容（测试里塞假图片）
     pub media_bytes: Mutex<Vec<u8>>,
+    /// 记录上传：(media_type, 明文字节数)
+    pub uploads: Mutex<Vec<(i64, usize)>>,
+    /// 记录发出的媒体 item：(描述, to)
+    pub items: Mutex<Vec<(String, String)>>,
     next_id: Mutex<i64>,
 }
 
@@ -91,6 +95,50 @@ impl Api for FakeApi {
                 Ok(Updates::default())
             }
         }
+    }
+
+    async fn upload_media(
+        &self,
+        _to: &str,
+        bytes: &[u8],
+        media_type: i64,
+    ) -> Result<super::api::Uploaded, ApiError> {
+        self.uploads
+            .lock()
+            .unwrap()
+            .push((media_type, bytes.len()));
+        Ok(super::api::Uploaded {
+            download_param: "dl-param".into(),
+            aeskey_hex: "00112233445566778899aabbccddeeff".into(),
+            cipher_size: bytes.len() + 16,
+            plain_size: bytes.len(),
+        })
+    }
+
+    async fn send_image(
+        &self,
+        to: &str,
+        _ctx: &str,
+        _up: &super::api::Uploaded,
+        _client_id: &str,
+    ) -> Result<String, ApiError> {
+        self.items.lock().unwrap().push(("image".into(), to.to_owned()));
+        Ok("img-1".into())
+    }
+
+    async fn send_file_item(
+        &self,
+        to: &str,
+        _ctx: &str,
+        up: &super::api::Uploaded,
+        name: &str,
+        _client_id: &str,
+    ) -> Result<String, ApiError> {
+        self.items
+            .lock()
+            .unwrap()
+            .push((format!("file:{name}:{}", up.plain_size), to.to_owned()));
+        Ok("file-1".into())
     }
 
     async fn download_media(

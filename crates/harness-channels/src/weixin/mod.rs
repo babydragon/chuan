@@ -294,6 +294,57 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
         Ok(last)
     }
 
+    async fn send_file(
+        &self,
+        conversation: &str,
+        path: &str,
+        name: &str,
+        mime: &str,
+        caption: &str,
+    ) -> Result<MsgRef, ChannelError> {
+        /// iLink 的媒体上限未验证（`WEIXIN.md` M1），先按 20MB 挡住
+        const MAX_BYTES: usize = 20 * 1024 * 1024;
+        let acc = self.account_of(conversation).ok_or_else(|| {
+            ChannelError::BadRequest(format!("没有绑定这个微信号的 bot：{conversation}"))
+        })?;
+        let ctx = self.ctx_for(conversation, &acc.bot_id).await;
+        if ctx.is_empty() {
+            return Err(ChannelError::BadRequest("缺少会话令牌：需要用户先发一条消息".into()));
+        }
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| ChannelError::BadRequest(format!("读取 {path} 失败：{e}")))?;
+        if bytes.len() > MAX_BYTES {
+            return Err(ChannelError::BadRequest(format!(
+                "文件 {} MB 超过 20MB 上限",
+                bytes.len() / 1024 / 1024
+            )));
+        }
+        // 图片走 image_item，其余走 file_item（视频未支持）
+        let media_type = if mime.starts_with("image/") { 1 } else { 3 };
+
+        // 说明文字与媒体是**两条消息**，各占 1 条额度（WEIXIN §3.3）
+        if !caption.trim().is_empty() {
+            let cid = format!("chuan-cap-{}", now_ms());
+            let _ = acc.api.send_text(conversation, &ctx, caption, &cid).await;
+        }
+        let up = acc
+            .api
+            .upload_media(conversation, &bytes, media_type)
+            .await
+            .map_err(map_err)?;
+        let cid = format!("chuan-media-{}", now_ms());
+        let id = if media_type == 1 {
+            acc.api.send_image(conversation, &ctx, &up, &cid).await
+        } else {
+            acc.api
+                .send_file_item(conversation, &ctx, &up, name, &cid)
+                .await
+        }
+        .map_err(map_err)?;
+        Ok(MsgRef(id))
+    }
+
     async fn update(
         &self,
         _conversation: &str,

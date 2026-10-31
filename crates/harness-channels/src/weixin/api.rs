@@ -165,6 +165,19 @@ impl WeixinMessage {
     }
 }
 
+/// 上传成功后回填到 `media` 里需要的东西（`WEIXIN.md` §3.3）。
+#[derive(Clone, Debug, Default)]
+pub struct Uploaded {
+    /// CDN 返回的 `x-encrypted-param`
+    pub download_param: String,
+    /// 16 字节密钥的 **hex 字符串**（发消息时要再 base64 一次）
+    pub aeskey_hex: String,
+    /// 密文长度（`mid_size` 用）
+    pub cipher_size: usize,
+    /// 明文长度（`file_item.len` 用）
+    pub plain_size: usize,
+}
+
 #[async_trait]
 pub trait Api: Send + Sync {
     /// 长轮询；服务端超时（无消息）应返回空 `Updates` 而不是错误。
@@ -177,6 +190,33 @@ pub trait Api: Send + Sync {
         media: &MediaRef,
         key_hint: &str,
     ) -> Result<Vec<u8>, ApiError>;
+
+    /// 上传一份媒体到 CDN（AES-128-ECB 加密）。`media_type`：1 图 / 2 视频 / 3 文件。
+    async fn upload_media(
+        &self,
+        to: &str,
+        bytes: &[u8],
+        media_type: i64,
+    ) -> Result<Uploaded, ApiError>;
+
+    /// 发一条图片消息（`image_item`）。
+    async fn send_image(
+        &self,
+        to: &str,
+        ctx: &str,
+        up: &Uploaded,
+        client_id: &str,
+    ) -> Result<String, ApiError>;
+
+    /// 发一条文件消息（`file_item`）。
+    async fn send_file_item(
+        &self,
+        to: &str,
+        ctx: &str,
+        up: &Uploaded,
+        name: &str,
+        client_id: &str,
+    ) -> Result<String, ApiError>;
 
     /// 设置/取消"正在输入"。失败可以忽略（best-effort）。
     async fn typing(&self, user: &str, ctx: &str, on: bool) -> Result<(), ApiError>;
