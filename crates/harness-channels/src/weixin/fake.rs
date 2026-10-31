@@ -14,6 +14,8 @@ pub struct FakeApi {
     pub sent: Mutex<Vec<(String, String, String)>>,
     /// 下一次调用返回的错误（字符串描述）
     pub fail: Mutex<Option<&'static str>>,
+    /// 记录过的 typing：(user, on)
+    pub typings: Mutex<Vec<(String, bool)>>,
     next_id: Mutex<i64>,
 }
 
@@ -87,6 +89,11 @@ impl Api for FakeApi {
                 Ok(Updates::default())
             }
         }
+    }
+
+    async fn typing(&self, user: &str, _ctx: &str, on: bool) -> Result<(), ApiError> {
+        self.typings.lock().unwrap().push((user.to_owned(), on));
+        Ok(())
     }
 
     async fn send_text(

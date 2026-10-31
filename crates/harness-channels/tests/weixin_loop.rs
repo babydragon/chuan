@@ -196,3 +196,30 @@ async fn unknown_conversation_is_rejected() {
         "应明确说没这个账号：{err}"
     );
 }
+
+/// "正在输入"：发给对应账号，收尾时显式取消。
+#[tokio::test]
+async fn typing_goes_to_the_right_account() {
+    let api_a = Arc::new(FakeApi::new());
+    let api_b = Arc::new(FakeApi::new());
+    let ch = channel_with(
+        vec![
+            ("alice@im.wechat", "botA@im.bot", Arc::clone(&api_a)),
+            ("bob@im.wechat", "botB@im.bot", Arc::clone(&api_b)),
+        ],
+        Arc::new(MemoryOffsets::default()),
+    );
+
+    ch.typing("alice@im.wechat").await.unwrap();
+    ch.typing_stop("alice@im.wechat").await.unwrap();
+
+    assert_eq!(
+        api_a.typings.lock().unwrap().clone(),
+        vec![("alice@im.wechat".to_string(), true), ("alice@im.wechat".to_string(), false)],
+        "A 的 typing 只走 A 的 api，且收尾要显式关掉"
+    );
+    assert!(api_b.typings.lock().unwrap().is_empty(), "B 不该收到 A 的 typing");
+
+    // 未知会话：静默跳过，不报错（best-effort）
+    ch.typing("stranger@im.wechat").await.unwrap();
+}

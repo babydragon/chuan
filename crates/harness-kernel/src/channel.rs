@@ -174,6 +174,12 @@ pub trait Channel: Send + Sync + 'static {
         Ok(())
     }
 
+    /// 结束"正在输入"。默认无操作（多数平台几秒后自己消失）；
+    /// 微信要显式发 status=2，否则会多挂几秒。
+    async fn typing_stop(&self, _conversation: &str) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
     /// 给**入站消息**挂一个状态标记（表情反应）。语义是 best-effort：
     /// 失败只该记 trace，不得影响 run 的成败，也不得阻塞 turn（D24）。
     ///

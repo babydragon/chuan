@@ -115,6 +115,9 @@ pub trait Api: Send + Sync {
     /// 长轮询；服务端超时（无消息）应返回空 `Updates` 而不是错误。
     async fn get_updates(&self, cursor: &str, timeout_ms: i64) -> Result<Updates, ApiError>;
 
+    /// 设置/取消"正在输入"。失败可以忽略（best-effort）。
+    async fn typing(&self, user: &str, ctx: &str, on: bool) -> Result<(), ApiError>;
+
     /// 发一条文本，返回平台 `message_id`。
     /// `ctx` 为入站消息里的 `context_token`（`WEIXIN.md` §3.2）。
     async fn send_text(

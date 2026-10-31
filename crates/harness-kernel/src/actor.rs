@@ -1109,6 +1109,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Ok(RunEnd::Cancelled) => "", // 取消 = 清空
         };
         self.mark(&*ch, &conv, msg.as_ref(), emoji).await;
+        // typing 任务已经在 RunScope 里取消了；这里让通道把"正在输入"收掉
+        let _ = ch.typing_stop(&conv).await;
         res.map(|_| ())
     }
 

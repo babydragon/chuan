@@ -157,6 +157,18 @@ impl<A: Api> WeixinChannel<A> {
         }
     }
 
+    /// 设置"正在输入"。best-effort：找不到账号或没有 ticket 都只是不发，不报错。
+    async fn set_typing(&self, conversation: &str, on: bool) -> Result<(), ChannelError> {
+        let Some(acc) = self.account_of(conversation) else {
+            return Ok(());
+        };
+        let ctx = self.ctx_of(conversation);
+        if let Err(e) = acc.api.typing(conversation, &ctx, on).await {
+            tracing::debug!(error = %e, on, "微信 typing 失败");
+        }
+        Ok(())
+    }
+
     /// 这条会话该用哪个账号发：**按绑定者 id 反查**（一个 bot 只服务一个微信号）。
     fn account_of(&self, conversation: &str) -> Option<&Account<A>> {
         self.accounts.iter().find(|a| a.user_id == conversation)
@@ -279,10 +291,12 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
         Ok(())
     }
 
-    async fn typing(&self, _conversation: &str) -> Result<(), ChannelError> {
-        // TODO(下一步)：getconfig 拿 typing_ticket + sendtyping。
-        // 现在不做：typing 只用几秒就自动消失，而 trait 还没有"停止"钩子。
-        Ok(())
+    async fn typing(&self, conversation: &str) -> Result<(), ChannelError> {
+        self.set_typing(conversation, true).await
+    }
+
+    async fn typing_stop(&self, conversation: &str) -> Result<(), ChannelError> {
+        self.set_typing(conversation, false).await
     }
 }
 

@@ -3,6 +3,8 @@
 //! 请求头与 `base_info` 照 `docs/WEIXIN.md` §2.2 抄；`channel_version` 固定上报官方插件版本，
 //! 因为服务端可能据此判断能力（探针就是用 2.4.8 跑通的）。
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,6 +21,8 @@ pub struct HttpApi {
     client: reqwest::Client,
     token: String,
     base: String,
+    /// `ilink_user_id` → `typing_ticket`（`getconfig` 拿一次，之后复用）
+    tickets: Mutex<HashMap<String, String>>,
 }
 
 impl HttpApi {
@@ -30,7 +34,12 @@ impl HttpApi {
             );
         }
         let client = b.build().map_err(|e| ApiError::Transport(e.to_string()))?;
-        Ok(Self { client, token: token.into(), base: base.into() })
+        Ok(Self {
+            client,
+            token: token.into(),
+            base: base.into(),
+            tickets: Mutex::new(HashMap::new()),
+        })
     }
 
     fn base_info() -> Value {
@@ -45,6 +54,31 @@ impl HttpApi {
             .map(|d| d.subsec_nanos())
             .unwrap_or(1);
         base64::engine::general_purpose::STANDARD.encode(nanos.to_string())
+    }
+
+    /// `typing_ticket`：`getconfig` 拿一次就够，缓存在内存里；失败/过期由调用方清缓存。
+    async fn ticket(&self, user: &str) -> Result<String, ApiError> {
+        if let Some(t) = self.tickets.lock().unwrap().get(user) {
+            return Ok(t.clone());
+        }
+        let v = self
+            .post(
+                "/ilink/bot/getconfig",
+                json!({ "ilink_user_id": user, "base_info": Self::base_info() }),
+            )
+            .await?;
+        let t = v
+            .get("typing_ticket")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if !t.is_empty() {
+            self.tickets
+                .lock()
+                .unwrap()
+                .insert(user.to_owned(), t.clone());
+        }
+        Ok(t)
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, ApiError> {
@@ -141,6 +175,32 @@ impl Api for HttpApi {
             return Err(ApiError::BadRequest(format!("getupdates ret={code} {msg}")));
         }
         serde_json::from_value(v).map_err(|e| ApiError::Transport(format!("getupdates 解析失败: {e}")))
+    }
+
+    async fn typing(&self, user: &str, ctx: &str, on: bool) -> Result<(), ApiError> {
+        let ticket = match self.ticket(user).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(error = %e, "getconfig 失败，跳过 typing");
+                return Ok(());
+            }
+        };
+        if ticket.is_empty() {
+            return Ok(()); // 没有 ticket 就是没有这个能力，不报错
+        }
+        let body = json!({
+            "ilink_user_id": user,
+            "typing_ticket": ticket,
+            "status": if on { 1 } else { 2 },
+            "base_info": Self::base_info(),
+        });
+        if let Err(e) = self.post("/ilink/bot/sendtyping", body).await {
+            // ticket 可能过期：清掉缓存，下次重新取
+            self.tickets.lock().unwrap().remove(user);
+            tracing::debug!(error = %e, "sendtyping 失败");
+        }
+        let _ = ctx;
+        Ok(())
     }
 
     async fn send_text(
