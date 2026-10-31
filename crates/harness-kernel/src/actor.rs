@@ -182,6 +182,8 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     bg_seq: Arc<Mutex<u64>>,
     /// 未授权提示的节流：`{channel}:{addr}` → 上次提示时刻（每小时最多一次）
     unauth_notice: Arc<Mutex<HashMap<String, i64>>>,
+    /// 待审批：会话键 → approval id（短码 `1`/`2` 用它定位）
+    pending_approval: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
@@ -207,6 +209,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             bg_running: Arc::clone(&self.bg_running),
             bg_seq: Arc::clone(&self.bg_seq),
             unauth_notice: Arc::clone(&self.unauth_notice),
+            pending_approval: Arc::clone(&self.pending_approval),
         }
     }
 }
@@ -349,6 +352,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             bg_running: Arc::new(Mutex::new(HashMap::new())),
             bg_seq: Arc::new(Mutex::new(0)),
             unauth_notice: Arc::new(Mutex::new(HashMap::new())),
+            pending_approval: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -385,6 +389,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                             .is_none()
                     {
                         self.notice_unauthorized(&inb).await;
+                        continue;
+                    }
+                    // 短码审批：`1`/`2` 直接决定本会话的待审批（微信没有按钮，D28）
+                    if self.try_short_approval(&inb).await {
                         continue;
                     }
                     if inb.kind == InboundKind::Text {
@@ -1062,6 +1070,57 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         }
     }
 
+    /// 裸数字审批：`1` 允许、`2` 拒绝。只在**本会话确实有待审批**时生效，
+    /// 其余情况当作普通消息（否则聊天里说个"1"就会被吃掉）。
+    async fn try_short_approval(&self, inb: &Inbound) -> bool {
+        if !matches!(inb.kind, InboundKind::Text | InboundKind::Command) {
+            return false;
+        }
+        let yes = match inb.text.as_deref().unwrap_or("").trim() {
+            "1" => true,
+            "2" => false,
+            _ => return false,
+        };
+        let key = Self::conv_key(inb);
+        let Some(id) = self.pending_approval.lock().unwrap().remove(&key) else {
+            return false;
+        };
+        let sender = self.approvals.lock().unwrap().remove(&id);
+        let _ = self
+            .store
+            .resolve_approval(&ApprovalId(id.clone()), yes, &inb.actor)
+            .await;
+        if let Some(tx) = sender {
+            let _ = tx.send(yes);
+        }
+        if let Ok(Some((chat, card))) = self.store.approval_card(&ApprovalId(id)).await {
+            let note = if yes { "✅ 已允许（记录见账本）" } else { "❌ 已拒绝" };
+            let ch = self.channel_for(&inb.channel);
+            let _ = ch.clear_prompt(&chat, &card, note).await;
+        }
+        let _ = self
+            .reply(
+                &inb.channel.0,
+                &inb.conversation,
+                if yes { "✅ 已允许。" } else { "❌ 已拒绝。" },
+            )
+            .await;
+        true
+    }
+
+    /// 审批的会话键：`{channel}:{addr}`（和 `run()` 里的 `conv_key` 一致，不带 epoch）
+    fn pending_key(conv: &str) -> String {
+        conv.splitn(3, ':').take(2).collect::<Vec<_>>().join(":")
+    }
+
+    fn clear_pending(&self, conv: &str, id: &str) {
+        let mut g = self.pending_approval.lock().unwrap();
+        let key = Self::pending_key(conv);
+        if g.get(&key).is_some_and(|v| v == id) {
+            g.remove(&key);
+        }
+    }
+
     /// 未绑定地址的提示：每小时最多一次，避免被当成回音壁，也避免刷微信额度。
     async fn notice_unauthorized(&self, inb: &Inbound) {
         let now = now_ms();
@@ -1497,6 +1556,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     .store
                     .resolve_approval(&ApprovalId(id.clone()), yes, "owner")
                     .await;
+                self.clear_pending(&Self::conv_key(&inb), &id);
                 let _ = tx.send(yes);
                 if let Some((chat, msg)) = &card {
                     let note = if yes { "✅ 已允许（记录见账本）" } else { "❌ 已拒绝" };
@@ -2890,10 +2950,22 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
         }
         let hint = self.tools.get(tool).and_then(|t| t.approval_hint(args));
         let brief = summarize_args(args);
+        // 模型给的"人话"（`_approval` 是保留字段，执行前会被剥掉，见 runner）
+        let why = args
+            .pointer("/_approval/why")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let impact = args
+            .pointer("/_approval/impact")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         // 账本里记"人话"，事后翻审批记录才看得懂
-        let action = match &hint {
-            Some(h) => format!("{tool} {h}"),
-            None => format!("{tool} {brief}"),
+        let action = match (why, &hint) {
+            (Some(w), _) => format!("{tool} · {w}"),
+            (None, Some(h)) => format!("{tool} {h}"),
+            (None, None) => format!("{tool} {brief}"),
         };
         let id = self
             .store
@@ -2908,11 +2980,30 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
             .map_err(|e| e.to_string())?;
 
         let chat = conv.0.split(':').nth(1).unwrap_or_default().to_owned();
-        // 先给人能判断的信息（什么时候、做什么），参数放后面供核对
-        let text = match &hint {
-            Some(h) => format!("🔐 需要确认\n\n{h}\n\n参数：{brief}"),
-            None => format!("🔐 需要确认\n\n工具：{tool}\n参数：{brief}"),
-        };
+        // 三段式：做什么 / 影响面 / 命令。给不看代码的人判断（D28）
+        let mut text = String::from("🔐 需要你确认\n\n");
+        match why {
+            Some(w) => {
+                text.push_str(w);
+                text.push('\n');
+            }
+            None => text.push_str("（模型未说明这条要做什么）\n"),
+        }
+        if let Some(i) = impact {
+            text.push_str(&format!("影响：{i}\n"));
+        }
+        if let Some(h) = &hint {
+            text.push_str(&format!("说明：{h}\n"));
+        }
+        text.push_str(&format!("工具：{tool}\n"));
+        if !brief.is_empty() {
+            text.push_str(&format!("命令：{brief}\n"));
+        }
+        // 短码审批：同一会话同一时刻只有一条待审批，用会话键记下来
+        self.pending_approval
+            .lock()
+            .unwrap()
+            .insert(Self::pending_key(&conv.0), id.0.clone());
         let ch = self.channel_for(&ChannelId(
             conv.0.split(':').next().unwrap_or_default().to_owned(),
         ));
@@ -2948,6 +3039,7 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
             Ok(Ok(yes)) => Ok(yes),
             _ => {
                 self.approvals.lock().unwrap().remove(&id.0);
+                self.clear_pending(&conv.0, &id.0);
                 let _ = self.store.resolve_approval(&id, false, "timeout").await;
                 let _ = ch
                     .clear_prompt(&chat, &card, "⏱ 审批超时，已拒绝执行。")

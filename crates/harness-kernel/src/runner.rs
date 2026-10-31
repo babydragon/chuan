@@ -64,6 +64,15 @@ pub trait ApprovalGate: Send + Sync {
     ) -> Result<bool, String>;
 }
 
+/// 去掉内核保留的元字段（目前只有 `_approval`），工具看到的仍是它自己的参数。
+fn strip_meta(args: &serde_json::Value) -> serde_json::Value {
+    let mut v = args.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("_approval");
+    }
+    v
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
     #[error(transparent)]
@@ -479,7 +488,8 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         // 车道许可同理：排队期间被取消，token 已触发，直接走下面的取消分支。
         let _lane_permit = self.lanes.acquire(tool.lane(), run_cancel).await.ok();
         let result = tokio::select! {
-            r = tool.execute(call.args.clone(), &ctx) => r,
+            // `_approval` 是给审批卡用的保留字段，不传给工具
+            r = tool.execute(strip_meta(&call.args), &ctx) => r,
             _ = run_cancel.cancelled() => {
                 let mut tx = self.store.begin_write().await?;
                 tx.abandon_tool_call(call.call.clone(), "cancelled").await?;

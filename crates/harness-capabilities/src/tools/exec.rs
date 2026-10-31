@@ -75,6 +75,18 @@ impl Tool for ExecTool {
                 "description": "走宿主代理（本 lane 里 127.0.0.1 即宿主）；境外站点用 true，国内直连更快"
             });
         }
+        // 会触发审批的 lane 才要求解释（离线沙盒默认免问）
+        if self.lan {
+            props["_approval"] = serde_json::json!({
+                "type": "object",
+                "description": "审批卡上给非程序员看的解释；这次调用会触发审批时必填",
+                "properties": {
+                    "why": { "type": "string", "description": "一句人话：你想做什么、为什么需要" },
+                    "impact": { "type": "string", "description": "影响面：只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
+                },
+                "required": ["why", "impact"]
+            });
+        }
         ToolSpec {
             name: name.into(),
             description: description.into(),

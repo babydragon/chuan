@@ -189,6 +189,15 @@ impl Tool for RemindTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "_approval": {
+                        "type": "object",
+                        "description": "审批卡上给非程序员看的解释；这次调用会触发审批时必填",
+                        "properties": {
+                            "why": { "type": "string", "description": "一句人话：你想做什么、为什么需要" },
+                            "impact": { "type": "string", "description": "影响面：只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
+                        },
+                        "required": ["why", "impact"]
+                    },
                     "action": {
                         "type": "string",
                         "enum": ["add", "update", "del"],

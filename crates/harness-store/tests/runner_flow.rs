@@ -3812,3 +3812,166 @@ async fn unbound_address_gets_unauthorized_without_running() {
     assert!(said.contains("未授权"), "应回一句未授权：{said:?}");
     assert!(!said.contains("不该被调用"), "未授权的消息不该跑模型：{said:?}");
 }
+
+/// 工具会收到剥掉 `_approval` 的参数（保留字段不能漏给工具）。
+struct NoMetaTool;
+
+#[async_trait]
+impl Tool for NoMetaTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec { name: "nometa".into(), description: "nometa".into(), parameters: serde_json::json!({}) }
+    }
+    fn effect(&self) -> EffectClass {
+        EffectClass::External
+    }
+    async fn execute(&self, args: serde_json::Value, _c: &ToolCtx<'_>) -> Result<ToolOutput, ToolError> {
+        assert!(args.get("_approval").is_none(), "`_approval` 不该传给工具：{args}");
+        Ok(ToolOutput {
+            content: vec![Block::Paragraph("工具跑完了".into())],
+            doc_writes: vec![],
+            artifacts: vec![],
+        })
+    }
+}
+
+/// 短码审批：卡片解释"做什么/影响面"，回复 `1` 就能批准（不用打 id）。
+#[tokio::test]
+async fn short_code_approval_with_human_readable_card() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-appr"),
+                name: "nometa".into(),
+                args: serde_json::json!({
+                    "_approval": { "why": "查一下打印机在不在线", "impact": "只读：不改任何配置" }
+                }),
+            }],
+        },
+        done_step("完成"),
+    ]);
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(NoMetaTool));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy {
+                extra_tools: vec!["nometa".into()],
+                ..Default::default()
+            },
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let handle = tokio::spawn(async move { actor.run(rx, CancellationToken::new()).await });
+    let send = |kind: InboundKind, text: &str, key: &str| Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind,
+        text: Some(text.into()),
+        dedupe_key: key.into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    };
+    tx.send(send(InboundKind::Text, "跑一下", "u1")).await.unwrap();
+
+    // 卡片必须说人话：做什么 + 影响面
+    let mut card_text = None;
+    for _ in 0..100 {
+        if let Some((t, _)) = channel.cards.lock().unwrap().first().cloned() {
+            card_text = Some(t);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let card_text = card_text.expect("应发出审批卡片");
+    assert!(card_text.contains("查一下打印机在不在线"), "缺少 why：{card_text}");
+    assert!(card_text.contains("影响：只读"), "缺少影响面：{card_text}");
+
+    // 只回一个 "1"，不打 id
+    tx.send(send(InboundKind::Text, "1", "u2")).await.unwrap();
+
+    // 等工具真的跑完（drop(tx) 会触发关停，不能提前）
+    for _ in 0..200 {
+        let rows = {
+            let mut rd = store.begin_read().await.unwrap();
+            rd.tool_calls(harness_kernel::ConversationId("fake:1000:0".into())).await.unwrap()
+        };
+        if rows.iter().any(|r| r.status == "finished") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .expect("短码审批应让 run 收尾")
+        .unwrap()
+        .unwrap();
+
+    let rows = {
+        let mut rd = store.begin_read().await.unwrap();
+        rd.tool_calls(harness_kernel::ConversationId("fake:1000:0".into())).await.unwrap()
+    };
+    assert!(
+        rows.iter().any(|r| r.status == "finished"),
+        "批准后工具应执行：{rows:?}"
+    );
+    let said = channel.delivered.lock().unwrap().join("\n");
+    assert!(said.contains("已允许"), "应回一句已允许：{said}");
+}
+
+/// 没有待审批时，`1` 就是普通消息（不能被短码吃掉）。
+#[tokio::test]
+async fn bare_digit_without_pending_is_normal_text() {
+    let channel = Arc::new(FakeChannel::default());
+    let actor = actor_with(vec![done_step("收到，你说的是 1")], &channel);
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Text,
+        text: Some("1".into()),
+        dedupe_key: "u1".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let said = channel.delivered.lock().unwrap().join("\n");
+    assert!(said.contains("收到"), "`1` 应照常交给模型：{said}");
+}
