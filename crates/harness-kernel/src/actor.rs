@@ -184,6 +184,8 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     unauth_notice: Arc<Mutex<HashMap<String, i64>>>,
     /// 待审批：会话键 → approval id（短码 `1`/`2` 用它定位）
     pending_approval: Arc<Mutex<HashMap<String, String>>>,
+    /// 只发了媒体、还没说要做什么：会话键 → (时刻, 附件)。微信图片没有 caption（D29）
+    pending_media: Arc<Mutex<HashMap<String, (i64, Vec<crate::Attachment>)>>>,
 }
 
 impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
@@ -210,6 +212,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             bg_seq: Arc::clone(&self.bg_seq),
             unauth_notice: Arc::clone(&self.unauth_notice),
             pending_approval: Arc::clone(&self.pending_approval),
+            pending_media: Arc::clone(&self.pending_media),
         }
     }
 }
@@ -353,6 +356,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             bg_seq: Arc::new(Mutex::new(0)),
             unauth_notice: Arc::new(Mutex::new(HashMap::new())),
             pending_approval: Arc::new(Mutex::new(HashMap::new())),
+            pending_media: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -395,6 +399,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     if self.try_short_approval(&inb).await {
                         continue;
                     }
+                    // 只有附件、没有文字：先收着等指令（D29）。
+                    // 微信的图片没有 caption，直接跑模型只会让它"自由发挥"。
+                    if Self::is_bare_media(&inb) {
+                        self.stash_media(&inb).await;
+                        continue;
+                    }
+                    self.merge_pending_media(&mut inb);
                     if inb.kind == InboundKind::Text {
                         *self.last_active.lock().unwrap() = crate::ids::now_ms();
                     }
@@ -1067,6 +1078,59 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             other => {
                 self.reply(&inb.channel.0, &inb.conversation, &format!("未知指令 /{other}，试试 /help")).await
             }
+        }
+    }
+
+    /// 只有附件、没有文字（或文字为空）。
+    fn is_bare_media(inb: &Inbound) -> bool {
+        !inb.attachments.is_empty()
+            && inb
+                .text
+                .as_deref()
+                .map(|t| t.trim().is_empty())
+                .unwrap_or(true)
+    }
+
+    /// 暂存附件并回一句"要我做什么"。不跑模型，也不产生任何工具调用。
+    async fn stash_media(&self, inb: &Inbound) {
+        let key = Self::conv_key(inb);
+        let now = now_ms();
+        let n = {
+            let mut g = self.pending_media.lock().unwrap();
+            let e = g.entry(key).or_insert((now, Vec::new()));
+            e.0 = now;
+            e.1.extend(inb.attachments.iter().cloned());
+            // 最多留 4 个，超了丢最早的
+            if e.1.len() > 4 {
+                let drop = e.1.len() - 4;
+                e.1.drain(..drop);
+            }
+            e.1.len()
+        };
+        tracing::info!(n, "只发了附件，等指令");
+        let _ = self
+            .reply(
+                &inb.channel.0,
+                &inb.conversation,
+                &format!("📎 收到 {n} 个附件。要我做什么？（描述内容 / 提取文字 / 打印）直接说一句就行。"),
+            )
+            .await;
+    }
+
+    /// 用户说话了：把刚才暂存的附件挂到这条消息上，然后正常跑。
+    fn merge_pending_media(&self, inb: &mut Inbound) {
+        const TTL_MS: i64 = 10 * 60 * 1000;
+        let key = Self::conv_key(inb);
+        let Some((ts, items)) = self.pending_media.lock().unwrap().remove(&key) else {
+            return;
+        };
+        if now_ms() - ts > TTL_MS {
+            tracing::info!("暂存的附件超过 10 分钟，丢弃");
+            return;
+        }
+        if !items.is_empty() {
+            tracing::info!(n = items.len(), "把暂存的附件挂到这条消息");
+            inb.attachments.extend(items);
         }
     }
 

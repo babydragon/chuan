@@ -3975,3 +3975,143 @@ async fn bare_digit_without_pending_is_normal_text() {
     let said = channel.delivered.lock().unwrap().join("\n");
     assert!(said.contains("收到"), "`1` 应照常交给模型：{said}");
 }
+
+/// 只发附件、没有说话：先收着，不跑模型（微信图片没有 caption）。
+#[tokio::test]
+async fn bare_media_waits_for_instruction() {
+    let channel = Arc::new(FakeChannel::default());
+    let driver = Arc::new(FakeDriver::new(vec![done_step("不该跑")]));
+    let store = Arc::new(EphemeralStore::new());
+    let actor = Arc::new(ConversationActor::new(
+        store,
+        Arc::clone(&driver) as Arc<FakeDriver>,
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind: InboundKind::Media,
+        text: Some(String::new()),
+        dedupe_key: "u1".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: vec![harness_kernel::Attachment {
+            path: "/media/abc.png".into(),
+            name: "a.png".into(),
+            mime: "image/png".into(),
+            digest: "abc".into(),
+            bytes: 12,
+        }],
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let said = channel.delivered.lock().unwrap().join("\n");
+    assert!(said.contains("收到 1 个附件"), "应回执并等指令：{said}");
+    assert!(!said.contains("不该跑"), "只发附件时不该跑模型：{said}");
+    assert!(driver.seen.lock().unwrap().is_empty(), "模型不该被调用");
+}
+
+/// 附件 + 随后的一句指令：附件要挂到那条消息上，模型能看到 /media 路径。
+#[tokio::test]
+async fn pending_media_merges_into_next_text() {
+    let channel = Arc::new(FakeChannel::default());
+    let driver = Arc::new(FakeDriver::new(vec![done_step("好的")]));
+    let store = Arc::new(EphemeralStore::new());
+    let actor = Arc::new(ConversationActor::new(
+        store,
+        Arc::clone(&driver) as Arc<FakeDriver>,
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let mk = |kind: InboundKind, text: &str, key: &str, att: Vec<harness_kernel::Attachment>| Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "42".into(),
+        kind,
+        text: Some(text.into()),
+        dedupe_key: key.into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: att,
+    };
+    let att = harness_kernel::Attachment {
+        path: "/media/xyz.pdf".into(),
+        name: "成绩单.pdf".into(),
+        mime: "application/pdf".into(),
+        digest: "xyz".into(),
+        bytes: 100,
+    };
+    tx.send(mk(InboundKind::Media, "", "u1", vec![att.clone()])).await.unwrap();
+    // 给暂存一点时间，再发指令
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tx.send(mk(InboundKind::Text, "把这个打印出来", "u2", vec![])).await.unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let seen = driver.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "第二句应该跑模型");
+    let joined = seen
+        .iter()
+        .flat_map(|h| h.iter())
+        .map(|m| m.payload.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("/media/xyz.pdf"), "暂存的附件要挂到这条消息：{joined}");
+}
