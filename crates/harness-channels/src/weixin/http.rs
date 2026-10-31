@@ -124,7 +124,13 @@ impl HttpApi {
         }
         if code != 0 {
             let msg = v.get("errmsg").and_then(Value::as_str).unwrap_or("");
-            return Err(ApiError::BadRequest(format!("{path} ret={code} {msg}")));
+            // -2 是通用拒绝码：额度耗尽 / 文本过长都会落到这里（WEIXIN F12）
+            let hint = if code == -2 {
+                "（可能额度耗尽：每条入站只给 10 条出站；也可能是单条文本过长）"
+            } else {
+                ""
+            };
+            return Err(ApiError::BadRequest(format!("{path} ret={code} {msg}{hint}")));
         }
         Ok(v)
     }

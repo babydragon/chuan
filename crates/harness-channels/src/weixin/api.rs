@@ -95,11 +95,26 @@ impl Item {
 
 impl WeixinMessage {
     /// 取这条消息的文本内容（多条文本 item 时按顺序拼接）。
+    ///
+    /// 语音走一条捷径：微信可能自带转写（`voice_item.text`，见 `docs/VOICE.md` U1）。
+    /// 有转写就直接当正文，加个「（语音）」前缀让模型知道这是说出来的话。
     pub fn text(&self) -> Option<String> {
         let mut out = String::new();
         for it in &self.item_list {
             if let Some(t) = it.text() {
                 out.push_str(t);
+            }
+        }
+        if out.is_empty() {
+            for it in &self.item_list {
+                if it.kind == 3 {
+                    if let Some(v) = &it.voice_item {
+                        let t = v.text.trim();
+                        if !t.is_empty() {
+                            return Some(format!("（语音）{t}"));
+                        }
+                    }
+                }
             }
         }
         if out.is_empty() {

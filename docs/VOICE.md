@@ -4,6 +4,10 @@
 > 与 `WEIXIN.md`（微信 iLink 实测事实）、`DECISIONS.md` D17/D18/D25 配套阅读。
 > 最后更新：2026-10-30。
 
+> **2026-10-31 更新**：微信侧已按"有转写就用"落地（rc.31）——`voice_item.text` 非空时当正文并加
+> 「（语音）」前缀，空则回一句"听不清"。**TG 侧仍为 0**：Bot API 不给转写，必须自己做 ASR
+> （通道加 `voice` 字段落盘 → 技能/ASR），本次未做。
+
 ## 0. 范围
 
 | 做 | 不做 |
@@ -117,7 +121,7 @@ voice_item.text 有值 → **直接用它当消息正文**（这就是"微信自
 
 | # | 项 | 为什么重要 | 怎么验 |
 |---|---|---|---|
-| U1 | **微信 `voice_item.text` 是否每条语音都有、质量如何** | 有 → 连 SILK 解码都不用做；没有 → 必须解 SILK 或走 ASR | 用探针 `listen` 发几条语音看输出（它已经会打印 `voice_item.text`） |
+| U1 | **微信 `voice_item.text` 是否每条语音都有、质量如何** | 有 → 连 SILK 解码都不用做；没有 → 必须解 SILK 或走 ASR | **分支已实现**（有就用、没有就回提示），发一条语音看它答不答得上来即可；探针 `listen` 也会打印 `voice_item.text` |
 | U2 | 微信语音是否**必须** AES 解密；`media.aes_key` 是否总存在 | 官方实现会跳过缺 key 的语音，说明存在这种消息 | 下载一条语音看 `media.aes_key` 是否为空 |
 | U3 | SILK 参数（24kHz / mono）是否对所有语音成立；`encode_type` 取值含义 | 决定解码器参数 | 取几条语音比对 `sample_rate` / `encode_type` |
 | U4 | TG `voice.mime_type` 是否稳定为 `audio/ogg` | 决定落盘扩展名与 mime | 发一条语音看日志 |

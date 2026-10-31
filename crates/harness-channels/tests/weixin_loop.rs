@@ -223,3 +223,75 @@ async fn typing_goes_to_the_right_account() {
     // 未知会话：静默跳过，不报错（best-effort）
     ch.typing("stranger@im.wechat").await.unwrap();
 }
+
+/// 语音：微信自带转写时直接当正文（VOICE.md U1 的"成立"分支）。
+#[tokio::test]
+async fn voice_with_transcript_becomes_text() {
+    let api = Arc::new(FakeApi::new());
+    let now = now_ms();
+    api.push_items(
+        31,
+        "u1@im.wechat",
+        vec![Item {
+            kind: 3,
+            text_item: None,
+            voice_item: Some(harness_channels::weixin::api::VoiceItem {
+                text: "明天记得带伞".into(),
+            }),
+        }],
+        "ctx-v",
+        now,
+    );
+
+    let got = collect(channel(Arc::clone(&api)), 1).await;
+    assert_eq!(got.len(), 1, "有转写就该当文本收进来");
+    let text = got[0].text.clone().unwrap_or_default();
+    assert!(text.contains("明天记得带伞"), "{text}");
+    assert!(text.starts_with("（语音）"), "要标出这是语音：{text}");
+    assert!(api.sent_texts().is_empty(), "有转写就不该回「听不了」的提示");
+}
+
+/// 语音没有转写：回一句提示，而不是静默。
+#[tokio::test]
+async fn voice_without_transcript_gets_a_notice() {
+    let api = Arc::new(FakeApi::new());
+    let now = now_ms();
+    api.push_items(
+        32,
+        "u1@im.wechat",
+        vec![Item {
+            kind: 3,
+            text_item: None,
+            voice_item: Some(harness_channels::weixin::api::VoiceItem { text: String::new() }),
+        }],
+        "ctx-v2",
+        now,
+    );
+
+    let got = collect(channel(Arc::clone(&api)), 1).await;
+    assert!(got.is_empty(), "没转写就不该进模型");
+
+    let sent = api.sent_texts();
+    assert_eq!(sent.len(), 1, "应回一句提示：{sent:?}");
+    assert!(sent[0].contains("语音"), "{sent:?}");
+}
+
+/// context_token 落盘：重启后（内存表空）仍能主动发。
+#[tokio::test]
+async fn context_token_survives_restart() {
+    let api = Arc::new(FakeApi::new());
+    let offsets = Arc::new(MemoryOffsets::default());
+    // 模拟上一次运行留下的令牌（key 与 poll_account 写入的一致）
+    offsets.set("wx.buf:b1@im.bot:ctx:u1@im.wechat", "ctx-old").await;
+
+    let ch = channel_with(vec![("u1@im.wechat", "b1@im.bot", Arc::clone(&api))], offsets);
+    let view = View {
+        shard: 0,
+        is_last: true,
+        blocks: vec![Block::Paragraph("重启后的第一条".into())],
+        status: None,
+        buttons: vec![],
+    };
+    ch.deliver("u1@im.wechat", view).await.unwrap();
+    assert_eq!(api.sent_texts(), vec!["重启后的第一条".to_string()]);
+}

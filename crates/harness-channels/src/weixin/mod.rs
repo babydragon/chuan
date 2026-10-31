@@ -162,7 +162,7 @@ impl<A: Api> WeixinChannel<A> {
         let Some(acc) = self.account_of(conversation) else {
             return Ok(());
         };
-        let ctx = self.ctx_of(conversation);
+        let ctx = self.ctx_for(conversation, &acc.bot_id).await;
         if let Err(e) = acc.api.typing(conversation, &ctx, on).await {
             tracing::debug!(error = %e, on, "微信 typing 失败");
         }
@@ -181,6 +181,16 @@ impl<A: Api> WeixinChannel<A> {
             .get(conversation)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// 内存里没有就从磁盘取（重启后第一次主动发就靠这条）。
+    async fn ctx_for(&self, conversation: &str, bot_id: &str) -> String {
+        let mem = self.ctx_of(conversation);
+        if !mem.is_empty() {
+            return mem;
+        }
+        let key = format!("{}:{}:ctx:{}", self.cursor_key, bot_id, conversation);
+        self.offsets.get(&key).await.unwrap_or_default()
     }
 }
 
@@ -251,7 +261,7 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
                 "没有绑定这个微信号的 bot：{conversation}（先 weixin-login）"
             ))
         })?;
-        let ctx = self.ctx_of(conversation);
+        let ctx = self.ctx_for(conversation, &acc.bot_id).await;
         if ctx.is_empty() {
             // 没有入站就没有 context_token（协议硬约束），只能等用户开口
             return Err(ChannelError::BadRequest(
@@ -330,9 +340,21 @@ async fn poll_account<A: Api + 'static>(
                 }
                 for m in u.msgs {
                     let Some(text) = m.text() else {
-                        // 本步只做文本：图片/文件/语音/视频一律跳过并留痕
+                        // 非文本：**回一句**而不是静默跳过——沉默会让人以为 bot 坏了。
+                        // 花 1 条额度（对方那条消息刚给的），可接受。
                         let kinds: Vec<&str> = m.item_list.iter().map(|i| i.kind_name()).collect();
-                        tracing::debug!(bot = %bot_id, id = m.message_id, ?kinds, "微信消息非文本，跳过");
+                        tracing::info!(bot = %bot_id, id = m.message_id, ?kinds, "微信消息非文本，回一句提示");
+                        let note = if kinds.iter().all(|k| *k == "voice") {
+                            "🎤 这条语音我没法转成文字（微信没给转写），麻烦打字或再说一遍"
+                        } else {
+                            "📎 图片/文件/视频我暂时看不了，先打字吧"
+                        };
+                        if !m.context_token.is_empty() {
+                            let cid = format!("chuan-note-{}", now_ms());
+                            if let Err(e) = api.send_text(&m.from_user_id, &m.context_token, note, &cid).await {
+                                tracing::debug!(bot = %bot_id, error = %e, "回提示失败");
+                            }
+                        }
                         continue;
                     };
                     let from = m.from_user_id.clone();
@@ -351,6 +373,10 @@ async fn poll_account<A: Api + 'static>(
                         ctx.lock()
                             .unwrap()
                             .insert(from.clone(), m.context_token.clone());
+                        // 落盘：重启后没有内存表，主动发（提醒/回复）还得靠它
+                        offsets
+                            .set(&format!("{cursor_key}:ctx:{from}"), &m.context_token)
+                            .await;
                     }
                     let kind = if text.starts_with('/') {
                         InboundKind::Command
