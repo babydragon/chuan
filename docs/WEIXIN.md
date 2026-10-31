@@ -106,7 +106,7 @@ POST /ilink/bot/get_bot_qrcode?bot_type=3
 | F11 | `sendtyping` `status=1` 生效，几秒后自动消失；`status=2` 的效果未单独验证 | 用户实看 |
 | F11b | `typing_ticket` 由 `getconfig(ilink_user_id)` 返回，可缓存复用；通道已接入（rc.29） | 探针 + 实现 |
 | F18 | `context_token` 可跨进程复用：通道按会话落盘到 kv，重启后仍能主动发（rc.31） | 实现 + 单测 |
-| F19 | 语音入站：有 `voice_item.text` 就当文本（前缀「（语音）」），没有就回一句提示；**是否每条都有待上板确认**（U1） | 实现（分支已就绪） |
+| F19 | 语音入站：`voice_item.text` **确实有值**——上板发语音，bot 正确复述了转写内容；无转写时回提示 | 实现 + 上板实测 |
 | F12 | `ret=-2 "prepare failed"` 是**通用拒绝码**：文本过大与额度耗尽都用它，不能据码区分 | 20000 字与配额两处都出现 |
 | F13 | `message_state=1` 的文本消息照常以普通气泡渲染，没有「生成中」的特殊外观 | 截图 |
 | F14 | **协议没有 reaction / 编辑接口**：唯一能"表达状态"的手段是再发一条消息，而每条出站消息占 10 条额度中的 1 条 | 端点表 + F10 |
@@ -154,6 +154,24 @@ POST /ilink/bot/get_bot_qrcode?bot_type=3
 - 媒体发送时文本与媒体拆成两个请求，各带独立 `client_id`〔官方〕。
 
 ---
+
+### 3.3 出站媒体（官方源码确认的实现细节）
+
+发一个文件/图片 = **两条消息**（说明文字 + 媒体），各占 1 条额度。
+
+```
+读文件 → md5(hex) → filesize = AES-128-ECB+PKCS#7 后的密文长度
+filekey = 16 字节随机(hex)；aeskey = 16 字节随机
+  → getuploadurl{ filekey, media_type(1图/2视频/3文件/4语音), to_user_id,
+                  rawsize, rawfilemd5, filesize, no_need_thumb: true, aeskey: hex }
+  → POST 密文到 upload_full_url（优先；否则用 upload_param + filekey 拼）
+     Content-Type: application/octet-stream
+  → 成功判据：HTTP 200 且响应头 x-encrypted-param 非空；4xx 立即放弃，其它最多重试 3 次
+  → sendmessage: item.media = { encrypt_query_param: 该响应头,
+                                aes_key: base64(hex 字符串),   ← 注意是"hex 的 base64"
+                                encrypt_type: 1 }
+     image_item.mid_size = 密文长度；file_item.file_name / len = 明文长度
+```
 
 ## 4. 官方文档另有、我方未验证的部分
 

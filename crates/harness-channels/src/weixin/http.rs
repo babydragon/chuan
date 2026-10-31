@@ -11,7 +11,10 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-use super::api::{Api, ApiError, Updates};
+use super::api::{Api, ApiError, MediaRef, Updates};
+
+/// 媒体 CDN 基址（`WEIXIN.md` §4）
+const CDN_BASE: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 /// 官方插件版本；`iLink-App-ClientVersion` = 0x00MMNNPP = 0x00020408 = 132104
 const CHANNEL_VERSION: &str = "2.4.8";
@@ -136,6 +139,71 @@ impl HttpApi {
     }
 }
 
+/// 只转义会破坏 query 的字符；`encrypt_query_param` 本身是 base64 串。
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 32 位 hex → 16 字节。
+fn hex16(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 || !s.is_ascii() {
+        return None;
+    }
+    let mut k = [0u8; 16];
+    for i in 0..16 {
+        k[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(k)
+}
+
+/// 密钥有两种编码（`WEIXIN.md` §4）：32 位 hex 原文，或它的 base64（也可能是 16 字节原始密钥的 base64）。
+fn parse_key(s: &str) -> Option<[u8; 16]> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(k) = hex16(s) {
+        return Some(k);
+    }
+    let raw = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
+    if raw.len() == 16 {
+        let mut k = [0u8; 16];
+        k.copy_from_slice(&raw);
+        return Some(k);
+    }
+    hex16(std::str::from_utf8(&raw).ok()?)
+}
+
+/// AES-128-ECB + PKCS#7 去填充。
+fn aes128_ecb_decrypt(bytes: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, ApiError> {
+    use aes::cipher::{BlockDecrypt, KeyInit};
+    if bytes.is_empty() || bytes.len() % 16 != 0 {
+        return Err(ApiError::BadRequest(format!("密文长度不对：{}", bytes.len())));
+    }
+    let cipher = aes::Aes128::new(key.into());
+    let mut out = Vec::with_capacity(bytes.len());
+    for chunk in bytes.chunks(16) {
+        let mut block = aes::Block::clone_from_slice(chunk);
+        cipher.decrypt_block(&mut block);
+        out.extend_from_slice(&block);
+    }
+    // PKCS#7：末字节 n，且 1<=n<=16，则去掉 n 个
+    let n = *out.last().unwrap_or(&0) as usize;
+    if (1..=16).contains(&n) && out.len() >= n && out[out.len() - n..].iter().all(|b| *b as usize == n) {
+        out.truncate(out.len() - n);
+    }
+    Ok(out)
+}
+
 #[async_trait]
 impl Api for HttpApi {
     async fn get_updates(&self, cursor: &str, timeout_ms: i64) -> Result<Updates, ApiError> {
@@ -181,6 +249,37 @@ impl Api for HttpApi {
             return Err(ApiError::BadRequest(format!("getupdates ret={code} {msg}")));
         }
         serde_json::from_value(v).map_err(|e| ApiError::Transport(format!("getupdates 解析失败: {e}")))
+    }
+
+    async fn download_media(&self, media: &MediaRef, key_hint: &str) -> Result<Vec<u8>, ApiError> {
+        let url = if !media.full_url.is_empty() {
+            media.full_url.clone()
+        } else {
+            format!(
+                "{CDN_BASE}/download?encrypted_query_param={}",
+                percent_encode(&media.encrypt_query_param)
+            )
+        };
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| ApiError::Transport(format!("下载媒体失败: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(ApiError::BadRequest(format!("下载媒体 HTTP {}", resp.status())));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| ApiError::Transport(format!("读媒体失败: {e}")))?;
+        // 密钥：图片专用 aeskey 优先，其次 media.aes_key；都没有就按明文处理
+        let key = parse_key(key_hint).or_else(|| parse_key(&media.aes_key));
+        match key {
+            Some(k) => aes128_ecb_decrypt(&bytes, &k),
+            None => Ok(bytes.to_vec()),
+        }
     }
 
     async fn typing(&self, user: &str, ctx: &str, on: bool) -> Result<(), ApiError> {

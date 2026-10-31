@@ -101,6 +101,8 @@ fn now_ms() -> i64 {
 
 #[derive(Clone, Debug)]
 pub struct WeixinConfig {
+    /// 入站媒体落盘目录（宿主路径，沙盒里以 /media 只读可见）
+    pub media_dir: std::path::PathBuf,
     /// 超过该秒数的入站消息直接丢弃（断网恢复后不追更）
     pub stale_after_s: i64,
     /// 长轮询游标在 store 里的 key
@@ -109,7 +111,11 @@ pub struct WeixinConfig {
 
 impl Default for WeixinConfig {
     fn default() -> Self {
-        Self { stale_after_s: 300, cursor_key: "wx.buf".into() }
+        Self {
+            media_dir: std::env::temp_dir().join("chuan-media"),
+            stale_after_s: 300,
+            cursor_key: "wx.buf".into(),
+        }
     }
 }
 
@@ -126,6 +132,7 @@ pub struct Account<A: Api> {
 pub struct WeixinChannel<A: Api> {
     accounts: Vec<Account<A>>,
     offsets: Arc<dyn OffsetStore>,
+    media_dir: std::path::PathBuf,
     stale_after_s: i64,
     cursor_key: String,
     caps: Caps,
@@ -139,6 +146,7 @@ impl<A: Api> WeixinChannel<A> {
         Self {
             accounts,
             offsets,
+            media_dir: cfg.media_dir,
             stale_after_s: cfg.stale_after_s,
             cursor_key: cfg.cursor_key,
             caps: Caps {
@@ -219,6 +227,7 @@ impl<A: Api + 'static> Channel for WeixinChannel<A> {
                 format!("{}:{}", self.cursor_key, acc.bot_id),
                 Arc::clone(&self.offsets),
                 self.stale_after_s,
+                self.media_dir.clone(),
                 tx.clone(),
                 cancel.clone(),
                 Arc::clone(&self.ctx),
@@ -318,6 +327,7 @@ async fn poll_account<A: Api + 'static>(
     cursor_key: String,
     offsets: Arc<dyn OffsetStore>,
     stale_after_s: i64,
+    media_dir: std::path::PathBuf,
     tx: mpsc::Sender<Inbound>,
     cancel: CancellationToken,
     ctx: Arc<Mutex<HashMap<String, String>>>,
@@ -339,23 +349,67 @@ async fn poll_account<A: Api + 'static>(
                     longpoll_ms = u.longpolling_timeout_ms.min(60_000);
                 }
                 for m in u.msgs {
-                    let Some(text) = m.text() else {
-                        // 非文本：**回一句**而不是静默跳过——沉默会让人以为 bot 坏了。
-                        // 花 1 条额度（对方那条消息刚给的），可接受。
-                        let kinds: Vec<&str> = m.item_list.iter().map(|i| i.kind_name()).collect();
-                        tracing::info!(bot = %bot_id, id = m.message_id, ?kinds, "微信消息非文本，回一句提示");
-                        let note = if kinds.iter().all(|k| *k == "voice") {
-                            "🎤 这条语音我没法转成文字（微信没给转写），麻烦打字或再说一遍"
-                        } else {
-                            "📎 图片/文件/视频我暂时看不了，先打字吧"
+                    // 先落媒体：图片给视觉、PDF 给打印/处理，都要文件先到 /media
+                    let mut attachments = Vec::new();
+                    for it in &m.item_list {
+                        let (media, key, name) = match it.kind {
+                            2 => match &it.image_item {
+                                Some(i) => (
+                                    i.media.clone(),
+                                    i.aeskey.clone(),
+                                    format!("image_{}.jpg", m.message_id),
+                                ),
+                                None => continue,
+                            },
+                            4 => match &it.file_item {
+                                Some(f) => {
+                                    let name = if f.file_name.is_empty() {
+                                        format!("file_{}", m.message_id)
+                                    } else {
+                                        f.file_name.clone()
+                                    };
+                                    (
+                                        f.media.clone(),
+                                        f.media.as_ref().map(|x| x.aes_key.clone()).unwrap_or_default(),
+                                        name,
+                                    )
+                                }
+                                None => continue,
+                            },
+                            _ => continue,
                         };
-                        if !m.context_token.is_empty() {
-                            let cid = format!("chuan-note-{}", now_ms());
-                            if let Err(e) = api.send_text(&m.from_user_id, &m.context_token, note, &cid).await {
-                                tracing::debug!(bot = %bot_id, error = %e, "回提示失败");
-                            }
+                        let Some(media) = media else { continue };
+                        if let Some(a) =
+                            fetch_attachment(&*api, &media, &key, &name, &media_dir).await
+                        {
+                            attachments.push(a);
                         }
-                        continue;
+                    }
+
+                    let text = match m.text() {
+                        Some(t) => t,
+                        None if !attachments.is_empty() => String::new(),
+                        None => {
+                            // 既没文字也没落成附件：**回一句**而不是静默（沉默会被当成坏了）
+                            let kinds: Vec<&str> =
+                                m.item_list.iter().map(|i| i.kind_name()).collect();
+                            tracing::info!(bot = %bot_id, id = m.message_id, ?kinds, "微信消息没有可用内容，回提示");
+                            let note = if kinds.iter().all(|k| *k == "voice") {
+                                "🎤 这条语音我没法转成文字（微信没给转写），麻烦打字或再说一遍"
+                            } else {
+                                "📎 这类消息我暂时处理不了，先打字吧"
+                            };
+                            if !m.context_token.is_empty() {
+                                let cid = format!("chuan-note-{}", now_ms());
+                                if let Err(e) = api
+                                    .send_text(&m.from_user_id, &m.context_token, note, &cid)
+                                    .await
+                                {
+                                    tracing::debug!(bot = %bot_id, error = %e, "回提示失败");
+                                }
+                            }
+                            continue;
+                        }
                     };
                     let from = m.from_user_id.clone();
                     if from.is_empty() {
@@ -380,6 +434,8 @@ async fn poll_account<A: Api + 'static>(
                     }
                     let kind = if text.starts_with('/') {
                         InboundKind::Command
+                    } else if !attachments.is_empty() {
+                        InboundKind::Media
                     } else {
                         InboundKind::Text
                     };
@@ -393,7 +449,7 @@ async fn poll_account<A: Api + 'static>(
                         callback_id: None,
                         msg: Some(MsgRef(m.message_id.to_string())),
                         received_at: if m.create_time_ms > 0 { m.create_time_ms } else { now_ms() },
-                        attachments: Vec::new(),
+                        attachments,
                     };
                     if tx.send(inbound).await.is_err() {
                         return Err(ChannelError::Closed);
@@ -409,6 +465,41 @@ async fn poll_account<A: Api + 'static>(
                 tracing::warn!(bot = %bot_id, error = %e, "微信轮询失败，2s 后重试");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
+        }
+    }
+}
+
+/// 下载 + 解密 + 落盘。失败只告警，返回 None（消息继续按"没有附件"处理）。
+async fn fetch_attachment<A: Api>(
+    api: &A,
+    media: &api::MediaRef,
+    key_hint: &str,
+    name: &str,
+    dir: &std::path::Path,
+) -> Option<harness_kernel::Attachment> {
+    /// iLink 的大小上限未验证（`WEIXIN.md` M1）；先按 20MB 挡住，避免把内存打满
+    const MAX_BYTES: usize = 20 * 1024 * 1024;
+    match api.download_media(media, key_hint).await {
+        Ok(bytes) if bytes.len() > MAX_BYTES => {
+            tracing::warn!(name, bytes = bytes.len(), "微信媒体超过 20MB，跳过");
+            None
+        }
+        Ok(bytes) => {
+            let mime = crate::media::sniff_mime(&bytes, name);
+            match crate::media::save_media(dir, &bytes, name, &mime) {
+                Ok(a) => {
+                    tracing::info!(name, mime, bytes = bytes.len(), "微信媒体已落盘");
+                    Some(a)
+                }
+                Err(e) => {
+                    tracing::warn!(name, error = %e, "保存微信媒体失败");
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(name, error = %e, "下载微信媒体失败");
+            None
         }
     }
 }

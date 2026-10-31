@@ -33,7 +33,11 @@ fn channel_with(
     Arc::new(WeixinChannel::new(
         accs,
         offsets,
-        WeixinConfig { stale_after_s: 300, cursor_key: "wx.buf".into() },
+        WeixinConfig {
+            media_dir: std::env::temp_dir().join("chuan-test-wx-media"),
+            stale_after_s: 300,
+            cursor_key: "wx.buf".into(),
+        },
     ))
 }
 
@@ -234,10 +238,10 @@ async fn voice_with_transcript_becomes_text() {
         "u1@im.wechat",
         vec![Item {
             kind: 3,
-            text_item: None,
             voice_item: Some(harness_channels::weixin::api::VoiceItem {
                 text: "明天记得带伞".into(),
             }),
+            ..Default::default()
         }],
         "ctx-v",
         now,
@@ -261,8 +265,8 @@ async fn voice_without_transcript_gets_a_notice() {
         "u1@im.wechat",
         vec![Item {
             kind: 3,
-            text_item: None,
             voice_item: Some(harness_channels::weixin::api::VoiceItem { text: String::new() }),
+            ..Default::default()
         }],
         "ctx-v2",
         now,
@@ -294,4 +298,77 @@ async fn context_token_survives_restart() {
     };
     ch.deliver("u1@im.wechat", view).await.unwrap();
     assert_eq!(api.sent_texts(), vec!["重启后的第一条".to_string()]);
+}
+
+/// 入站媒体：图片和 PDF 都要落成附件（视觉/打印都靠它）。
+#[tokio::test]
+async fn inbound_media_lands_as_attachment() {
+    let api = Arc::new(FakeApi::new());
+    // 一张最小 PNG（只看文件头，sniff 会认成 image/png）
+    *api.media_bytes.lock().unwrap() =
+        vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+
+    let now = now_ms();
+    api.push_items(
+        41,
+        "u1@im.wechat",
+        vec![Item {
+            kind: 2,
+            image_item: Some(harness_channels::weixin::api::ImageItem {
+                media: Some(harness_channels::weixin::api::MediaRef {
+                    encrypt_query_param: "q".into(),
+                    aes_key: String::new(),
+                    encrypt_type: 1,
+                    full_url: "https://example.invalid/x".into(),
+                }),
+                aeskey: "00".repeat(16),
+                mid_size: 12,
+            }),
+            ..Default::default()
+        }],
+        "ctx-img",
+        now,
+    );
+
+    let got = collect(channel(Arc::clone(&api)), 1).await;
+    assert_eq!(got.len(), 1, "纯图片也要进模型");
+    assert_eq!(got[0].kind, InboundKind::Media);
+    assert_eq!(got[0].text.as_deref(), Some(""));
+    assert_eq!(got[0].attachments.len(), 1);
+    assert_eq!(got[0].attachments[0].mime, "image/png", "mime 靠文件头猜");
+    assert!(got[0].attachments[0].path.contains("chuan-test-wx-media"));
+}
+
+/// 入站 PDF：文件名保留，mime 认成 application/pdf（打印/解析都靠这个）。
+#[tokio::test]
+async fn inbound_pdf_keeps_name_and_mime() {
+    let api = Arc::new(FakeApi::new());
+    *api.media_bytes.lock().unwrap() = b"%PDF-1.7 fake".to_vec();
+
+    api.push_items(
+        42,
+        "u1@im.wechat",
+        vec![Item {
+            kind: 4,
+            file_item: Some(harness_channels::weixin::api::FileItem {
+                media: Some(harness_channels::weixin::api::MediaRef {
+                    encrypt_query_param: "q".into(),
+                    aes_key: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+                    encrypt_type: 1,
+                    full_url: String::new(),
+                }),
+                file_name: "成绩单.pdf".into(),
+                len: "14".into(),
+            }),
+            ..Default::default()
+        }],
+        "ctx-pdf",
+        now_ms(),
+    );
+
+    let got = collect(channel(Arc::clone(&api)), 1).await;
+    assert_eq!(got.len(), 1);
+    let a = &got[0].attachments[0];
+    assert_eq!(a.name, "成绩单.pdf");
+    assert_eq!(a.mime, "application/pdf");
 }

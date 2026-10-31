@@ -281,6 +281,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
                 accs,
                 offsets as Arc<dyn OffsetStore>,
                 WeixinConfig {
+                    media_dir: std::path::PathBuf::from(&cfg.media_dir),
                     stale_after_s: cfg.weixin_stale_s,
                     cursor_key: "wx.buf".into(),
                 },

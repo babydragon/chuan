@@ -16,6 +16,8 @@ pub struct FakeApi {
     pub fail: Mutex<Option<&'static str>>,
     /// 记录过的 typing：(user, on)
     pub typings: Mutex<Vec<(String, bool)>>,
+    /// `download_media` 返回的内容（测试里塞假图片）
+    pub media_bytes: Mutex<Vec<u8>>,
     next_id: Mutex<i64>,
 }
 
@@ -29,7 +31,7 @@ impl FakeApi {
         self.push_items(
             message_id,
             from,
-            vec![Item { kind: 1, text_item: Some(super::api::TextItem { text: text.into() }), voice_item: None }],
+            vec![Item { kind: 1, text_item: Some(super::api::TextItem { text: text.into() }), ..Default::default() }],
             ctx,
             at_ms,
         );
@@ -89,6 +91,14 @@ impl Api for FakeApi {
                 Ok(Updates::default())
             }
         }
+    }
+
+    async fn download_media(
+        &self,
+        _media: &super::api::MediaRef,
+        _key_hint: &str,
+    ) -> Result<Vec<u8>, ApiError> {
+        Ok(self.media_bytes.lock().unwrap().clone())
     }
 
     async fn typing(&self, user: &str, _ctx: &str, on: bool) -> Result<(), ApiError> {

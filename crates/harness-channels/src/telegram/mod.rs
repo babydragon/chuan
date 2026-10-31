@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::html::to_html;
+use crate::media::save_media;
 use crate::view::render_plain;
 use api::{Api, ApiError};
 
@@ -378,41 +379,6 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
         let specs = self.command_specs();
         self.api.set_my_commands(&specs).await.map_err(map_err)
     }
-}
-
-/// 按内容摘要落盘：同一张图发两次只存一份。通道不理解内容，只保证文件在。
-fn save_media(
-    dir: &std::path::Path,
-    bytes: &[u8],
-    name: &str,
-    mime: &str,
-) -> std::io::Result<harness_kernel::Attachment> {
-    use std::io::Write;
-    std::fs::create_dir_all(dir)?;
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    let digest = format!("{h:016x}");
-    let ext = name
-        .rsplit_once('.')
-        .map(|(_, e)| e.to_ascii_lowercase())
-        .filter(|e| e.len() <= 5 && !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()))
-        .map(|e| format!(".{e}"))
-        .unwrap_or_default();
-    let path = dir.join(format!("{digest}{ext}"));
-    if !path.exists() {
-        let mut f = std::fs::File::create(&path)?;
-        f.write_all(bytes)?;
-    }
-    Ok(harness_kernel::Attachment {
-        path: path.to_string_lossy().into_owned(),
-        name: name.to_owned(),
-        mime: mime.to_owned(),
-        digest,
-        bytes: bytes.len() as u64,
-    })
 }
 
 fn map_err(e: ApiError) -> ChannelError {

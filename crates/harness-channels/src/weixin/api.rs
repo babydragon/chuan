@@ -54,6 +54,46 @@ pub struct Item {
     pub text_item: Option<TextItem>,
     #[serde(default)]
     pub voice_item: Option<VoiceItem>,
+    #[serde(default)]
+    pub image_item: Option<ImageItem>,
+    #[serde(default)]
+    pub file_item: Option<FileItem>,
+}
+
+/// CDN 引用（`WEIXIN.md` §4）：优先 `full_url`，否则用 `encrypt_query_param` 拼。
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct MediaRef {
+    #[serde(default)]
+    pub encrypt_query_param: String,
+    #[serde(default)]
+    pub aes_key: String,
+    #[serde(default)]
+    pub encrypt_type: i64,
+    #[serde(default)]
+    pub full_url: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ImageItem {
+    #[serde(default)]
+    pub media: Option<MediaRef>,
+    /// 图片专用密钥：32 位 hex，优先于 `media.aes_key`
+    #[serde(default)]
+    pub aeskey: String,
+    /// 密文字节数（仅展示）
+    #[serde(default)]
+    pub mid_size: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct FileItem {
+    #[serde(default)]
+    pub media: Option<MediaRef>,
+    #[serde(default)]
+    pub file_name: String,
+    /// 明文字节数（十进制字符串）
+    #[serde(default)]
+    pub len: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -129,6 +169,14 @@ impl WeixinMessage {
 pub trait Api: Send + Sync {
     /// 长轮询；服务端超时（无消息）应返回空 `Updates` 而不是错误。
     async fn get_updates(&self, cursor: &str, timeout_ms: i64) -> Result<Updates, ApiError>;
+
+    /// 下载并解密一条媒体（图片/文件）。`key_hint` 是图片专用的 `aeskey`，
+    /// 为空时回落到 `media.aes_key`（`WEIXIN.md` §4）。
+    async fn download_media(
+        &self,
+        media: &MediaRef,
+        key_hint: &str,
+    ) -> Result<Vec<u8>, ApiError>;
 
     /// 设置/取消"正在输入"。失败可以忽略（best-effort）。
     async fn typing(&self, user: &str, ctx: &str, on: bool) -> Result<(), ApiError>;
