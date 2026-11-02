@@ -16,6 +16,7 @@ tokio = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
+harness-capabilities = { workspace = true }
 tempfile = "3"
 async-trait = { workspace = true }
 tokio-util = { workspace = true }

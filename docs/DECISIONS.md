@@ -374,6 +374,8 @@ MITM（自签 CA 进沙盒信任库）；要覆盖两条 lane 就得在离线 ne
 授权是**数据**：`[host.path]`（路径 → `ro`/`rw` + `approval`）、`[[host_elevated.grant]]`
 （argv 前缀 → `approval` + `snapshot`）。授权表**按 mtime 热加载**——加一条不用重启，
 因为重启会打断 agent 正在跑的那一轮，而"开口子"恰恰发生在这时。解析失败 fail-closed。
+（第三份数据是**命令条目表** `commands.d/`，见 D31：它不由人手写，而是内核在主人批准后写，
+而且条目是**封闭参数**而非开尾 argv 前缀。）
 
 权限三档 scope：
 
@@ -719,11 +721,16 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
 
 **反悔成本**：低。判据是 `is_bare_media()` 一个函数，去掉就回到"直接跑"。
 
-## D30 · 审批分两类 + `lan` 命名动作白名单（**设计已定，未实现**）
+## D30 · 审批分两类 + 家人零审批（**设计已定，未实现**）
 
-> 状态：**未实现**。本节是 2026-11-02 讨论后的定稿设计，代码现状仍是
-> `verdict(tool, domain)` 无角色、`[identity]` 内同权、`lan` 只接受 `script`。
-> 落地顺序见本节末尾。
+> 状态：**P0–P4 已实现（开发机）**，等上板复核（`SBC-VERIFY §13`）。本节是 2026-11-02 的定稿设计，
+> 同日按"家人零审批"口径修正过两次：
+> ① 家人**不收到任何审批卡**（含 Confirm），歧义改为普通对话反问；
+> ② `lan` 的"命名动作"泛化为**命令条目表**，独立成 D31，本节只留指针。
+>
+> 已落地：`[identity] owner` + `ActorRole`、按角色的运行时判定（`policy::decide`）、
+> `RunStatus::Blocked` 与 runner 真终止、三条批准入口的批准人校验。
+> 已落地全部五段。剩余是上板项（真实打印机、纸型名、通道实测），见 `SBC-VERIFY.md §13`。
 
 **背景**：三个真实瓶颈——(1) 通知渠道不可靠（TG 要开代理、微信只能被动回）；
 (2) 家人使用的动作（打印、查状态）每次都弹审批；(3) 审批卡是一长串 shell
@@ -732,33 +739,96 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
 
 **决定**：
 
-1. **身份**：`[identity] owner = "<user-id>"`。member 触达 `host` / `host_elevated` /
-   `install` 一律 **Deny（不是 Ask）**——不给家人看不懂的卡；未绑定的 actor 按 member 处理
-   （fail closed）。`sandbox` / `outbound` / `lan` 不受角色影响。
+1. **身份**：`[identity] owner = "<user-id>"`，其余已绑定的人一律是 **member**（`ActorRole`；
+   别叫 `Role`——消息角色已占用该名）。未绑定的 actor 按 member 处理（fail closed）。
+   owner 与 member 的差别**只有一条：谁能批准**。member 拿不到任何审批卡，所以给家人的
+   可用面必须靠"构造上有界"的东西支撑：沙盒 / 出网 / 宿主观测 / `who = "anyone"` 的
+   命令条目（D31）/ 声明了 `member_safe` 且能自证"只作用于发起者本人"的工具（目前只有
+   `remind`）。
+
+   **运行时判定顺序**（不可颠倒；数据面 `Verdict` 仍是三值，`GateDecision` 是四值）：
+
+   ```
+   Deny（domain = deny，对所有人不变，这是天花板）
+     → 命令条目命中 + 参数全在域内 → Allow        // 条目是 Ask 的答案，不是新授权层（D31）
+     → member 且 domain ∉ {sandbox, outbound, host_observe}
+         且（未声明 member_safe 或这一条未自证有界）且未命中命令条目
+         → Blocked{need_owner}                    // 终态：记提案、通知 owner、不建审批行
+     → Ask（只对 owner；member 到不了这里）
+   ```
+
+   为什么条目在角色上限**之前**：否则家人连打印都不成立（`lan` 默认 ask，而家人不能批）。
+   为什么 `Deny` 在条目**之前**：D22 的天花板是"`skip_approval` 只能把 ask 放成允许"，
+   条目同样不能把 `deny` 放开；把 `[policy] lan = "deny"` 写下去，该域条目整批失效。
+   `member_safe` 必须是 fail-closed 的显式声明（默认 false），且只能由数据/自指条件判定，
+   不得有自由裁量。
 2. **审批分两类**（同一张表加 `kind`，不建两套子系统）：
 
-   | | `Permission`（权限） | `Confirm`（确认） |
+   | | `Permission`（权限批准） | `Confirm`（单次确认） |
    |---|---|---|
-   | 谁批 | 只有 owner | 发起者本人（含家人） |
-   | 批准后 | 只改白名单，**不执行任何动作** | 执行那一次动作 |
+   | 谁批 | **只有 owner** | **只有 owner**（原设计"发起者本人"已修正） |
+   | 批准后 | 只改命令条目表，**不执行任何动作**（D31） | 执行那一次动作 |
    | 请求方等吗 | 不等（该 run 以 `Blocked` 终止） | 等（短 TTL，默认 10 分钟） |
    | 过期 | 提案作废 | 动作作废，不重放 |
 
-3. **`lan` 命名动作白名单**：不再接受 `sh -lc` 作为免审批路径。动作表给
-   `argv` 模板 + 参数域（枚举 / 由发现动作填充 / 必须是 `/ws` 下的文件），进程按
-   `Command::new(argv[0]).args(..)` 启动，**不经过 shell**。参数越界直接拒绝。
-   首批动作：`print_file` / `printer_status` / `supplies` / `printer_list`。
+   **修正理由**：家人没有计算机基础，卡片上的 argv 他看不懂——看不懂的确认等于无脑点允许，
+   比不给卡更糟。所以 `Confirm` 不再给家人；家人遇到"必须确认"的情况走**普通对话反问**
+   （agent 自己说不准，问一句"是明天早上八点吗"），这既不是审批、也不落审批表。
+   三条批准入口必须校验批准人：`Permission` 要求 owner，`Confirm` 要求 owner；
+   不匹配时不改状态并回一句"这个需要更高权限的账号来确认"。
+
+3. **`lan` 不再接受 `sh -lc` 作为免审批路径**：免审批只能走**命令条目**（D31）。
+   条目给 `argv` 模板 + 封闭参数域，进程按 `Command::new(argv[0]).args(..)` 启动，
+   **不经过 shell**；参数越界直接拒绝，不落到沙盒里才发现。`lan_exec` 保留为 owner 的
+   逃生口（逐条确认），描述里写明"有对应条目就用条目"。
+   首批条目：`print_file` / `printer_status` / `supplies` / `printer_list`。
+   泛化到 `host`、以及为什么 `install` 永远不进条目表，见 D31。
 4. **扩张由 agent 提议、owner 一次批准**：新增纸型（A4/B5/相纸）、换打印机都走
-   `capability propose` → 一张"一行 diff"的卡 → 批准后写白名单。agent 不能自批；
-   白名单文件在 `PROTECTED` 里，agent 无直接写路径。
-5. **未授权 = 终态**：`lan` 收到未列入的 script → 返回 `Blocked{proposal}`，
-   kernel **结束该 run**，prompt 明确"不要换路径重试"。最坏烧一轮，不是十分钟。
+   `capability(action="request", kind="command")` → 一张显示规范化条目 + **单独一行
+   `env` / `who`** 的卡 → 批准后**由内核**写入 `commands.d/<name>.toml` 并热加载。
+   agent 不写盘（它拿不到该目录的写路径），也不能自批；详见 D31 §7–§8。
+5. **未授权 = 终态**：表外条目、参数越界、member 触到域上限，一律 `Blocked`
+   （结构化：缺什么 + 已授权什么 + 下一步），kernel **真正结束该 run**，prompt 明确
+   "不要换路径重试"。最坏烧一轮，不是十分钟。
+   > 现状不是这样：拒绝只写 `denied` 然后 `return Ok(())`，run 继续，模型会换写法再试。
+   > `RunStatus` 目前也只有 `Done`/`Failed`/`Cancelled`，三态化是 P0.5 的全部内容。
 6. **不做异步待办与自动续跑**：几小时后执行往往已无意义（提醒过点、纸已手工打）。
    批准改变的是**未来能力**，不是过去那一次。
-7. **提醒默认不审批**：时间解析确定就直接回"已排期 <时间>"；只有"明早/下周"这类
-   歧义才向**发起者本人**确认。这消掉家人遇到的最高频审批。
-8. **家人路径**：不给审批按钮；回复是"这个我现在没有权限做，已经记下来告诉主人了，
-   你可以先自己处理，或者等主人回来"。owner 侧只在**同一形状重复被挡**时才收到提案。
+7. **提醒默认不审批**（已实现）：工具按"目标就是发起者本人 + 绝对时间在未来"自证有界，
+   直接回"已排期 <本地时间>"；只有"明早/下周"这类**语义**歧义才反问，且走普通对话，
+   **不建审批行、不发卡**。这条现在是**必需**而不是优化：家人不能批，`remind` 若仍
+   走 `SelfModify` 的 Ask，家人就完全没法设提醒。
+
+   免审对**所有形态**、**所有主体**成立（`Tool::preapproved_for` 只做数据判断：
+   目标自指 + 时间可解析且在将来）。四种形态：
+
+   | 形态 | 到点做什么 |
+   |---|---|
+   | `message`（静态） | 只发这句话 |
+   | `skill`（钉住脚本） | 跑已安装技能（离线沙盒），不过模型 |
+   | `skill` + `polish` | 先跑脚本，**再跑一轮模型**加工输出 |
+   | `text` | **跑一轮模型**（带着工具面） |
+
+   **到点那一轮不进审批**（`InboundKind::Scheduled`）：
+   - 遇到 `Ask` 的步骤**不发卡、不等人**，直接跳过，并立刻给 owner 一条
+     "有条定时任务需要审批"（同一会话 + 同一工具只报一次）；
+   - 整轮结束不是 `Done`（失败 / 被挡 / 取消）→ 再给 owner 一条结果通知。
+   理由：定时任务跑在凌晨，发卡只会白等 10 分钟超时、还把整轮拖垮；失败也不能无声无息。
+
+   后两种会跑模型，于是有人问"家人能不能靠它绕过审批"。答案是不需要拦：
+   到点那一轮的主体会被**继承**（`actor` = 创建者），所以能力面不会超过他本人在场时的
+   范围；拦掉形态只会让家人永远用不了需要模型的提醒。无人值守这件事用**可见性**管：
+   家人建成模型形态的任务后，owner 会收到一条通知（任务内容 + 下次时间 + 怎么取消），
+   只通知一次，不挂卡、不等待。
+
+   理由：`text` 形态等于排了一个"几小时后执行任意工具动作"的无人值守任务；家人能建它，
+   就把"当时没人在场"变成了绕过审批的通道。成员把已有提醒 `update` 成 `text` 形态同样拦。
+8. **家人路径**：**不给审批卡、不给按钮、不挂起**。被 `Blocked` 时的回复是
+   "这个我现在没有权限做，已经记录下来了；你可以先自己处理，或者等有权限的人回来"。
+   （文案里不写身份称谓，见 `GLOSSARY.md` §G.9。）
+   owner 侧只在**同一形状重复被挡**（≥2 次/24h）时才收到一条提案，避免被当成日志。
+   家人能做的事只有：沙盒内的事、出网取资料、看宿主状态、`who = "anyone"` 的命令条目
+   （打印/查墨量），以及回答 agent 的反问。
 
 **理由**：免审批不能靠"人看过"，要靠**构造上效果有界**（固定 argv + 封闭参数域）。
 人的角色从"逐次审命令"变成"一次性批形状"；agent 负责发现与维护数据，但不能自授权。
@@ -766,12 +836,137 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
 **非目标**：RBAC / 多租户；对任意 shell 做语法白名单（做不对）；用频率配额代替审批
 （只是把问题推后）；异步审批 + 续跑。
 
-**代价**：`policy` 的 `verdict` 需要角色参数（贯穿 actor/runner/gate）；
-`lan` 从"万能 shell"变成"动作表"，遇到表外需求只能提 proposal；
-审批表增加 `kind` 与两种 TTL。
+**代价**：
+- `verdict` 保持三值（数据面），但 gate 要输出四态 `GateDecision` 并贯穿 actor/runner/两处 gate；
+  `Tool` 增一个 fail-closed 的 `member_safe()`。
+- `lan` 从"万能 shell"变成条目表，遇到表外需求只能提 proposal（多一次往返）。
+- 审批表增 `kind` / `requester`（schema V6），内核多一条"批准后写数据文件"的路径
+  （写盘不在事务里，靠两条 journal 事件与 hash 校验兜底，见 D31）。
+- 家人能力面被压窄：raw `host` / `lan_exec` / `install_deps` / 发布技能一律不可用。
 
-**反悔成本**：中。动作表与审批分类都是数据/局部代码，可回退；但白名单一旦对家人开放，
+**反悔成本**：中。命令条目表与审批分类都是数据/局部代码，可回退；但白名单一旦对家人开放，
 撤销需要重新训练使用习惯。
 
-**落地顺序**：P0 身份门禁 → P1 打印三件套 + `Blocked` → P2 `propose/approve` →
-P3 提醒去审批 → P4 家人 UX。
+**落地顺序**：P0 身份与批准人校验 → P0.5 `Blocked` 三态 → P1 命令条目表 + `lan_command`
+（D31）→ P2 `capability` 提案与内核安装 → P3 提醒去审批 → P4 家人 UX →
+P5 触发式（`host_command` / `commands.d` 权限升级 / 发现动作）。
+
+---
+
+## D31 · 命令条目表（`commands.d`）：把"免审批"变成数据（**设计已定，未实现**）
+
+> 状态：**P1 + P2 已实现（开发机）**：`env="lan"`、四个条目、审计、`capability` 提案与
+> 内核安装/删除（`Permission` 审批 + 指纹校验）。`host_command` 属 P5。D30 §3 的"`lan` 命名动作白名单"是本条的 `env="lan"` 特例，
+> 两者不要各写一套。实现顺序见 D30 末尾。
+
+**决定**：
+
+1. **形态**：一条**命令条目**（Command Entry）= 名字 + 执行环境 + argv 模板 + 一组封闭参数域。
+   落盘 `commands.d/<name>.toml`，**一文件一条**：好审（一行 diff）、好回滚（删文件）、
+   好热加载（单文件 mtime）、不会多写者合并。
+
+   ```toml
+   # commands.d/print_file.toml
+   env = "lan"                    # lan | host（install 永不进表，见 §11）
+   argv = ["/usr/bin/lp", "-d", "{printer}", "-o", "media={media}", "{file}"]
+   timeout_ms = 20000
+   who = "anyone"                 # owner（默认）| anyone
+   [params]
+   printer = { enum = ["HP-DeskJet-2720", "Brother-L2350"] }
+   media   = { enum = ["A4", "B5", "photo_4x6"] }
+   file    = { file = ["/ws"] }
+   ```
+
+2. **按 env 分工具，不引入"按参数决定域"**：v1 只有 `lan_command(name, args)`，
+   将来 `host_command`。`Tool::domain()` **保持静态**——动态域会让
+   `effect/lane/tier` 只改半个契约；更糟的是 gate 批的条目与 execute 解析的条目可能
+   不是同一条（热加载、改名），审计无法自证。
+   **代价要认**：同一个工具内所有条目共用 `effect()` / `lane()` / `tier()`，所以
+   `lan_command` 一律 `External`（崩溃后不自动重跑）、车道 `io`、`tier = 1`（子 agent 不打印）。
+   只读条目因此也不重跑——可接受：重跑一次查询很便宜，误重跑一次打印很贵。
+
+3. **授权语义**：条目是 `Ask` 的答案，**不是新的授权层**（等价于
+   `[host.path] approval = "always"` 换来的免问）。`deny` 是天花板：某域配成 `deny`
+   时该域条目整批失效。`who = "anyone"` 只表示"这一条不打扰任何发起者"，
+   **不表示跨过 member 的域上限**——member 能用的条目只能是 `env = "lan"`。
+
+4. **参数域只有四种**（v1）：`enum` / `file`（限定根；执行时 canonicalize，
+   拒绝符号链接逃逸）/ `int { min, max }` / 封闭 `pattern`（ASCII 字符类，
+   形如 `{ chars = "A-Za-z0-9 _-", min = 1, max = 12 }`；"任意包名"这种
+   "选择代码"的开放域不算封闭）。
+   **`file` 的根 v1 只有 `/ws`**：`lan` lane 不挂 `/media`（那条 lane 同时跑
+   `lan_exec`，为打印放开整块相册不值）。要打聊天里的图片，先让沙盒 `cp` 到 `/ws`
+   —— 两步都对家人免审（沙盒默认 allow），用户无感。把 `/media` 挂进 lan 是 P5 的
+   一次显式取舍，不是顺手加一行。
+   **不做"由发现动作填充"**：模型传值 = 域不封闭，内核缓存 = 隐式状态。
+   `printer` 用 `enum`，换打印机就改一行条目。
+
+5. **解析一次、带 hash**：gate 解析出 `ResolvedCommand { name, env, argv, hash }`，
+   execute 只认它；审计记 hash。这样热加载竞态不会变成"批准 A、执行 B"。
+
+6. **审计**：每次执行写一行 `lan-access.jsonl`（条目名、解析后 argv、hash、exit、ms）；
+   `capability(list)` 显示条目来源、mtime、条数，以及**坏文件是哪一条**。
+
+7. **写入路径：agent 不写盘**。`capability(action="propose_command", command={...})` 渲染出
+   **规范化条目**并先自校验，然后只写**草稿**（`<config>/capabilities/commands/<name>.toml`）；
+   运行结束后内核把它转成 `approval(kind = Permission, requester, entry_name, entry_hash)`，
+   并给 owner 的每个绑定发一条带 `/approve <id>` 的通知。owner 批准后由**内核**执行
+   `validate → tmpfile → fsync(file) → rename → fsync(dir)`，成功才记
+   `command.installed { name, hash, approval_id }`（删除记 `command.removed`）。
+   **不在 `begin_write` 事务里写文件**（不变量 6）；写成功后清草稿。
+   安装前还会核一次指纹：**草稿在批准后被改过就拒绝**，避免"批的是 A、装的是 B"。
+   通知里**只显示提案人写的一句人话 `summary`**（例如"打印 `/ws` 里的文件，纸型 A4/B5"），
+   不显示 argv、`env`、`who` 或指纹——这些只进账本与日志。理由见 D30 的文案规则：
+   不写代码的人看不懂 argv，"看懂后果"比"看到原文"更重要。
+
+8. **只增删、不改**：重名一律拒绝（否则"批准的"和"生效的"可能不是同一份内容）；
+   删除走同一条提案路径（`capability(action="request", kind="command", remove="name")`）。
+
+9. **目录权限与 `services.d` 相同**：`0770 root:chuan`，加入强制遮蔽列表。
+   信任假设写明：本设计信任 `PROTECTED` 遮蔽——若 agent 拿到任意宿主 `rw` 路径授权，
+   表可被绕过写。主人已知并接受这一点；"给 `hostd` 加一个只写该目录的窄动词"是另一条路，
+   触发条件见 §11。agent 侧只有"经 `capability` 提案"这一条路。
+
+10. **可预授权的判据**（一条条目能免审批的必要条件，换哪个 env 都适用）：
+    ① `argv[0]` 是绝对路径（不走 PATH，否则可被同名程序替换）；
+    ② 其余参数取自封闭集，或效果由构造有界（根约束下的文件、区间整数、设备/纸型枚举）；
+    ③ 效果可恢复、不破坏共享状态；
+    ④ 目标不是授权面自身（`commands.d` / `chuan.toml` / secrets）；
+    ⑤ `pattern` 只接受封闭字符类。
+
+11. **范围与触发条件**：
+    - `lan`：v1 做（打印四条目）。
+    - `host`：`host_command`，判据同 §10，优先只读类（`journalctl -u <unit>`、`systemctl show`）。
+      注意：`host` 的"任意 argv"不因为叫条目就变得安全——必须是"绝对前缀 + 封闭参数"。
+    - `install`：**永不做条目**。包名是开放域（选包 = 选代码，maintainer scripts 是 root 执行）。
+      触发条件：只有"固定签名/固定哈希的本地包源"时才重新讨论；在那之前装依赖永远逐条批。
+    - `host_elevated`：触发条件是"`hostd` 直接读同一份 `commands.d`（同解析器、同 mtime、
+      fail-closed），且条目必须带 `snapshot_argv`"。风险主要在**语义**不一致
+      （`[[host_elevated.grant]]` 是开尾 argv 前缀，条目是封闭参数），不只是两份文件。
+    - `self_modify`（`publish_skill` / `role` / `service`）：不进表——它们不是 argv 形态。
+      `remind` 按 D30 §7 直接从 Ask 里拿掉，也不要塞进表。
+
+12. **失败语义**：单个文件解析失败只废该条（与 `paths_error` 同款）；
+    `capability(list)` 与 `Blocked` 文案要点名是哪一条；一个文件的语法错误不影响其它文件。
+
+**理由**：免审批只能靠"构造上效果有界"，不能靠"人看过"。而"有界"这件事本身是**数据**：
+固定 argv + 封闭参数域，换纸型/换打印机只改一行。人的角色从"逐次审命令"变成"一次性批形状"；
+agent 负责发现与维护数据，但不能自授权。
+
+**非目标**：任意 shell 的语法白名单（做不对）；`from = 发现动作`（v1 不做）；
+条目运行时改参（要改就删了重建）；异步审批与自动续跑（D30 §6）。
+
+**代价**：多一个数据目录与一套加载/校验（与 `GrantsCache` 同构，但按文件失效）；
+打印机出局后要记得删条目；`who = "anyone"` 写错等于给家人开口子（默认 owner 收窄了这一点）。
+
+**反悔成本**：低。删掉 `commands.d/` 即回到"全部逐条审批"；`lan_command` / `host_command`
+是独立工具，去掉注册即可，不牵连 `lan_exec` / `host`。
+
+**验收**：
+1. 四条 `env = "lan"` 条目对 owner 与 member 都零卡执行；参数越界与表外条目都是
+   `Blocked`，且账本里该 run 的 **turn 数 = 1**（"没换路径重试"可数）；
+2. `command.installing` 之后 `kill -9`，重启按 hash 复核：一致补记，不一致标失败并通知；
+3. 单个文件写坏只废该条，其余照常，`capability(list)` 指出坏在哪；
+4. 把 `[policy] lan` 改成 `deny` → 该域条目整批失效（`deny` 是天花板）；
+5. member 跑 `env = "host"` 的条目（若存在）→ `Blocked{need_owner}`，owner 收到提案，
+   且审批表里没有为 member 建行。

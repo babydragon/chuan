@@ -184,7 +184,9 @@ impl Tool for RemindTool {
 只给 `message` 会把它**降级成静态直发**，原来 text 里的钉钉调用将不再执行。\
 改了技能参数就用它，**不要删了重建**（重建会因 id 哈希变了而变成两条任务）。\
 `action=del`：取消一条任务。\n\
-查看已有任务（含技能参数、加工指令）用 `reminders`。"
+查看已有任务（含技能参数、加工指令）用 `reminders`。\n\
+**时间不确定就先问**：\"明早\"\"下周\"这类说法先反问一句（普通对话，不是审批），\
+把绝对时间算准再调这个工具；回执里会打印\"下次 <绝对时间>\"，让用户能核对。"
                     .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -268,6 +270,41 @@ impl Tool for RemindTool {
         // 子 agent 的会话标识是 `sub:<父会话>#<n>`，取不到真实 chat id：
         // 在那里建提醒会投递到错误目标，所以只给主会话
         1
+    }
+
+    /// 提醒默认不审批（D30 §7）：效果由构造有界——
+    /// 目标是发起者状态下的"当前会话"，时间必须是**能解析且在未来**的绝对时间。
+    ///
+    /// 两个反例会退回审批：
+    /// 1. 显式给了 `channel` = 要投给别人（`add` 的投递目标是从这条推出来的）；
+    /// 2. 时间解析不出来 / 已经过去（"明早""下周"这种该先反问，不要猜）。
+    /// `update`/`del` 的目标由 `load_own` 保证只能碰自己的那一条。
+    fn skip_approval(&self, args: &serde_json::Value) -> bool {
+        if args
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return false;
+        }
+        match args.get("action").and_then(|v| v.as_str()).unwrap_or("add") {
+            "add" => {
+                let Some(raw) = args.get("schedule") else { return false };
+                let now = now_ms();
+                schedule::parse(raw, self.tz_min)
+                    .ok()
+                    .and_then(|s| s.next_after(now, self.tz_min))
+                    .is_some_and(|t| t > now + 60_000)
+            }
+            "update" | "del" => true,
+            _ => false,
+        }
+    }
+
+    /// 家人也能用（D30 §1）：前提是 `preapproved_for` 为真，且 `load_own`/投递目标
+    /// 把效果限制在"自己那一条"。
+    fn member_safe(&self) -> bool {
+        true
     }
 
     /// 审批卡必须回答"到底改了什么/取消哪一条"——只给文案等于让人盲批。
@@ -515,9 +552,22 @@ impl RemindTool {
             op: DocOp::Upsert,
         };
 
+        // 到点会不会跑一轮模型？会的话提醒一句"那时候没人能审批"——
+        // 这是创建时唯一能提前给出的、诚实的预告（具体调什么工具由那一轮模型决定）。
+        let runs_model = message.is_none()
+            && (skill.is_none()
+                || args
+                    .get("polish")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty()));
+        let note = if runs_model {
+            "\n提醒：到点的时候没有人看着，需要你确认的步骤会被跳过。"
+        } else {
+            ""
+        };
         Ok(ToolOutput {
             content: vec![Block::Paragraph(format!(
-                "已安排：{}（下次 {}）\n内容：{}\n取消：/reminders del {}",
+                "已安排：{}（下次 {}）\n内容：{}\n取消：/reminders del {}{note}",
                 sched.describe(),
                 schedule::format_local(next, self.tz_min),
                 text,
@@ -1106,6 +1156,83 @@ mod tests {
     }
 
     #[test]
+    fn reminder_is_preapproved_only_for_self_and_future() {
+        let t = RemindTool::new(480);
+        assert!(t.member_safe(), "提醒对家人也开放（D30 §7）");
+
+        let now = now_ms();
+        let at = |ms: i64| schedule::format_local(ms, 480).replace(' ', "T");
+        // 未来的绝对时间：免审
+        assert!(t.skip_approval(&serde_json::json!({
+            "action": "add",
+            "text": "喝水",
+            "schedule": {"kind": "once", "at": at(now + 3_600_000)}
+        })));
+        // 已经过去：不免（工具会拒，但先把卡挡掉）
+        assert!(!t.skip_approval(&serde_json::json!({
+            "action": "add",
+            "text": "喝水",
+            "schedule": {"kind": "once", "at": at(now - 3_600_000)}
+        })));
+        // 循环规则：下一次在未来 → 免审
+        assert!(t.skip_approval(&serde_json::json!({
+            "action": "add",
+            "text": "吃药",
+            "schedule": {"kind": "daily", "time": "08:00"}
+        })));
+        // 解析不出来（自然语言）：不免 —— 该反问，不该猜
+        assert!(!t.skip_approval(&serde_json::json!({
+            "action": "add",
+            "text": "交作业",
+            "schedule": {"kind": "once", "at": "明早"}
+        })));
+        // 显式投到别的通道 = 替别人排：不免
+        assert!(!t.skip_approval(&serde_json::json!({
+            "action": "add",
+            "text": "吃药",
+            "channel": "weixin",
+            "schedule": {"kind": "daily", "time": "08:00"}
+        })));
+        // 改/删只碰自己那一条（load_own 保证），免审
+        assert!(t.skip_approval(&serde_json::json!({"action": "del", "id": "rem-1"})));
+        assert!(t.skip_approval(&serde_json::json!({"action": "update", "id": "rem-1"})));
+    }
+
+    #[test]
+    fn all_reminder_forms_are_preapproved_for_everyone() {
+        use harness_kernel::ActorRole;
+        let t = RemindTool::new(480);
+        let at = schedule::format_local(now_ms() + 3_600_000, 480).replace(' ', "T");
+        let base = serde_json::json!({"action": "add", "schedule": {"kind": "once", "at": at}});
+
+        // `text`（到点跑一轮模型）：家人也能建——无人值守这件事由"通知 owner + 角色继承"管，
+        // 不是靠建的时候拦（否则家人就用不了任何需要模型的提醒）。
+        let mut text = base.clone();
+        text["text"] = serde_json::json!("给老师回消息，并发钉钉");
+        for role in [ActorRole::Owner, ActorRole::Member] {
+            assert!(t.preapproved_for(&text, role), "text 形态对 {role:?} 也应免审");
+        }
+
+        // 静态 message / 钉住脚本 / 脚本+polish：同样免审
+        let mut stat = base.clone();
+        stat["text"] = serde_json::json!("提醒：该接孩子了");
+        stat["message"] = serde_json::json!("该接孩子了");
+        assert!(t.preapproved_for(&stat, ActorRole::Member));
+
+        let mut skill = base.clone();
+        skill["text"] = serde_json::json!("查老师消息");
+        skill["skill"] = serde_json::json!({"name": "teacher-msg"});
+        skill["polish"] = serde_json::json!("整理成三条");
+        assert!(t.preapproved_for(&skill, ActorRole::Member));
+
+        // 但"替别人排"仍然不免审（目标边界没变）
+        let mut other = base.clone();
+        other["text"] = serde_json::json!("提醒他开会");
+        other["channel"] = serde_json::json!("weixin");
+        assert!(!t.preapproved_for(&other, ActorRole::Member));
+    }
+
+    #[test]
     fn approval_hint_shows_resolved_time() {
         let tool = RemindTool::new(480);
         let hint = tool
@@ -1181,6 +1308,7 @@ mod tests {
     async fn reminder_defaults_to_current_channel() {
         use harness_kernel::{Binding, ConversationId, Directory, RunId, User, Workspace};
         let dir = Arc::new(Directory {
+            owner: Some("owner".into()),
             users: vec![User {
                 id: "owner".into(),
                 name: None,
@@ -1232,6 +1360,7 @@ mod tests {
     async fn reminder_can_target_another_channel() {
         use harness_kernel::{Binding, ConversationId, Directory, RunId, User, Workspace};
         let dir = Arc::new(Directory {
+            owner: Some("owner".into()),
             users: vec![User {
                 id: "owner".into(),
                 name: None,

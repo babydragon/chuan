@@ -17,9 +17,10 @@ use serde::Deserialize;
 ///
 /// `services.d` 里写着 `token_file` 的宿主路径，`chuan.toml` 里有完整策略；
 /// `secrets` 是 daemon 自己以 chuan 身份读的（`0440 root:chuan`），不遮等于白做 D18。
-pub const PROTECTED: [&str; 3] = [
+pub const PROTECTED: [&str; 4] = [
     "/etc/chuan/secrets",
     "/etc/chuan/services.d",
+    "/etc/chuan/commands.d",
     "/etc/chuan/chuan.toml",
 ];
 

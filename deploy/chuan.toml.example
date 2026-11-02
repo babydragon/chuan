@@ -91,6 +91,8 @@ dir = "/var/lib/chuan/skills"
 playbooks_dir = "/etc/chuan/playbooks"
 
 [identity]
+# 主人是谁（D30）：必须是下面某个 user 的 id。不写 = 启动报错（没有审批人）。
+owner = "owner"
 # 白名单唯一来源（D26）。一人可以绑多个账号（同一通道也行），也可以写多个人。
 # 未绑定的地址会收到「未授权」，不跑模型；没有 default_user 兜底。
 [[identity.user]]
@@ -106,6 +108,8 @@ channels = [
 # id = "kid"
 # name = "小孩"
 # channels = ["telegram:555555555"]
+# 除 owner 外都是 member：不发审批卡、不能跑 host/install；能用的只是沙盒、出网、
+# 看宿主状态，以及 who = "anyone" 的命令条目（打印、查墨量）。
 
 [policy]
 # 审批轴是"执行域"（能力越界），不是命令黑名单：
@@ -172,6 +176,13 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 # base = "https://mcp.dida365.com"
 # token_file = "/etc/chuan/secrets/dida_token"
 # tools = ["create_task", "list_undone_tasks_by_time_query"]   # 可选：只暴露这些
+
+# ---- 命令条目（D31，可选）----
+# 免审批的内网动作放在 <配置目录>/commands.d/<name>.toml（安装脚本会放 4 条默认打印条目：
+# printer_list / printer_status / supplies / print_file）。命中即免审批；写坏一个文件只废那一条。
+# 示例见 docs/OPS.md「命令条目」。
+# [lan]
+# log = "/var/lib/chuan/lan-access.jsonl"   # 每次条目执行写一行审计
 
 # —— 带签名的 webhook（钉钉 / 飞书）示例 ——
 # 凭据文件两行：第 1 行 token（或 hook id），第 2 行 secret。值只在宿主侧使用。

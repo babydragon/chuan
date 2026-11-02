@@ -39,6 +39,26 @@ pub struct User {
 #[derive(Clone, Debug, Default)]
 pub struct Directory {
     pub users: Vec<User>,
+    /// 主人是谁（D30）：`[identity] owner = "<user-id>"`。
+    /// `None` = 没配主人，此时所有人一律按 member 处理（fail closed）。
+    pub owner: Option<String>,
+}
+
+/// 主体角色（D30）。**不要叫 `Role`**：`record::Role` 已经是消息角色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActorRole {
+    Owner,
+    Member,
+}
+
+impl ActorRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActorRole::Owner => "owner",
+            ActorRole::Member => "member",
+        }
+    }
 }
 
 impl Directory {
@@ -84,6 +104,36 @@ impl Directory {
             .find(|u| u.id == user)
             .and_then(|u| u.name.clone())
     }
+
+    /// 这个 user 是主人还是成员（D30）。
+    ///
+    /// fail closed：配了身份表却没有 `owner`、或这个 id 不是 owner，都算 member。
+    /// 例外是**空表**：那是"没配置身份"的中立模式（应用层拒绝空表启动，
+    /// 内核也不再做未绑定拦截），此时按单用户处理，否则所有审批都会静默变 Blocked。
+    /// 注意这不是"授权"——未绑定的地址在入口就被拦掉了（D26）。
+    pub fn role(&self, user: &str) -> ActorRole {
+        if self.users.is_empty() {
+            return ActorRole::Owner;
+        }
+        match &self.owner {
+            // 必须真的绑定过：owner 字段写了个不存在的 id 时，谁都不算主人（fail closed）。
+            Some(owner) if owner == user && self.users.iter().any(|u| &u.id == user) => {
+                ActorRole::Owner
+            }
+            _ => ActorRole::Member,
+        }
+    }
+
+    /// 主人是否配置且确实绑定过（启动时校验用）。
+    pub fn owner_problem(&self) -> Option<String> {
+        match &self.owner {
+            None => Some("缺少 [identity] owner（没有审批人，越界动作只能被拒绝）".into()),
+            Some(o) if !self.users.iter().any(|u| &u.id == o) => {
+                Some(format!("[identity] owner = \"{o}\" 不在 [[identity.user]] 里"))
+            }
+            Some(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +142,7 @@ mod tests {
 
     fn dir() -> Directory {
         Directory {
+            owner: Some("owner".into()),
             users: vec![User {
                 id: "owner".into(),
                 name: Some("主人".into()),
@@ -122,6 +173,7 @@ mod tests {
     #[test]
     fn one_user_many_accounts_and_many_users() {
         let d = Directory {
+            owner: Some("owner".into()),
             users: vec![
                 User {
                     id: "owner".into(),
@@ -147,6 +199,27 @@ mod tests {
         // 白名单按通道派生
         assert_eq!(d.allowed_on("telegram"), vec!["1", "2", "3"]);
         assert_eq!(d.allowed_on("weixin"), vec!["a@im.wechat"]);
+    }
+
+    #[test]
+    fn role_is_owner_or_member_and_fails_closed() {
+        let d = dir();
+        assert_eq!(d.role("owner"), ActorRole::Owner);
+        assert_eq!(d.role("kid"), ActorRole::Member);
+        assert_eq!(d.role("telegram:81865154"), ActorRole::Member, "通道地址不是 user id");
+
+        // 空表 = 未配置身份（中立模式）：按单用户处理
+        assert_eq!(Directory::default().role("anyone"), ActorRole::Owner);
+
+        // 配了人但没配 owner：谁都不是主人（fail closed），且启动校验要能报出来
+        let none = Directory { users: d.users.clone(), owner: None };
+        assert_eq!(none.role("owner"), ActorRole::Member);
+        assert!(none.owner_problem().unwrap().contains("owner"));
+
+        // owner 指向一个不存在的 user：同样是配置问题
+        let bad = Directory { users: d.users.clone(), owner: Some("ghost".into()) };
+        assert_eq!(bad.role("ghost"), ActorRole::Member);
+        assert!(bad.owner_problem().unwrap().contains("不在"));
     }
 
     #[test]

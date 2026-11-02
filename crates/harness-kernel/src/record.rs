@@ -71,6 +71,28 @@ pub struct DocQuery {
     pub limit: usize,
 }
 
+/// 审批分两类（`DECISIONS.md` D30 §2）：只有主人能批，区别在"批准后发生什么"。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalKind {
+    /// 只改数据（命令条目表），不执行动作；请求方不等（run 已 `Blocked`）
+    Permission,
+    /// 执行那一次动作；短 TTL
+    Confirm,
+}
+
+impl ApprovalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalKind::Permission => "permission",
+            ApprovalKind::Confirm => "confirm",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        // 旧行没有 kind → 那时确实只有"单次确认"
+        if s == "permission" { ApprovalKind::Permission } else { ApprovalKind::Confirm }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NewApproval {
     pub conv: ConversationId,
@@ -78,6 +100,20 @@ pub struct NewApproval {
     pub action: String,
     pub scope: String,
     pub ttl_s: u64,
+    pub kind: ApprovalKind,
+    /// 发起者（user id）。审批只对 owner，这个字段用于审计"谁提的"。
+    pub requester: String,
+    /// `Permission` 提案：命令条目名与正文指纹
+    pub entry_name: Option<String>,
+    pub entry_hash: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApprovalInfo {
+    pub kind: ApprovalKind,
+    pub requester: String,
+    pub entry_name: Option<String>,
+    pub entry_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

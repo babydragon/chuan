@@ -1,0 +1,11 @@
+# 打印 /ws 下的一个文件。不指定 -d：走 CUPS 的默认打印机
+# （换打印机是 CUPS 的事，不是这张表的事；要路由到多台就再加一条条目）。
+#
+# 纸型名以本机为准：`lpoptions -p <printer> -l`。这里只是占位。
+env = "lan"
+argv = ["/usr/bin/lp", "-o", "media={media}", "{file}"]
+timeout_ms = 20000
+who = "anyone"
+[params]
+media = { enum = ["A4", "B5", "photo_4x6"] }
+file = { file = ["/ws"] }

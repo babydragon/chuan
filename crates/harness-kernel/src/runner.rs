@@ -38,6 +38,10 @@ pub struct RunRequest {
     pub images: Vec<crate::driver::ImagePart>,
     /// 历史裁剪预算（估算字符数）；超出后按"轮"整组丢弃旧内容
     pub context_budget_chars: usize,
+    /// 发起者的主体角色（D30）。审批门据此决定"发卡"还是"直接 Blocked"。
+    pub role: crate::identity::ActorRole,
+    /// 这一轮是定时任务触发的（D30 §7）：**没有人在场**，所以不能发卡等人点。
+    pub scheduled: bool,
     /// token 预算（prompt+completion 累计）。None = 不限。
     /// 子 agent 用它兜住"跑飞"（D20）。
     pub token_budget: Option<u64>,
@@ -52,7 +56,18 @@ pub struct RunOutcome {
     pub tools: Vec<String>,
 }
 
-/// 执行工具前的审批门。返回 true 才真正执行。
+/// 门的对外结果（D30）。`Ask` 是门的内部中间态：它自己发卡、自己等，
+/// 不会以 `Ask` 的形式交回 runner。
+#[derive(Clone, Debug)]
+pub enum GateOutcome {
+    Allowed,
+    /// 这条路不存在（域关闭 / 参数非法）：记 `denied`，run 继续。
+    Denied { reason: String },
+    /// 终态：结束该 run（D30 §5）。
+    Blocked { reason: String, hint: String },
+}
+
+/// 执行工具前的审批门。`Allowed` 才真正执行。
 #[async_trait::async_trait]
 pub trait ApprovalGate: Send + Sync {
     async fn ask(
@@ -61,7 +76,9 @@ pub trait ApprovalGate: Send + Sync {
         call: &crate::ids::CallId,
         tool: &str,
         args: &serde_json::Value,
-    ) -> Result<bool, String>;
+        role: crate::identity::ActorRole,
+        scheduled: bool,
+    ) -> Result<GateOutcome, String>;
 }
 
 /// 去掉内核保留的元字段（目前只有 `_approval`），工具看到的仍是它自己的参数。
@@ -85,6 +102,9 @@ pub enum RunnerError {
     Budget(String),
     #[error("approval failed: {0}")]
     Approval(String),
+    /// 被治理挡住（D30）：不是出错，是这条路本身不存在。
+    #[error("blocked: {reason}")]
+    Blocked { reason: String, hint: String },
 }
 
 pub struct Runner<'a, S: Store, D: TurnDriver> {
@@ -332,20 +352,42 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                         if cancel.is_cancelled() {
                             return self.finish_interrupted(&conv, &run, turn_no, "cancelled").await;
                         }
-                        self.execute_one(
-                            &mut *turn,
-                            &conv,
-                            &run,
-                            &turn_id,
-                            call,
-                            &req.workspace,
-                            &cancel,
-                            &mut deadline,
-                            &req.actor,
-                            system_prompt,
-                            &tool_sink,
-                        )
-                        .await?;
+                        let exec = self
+                            .execute_one(
+                                &mut *turn,
+                                &conv,
+                                &run,
+                                &turn_id,
+                                call,
+                                &req.workspace,
+                                &cancel,
+                                &mut deadline,
+                                &req.actor,
+                                req.role,
+                                req.scheduled,
+                                system_prompt,
+                                &tool_sink,
+                            )
+                            .await;
+                        match exec {
+                            Ok(()) => {}
+                            // 被治理挡住：这不是出错，而是"没有合法路径"。
+                            // 结束 run 并把原因交给上层回给人（D30 §5）。
+                            Err(RunnerError::Blocked { reason, hint }) => {
+                                tracing::info!(tool = %call.name, reason, "blocked by policy");
+                                return self
+                                    .finish_with(
+                                        &conv,
+                                        &run,
+                                        turn_no,
+                                        RunStatus::Blocked,
+                                        "blocked",
+                                        hint,
+                                    )
+                                    .await;
+                            }
+                            Err(e) => return Err(e),
+                        }
                         if cancel.is_cancelled() {
                             return self.finish_interrupted(&conv, &run, turn_no, "cancelled").await;
                         }
@@ -419,6 +461,8 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         run_cancel: &tokio_util::sync::CancellationToken,
         deadline: &mut Option<Instant>,
         actor: &str,
+        role: crate::identity::ActorRole,
+        scheduled: bool,
         system_prompt: &str,
         sink: &crate::driver::EventSink,
     ) -> Result<(), RunnerError> {
@@ -426,43 +470,64 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
 
         if let Some(gate) = self.gate {
             let asked_at = Instant::now();
-            let allowed = gate
-                .ask(conv, &call.call, &call.name, &call.args)
+            let decision = gate
+                .ask(conv, &call.call, &call.name, &call.args, role, scheduled)
                 .await
                 .map_err(RunnerError::Approval)?;
             // 等人确认的时间不算进 wall clock：预算约束的是模型/工具的耗时，
-            // 不是主人回消息的速度（否则走开一会儿回来就超时）。
+            // 不是人回消息的速度（否则走开一会儿回来就超时）。
             if let Some(d) = deadline.as_mut() {
                 *d += Instant::now().saturating_duration_since(asked_at);
             }
-            // 审批通过：告诉渲染层"现在才真正开跑"，把等人确认的时间从耗时里扣掉。
-            // 拒绝的分支不需要（它会立刻 finish 成 denied）。
-            if allowed {
-                sink.emit(crate::driver::StreamEvent::ToolStarted {
-                    call: call.call.clone(),
-                    name: call.name.clone(),
-                    // 有 approval_hint 就用它（人话），否则留空。delegate 用它显示任务首行，
-                    // 否则前台委托期间用户只看到"第 N 轮 · 执行 delegate"，不知道在跑什么。
-                    preview: tool.approval_hint(&call.args).unwrap_or_default(),
-                });
-            }
-            if !allowed {
-                let mut tx = self.store.begin_write().await?;
-                tx.close_tool_call(call.call.clone(), "denied", "用户拒绝".into()).await?;
-                tx.append(NewEvent {
-                    conv: conv.clone(),
-                    run: run.clone(),
-                    turn: Some(turn_id.clone()),
-                    kind: EventKind::MsgToolResult,
-                    payload: serde_json::json!({
-                        "call_id": call.call.0, "ok": false, "preview": "已拒绝执行",
-                    }),
-                    dedupe_key: None,
-                })
-                .await?;
-                tx.commit().await?;
-                turn.on_tool_result(call.call.clone(), false, "已拒绝执行".into()).await?;
-                return Ok(());
+            match decision {
+                GateOutcome::Allowed => {
+                    // 审批通过：告诉渲染层"现在才真正开跑"，把等人确认的时间从耗时里扣掉。
+                    sink.emit(crate::driver::StreamEvent::ToolStarted {
+                        call: call.call.clone(),
+                        name: call.name.clone(),
+                        // 有 approval_hint 就用它（人话），否则留空。delegate 用它显示任务首行，
+                        // 否则前台委托期间用户只看到"第 N 轮 · 执行 delegate"，不知道在跑什么。
+                        preview: tool.approval_hint(&call.args).unwrap_or_default(),
+                    });
+                }
+                GateOutcome::Denied { reason } => {
+                    let preview = format!("已拒绝执行：{reason}");
+                    let mut tx = self.store.begin_write().await?;
+                    tx.close_tool_call(call.call.clone(), "denied", reason).await?;
+                    tx.append(NewEvent {
+                        conv: conv.clone(),
+                        run: run.clone(),
+                        turn: Some(turn_id.clone()),
+                        kind: EventKind::MsgToolResult,
+                        payload: serde_json::json!({
+                            "call_id": call.call.0, "ok": false, "preview": preview,
+                        }),
+                        dedupe_key: None,
+                    })
+                    .await?;
+                    tx.commit().await?;
+                    turn.on_tool_result(call.call.clone(), false, preview).await?;
+                    return Ok(());
+                }
+                GateOutcome::Blocked { reason, hint } => {
+                    // 终态：把这次调用记成 blocked（不是 denied——它不是"这次不批"，
+                    // 而是"这条路径不存在"），再由上层结束 run（D30 §5）。
+                    let mut tx = self.store.begin_write().await?;
+                    tx.close_tool_call(call.call.clone(), "blocked", hint.clone()).await?;
+                    tx.append(NewEvent {
+                        conv: conv.clone(),
+                        run: run.clone(),
+                        turn: Some(turn_id.clone()),
+                        kind: EventKind::MsgToolResult,
+                        payload: serde_json::json!({
+                            "call_id": call.call.0, "ok": false, "preview": hint, "blocked": true,
+                        }),
+                        dedupe_key: None,
+                    })
+                    .await?;
+                    tx.commit().await?;
+                    return Err(RunnerError::Blocked { reason, hint });
+                }
             }
         }
 
@@ -588,6 +653,19 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         turn_no: u32,
         reason: &str,
     ) -> Result<RunOutcome, RunnerError> {
+        self.finish_with(conv, run, turn_no, RunStatus::Cancelled, reason, String::new()).await
+    }
+
+    /// 以指定终态收尾（取消 / 预算 / 阻塞共用）。`reason` 同时写进 `run.finished.status`。
+    async fn finish_with(
+        &self,
+        conv: &ConversationId,
+        run: &RunId,
+        turn_no: u32,
+        status: RunStatus,
+        reason: &str,
+        text: String,
+    ) -> Result<RunOutcome, RunnerError> {
         // 未完成的调用一律 abandoned，避免下次启动被误判为崩溃。
         let open = {
             let mut rd = self.store.begin_read().await?;
@@ -620,7 +698,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         })
         .await?;
         tx.commit().await?;
-        Ok(RunOutcome { text: String::new(), status: RunStatus::Cancelled, tools: Vec::new() })
+        Ok(RunOutcome { text, status, tools: Vec::new() })
     }
 }
 

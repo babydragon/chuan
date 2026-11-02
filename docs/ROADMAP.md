@@ -250,7 +250,7 @@
   修掉 `remember(scope="user")` 写入后永远读不回来的旧 bug
 - 多通道并存：actor 持通道表，锁/typing/runs 键 = `{channel}:{addr}`
 
-未做：运行期绑定与审批（D16 保留）、邀请码、`/revoke`、按 user 隔离 workspace。
+未做：运行期绑定、邀请码、`/revoke`、按 user 隔离 workspace（审批与权限模型见 §7.5 / D30）。
 提醒的投递目标已按通道落地（D27）。
 
 **交付**：一个用户绑多个通道；陌生人接入必须经 owner 批准。
@@ -505,15 +505,21 @@ HTTP 通道、知识库入库、向量检索、多 provider 自动路由、git w
 
 ## 7.5 P4.7 审批与身份（**设计已定，未实现**）
 
-> 设计见 `DECISIONS.md` D30。目标：**家人日常零审批**，同时不放弃"值不进沙盒、动作有界"。
+> 设计见 `DECISIONS.md` D30（两类审批 + 主体角色）、D31（命令条目表）。
+> 目标：**家人零审批**，同时不放弃"值不进沙盒、动作有界"。
+> 顺序有依赖，不能跳：P0 不做，P2 的"批准后写表"就建在"任何绑定账号都能批"上。
 
-| 段 | 内容 | 状态 |
-|---|---|---|
-| P0 | `[identity] owner` + `verdict(tool, domain, role)`；member 触达 `host`/`host_elevated`/`install` 一律 Deny；未绑定 actor 按 member | 未做（2026-11-02 曾开工，因 `Role` 与消息角色撞名回滚） |
-| P1 | `lan` 命名动作白名单（`print_file`/`printer_status`/`supplies`/`printer_list`）+ 参数域校验 + `Blocked` 终态 | 未做 |
-| P2 | 审批分 `Permission`/`Confirm`；`capability propose/approve`（只改白名单，不自批） | 未做 |
-| P3 | 提醒默认不审批（仅歧义问发起者） | 未做 |
-| P4 | 家人 UX：无审批按钮、非技术文案、转 owner、不挂起 | 未做 |
+| 段 | 内容 | 状态 | 验收 |
+|---|---|---|---|
+| P0 | `[identity] owner` + `ActorRole`；门输出三态 `GateOutcome`（内部四态 `GateDecision`）；三条批准入口校验批准人；member 触到域上限 = `Blocked` | ✅ 已实现（开发机） | `policy::tests::*`（角色矩阵 / Deny 天花板）、`identity::tests::role_*`、`member_hits_ceiling_without_a_card`、`non_owner_cannot_approve` |
+| P0.5 | `RunStatus::Blocked` + runner **真终止** + 文案 + `run.finished{status:"blocked"}` | ✅ 已实现（开发机） | `member_hits_ceiling_without_a_card`：模型只被调用 1 次、无卡片、无执行；`run.finished` 与渲染状态一致 |
+| P1 | `commands.d/` 加载（单条 fail-closed、按 mtime）+ `lan_command` + 首批四条目 + `lan-access.jsonl` | ✅ 已实现（开发机） | `commands::tests::*`（参数域 / 逃逸 / 单条失效 / 热加载）、`member_runs_a_command_entry_without_a_card`（零卡 + 真实 argv + 审计）、`unknown_command_entry_is_blocked`（表外不发卡） |
+| P2 | 审批表 V6（`kind`/`requester`/`entry_name`/`entry_hash`）+ `capability(propose_command)` + 内核安装/删除 + `command.installed/removed` 事件 | ✅ 已实现（开发机） | `proposal_is_installed_only_after_owner_approves`（提案→通知→批准→落盘→清草稿）；`install_is_atomic_and_never_overwrites`；非 owner 批准被拒（`non_owner_cannot_approve`） |
+| P3 | `remind` 去 Ask（`member_safe` + 目标自指 + 时间可解析且在将来） | ✅ 已实现（开发机） | `reminder_is_preapproved_only_for_self_and_future`（7 种输入矩阵）；`member_sets_reminder_without_a_card`（零卡、归到本人、回执带绝对时间） |
+| P4 | 家人 UX：`Blocked` 文案集中一处、家人不出「沉淀为 Skill」按钮、同形状被挡 ≥2 次/24h 才通知 owner | ✅ 已实现（开发机） | `repeated_blocks_notify_owner_once`（第 2 次通知、第 3 次不再重复）；`member_can_schedule_a_model_reminder_but_owner_is_told`（家人可建、零卡、owner 收到一次通知）；`scheduled_run_skips_approval_and_tells_owner_once`（到点遇审批：不发卡、立即通知、不重复） |
+| P5 | 触发式：`host_command`；`commands.d` 权限升级（`hostd` 窄动词）；`from = 发现动作` | 未做 | 触发条件见 D31 §11 |
+
+**不做**：`install` 进条目表（包名是开放域）；异步审批与自动续跑（D30 §6）。
 
 ---
 

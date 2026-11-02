@@ -1,6 +1,6 @@
 //! Schema 与迁移。只前向，靠 `PRAGMA user_version` 记录版本。
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub const V1: &str = r#"
 CREATE TABLE journal (
@@ -108,4 +108,13 @@ ALTER TABLE usage_rollup ADD COLUMN agent   TEXT NOT NULL DEFAULT 'main';
 CREATE INDEX usage_agent ON usage_rollup(agent, at);
 "#;
 
-pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5)];
+pub const V6: &str = r#"
+-- 审批分两类 + 命令条目（D30/D31）：只对主人批，但要能分辨"批准后做什么"。
+-- 旧行没有 kind/requester：那时确实只有"单次确认"一种，按 confirm / '' 补齐。
+ALTER TABLE approvals ADD COLUMN kind       TEXT NOT NULL DEFAULT 'confirm';
+ALTER TABLE approvals ADD COLUMN requester  TEXT NOT NULL DEFAULT '';
+ALTER TABLE approvals ADD COLUMN entry_name TEXT;
+ALTER TABLE approvals ADD COLUMN entry_hash TEXT;
+"#;
+
+pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6)];

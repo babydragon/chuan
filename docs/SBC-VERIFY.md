@@ -309,6 +309,20 @@
 
 ---
 
+## 13. 审批与身份 + 命令条目（P4.7 · 未实现）
+
+> 设计见 `DECISIONS.md` D30 / D31，配置见 `OPS.md`「命令条目」。这里只列**只能在板上确认**的项。
+
+- [ ] `commands.d/` 是 `0770 root:chuan`，由 systemd 起的进程仍能写（与 `services.d` 同一个坑）
+- [ ] 四条 `env = "lan"` 条目零卡执行：`printer_list` / `printer_status` / `supplies` / `print_file`
+- [ ] 纸型名以本机为准（`lpoptions -p <printer> -l`）：条目里的 `A4`/`B5`/`photo_4x6` 只是占位
+- [ ] `who = "anyone"` 的条目对 member 也零卡；member 跑原始 `lan_exec` / `host` 得到 `Blocked`，
+      且审批表**不建行**、不发卡
+- [ ] `[policy] lan = "deny"` 时该域条目整批失效（`deny` 是天花板，D31 §3）
+- [ ] 每次条目执行在 `lan-access.jsonl` 留一行（条目名 + 解析后 argv + hash + exit + ms）
+- [ ] `capability` 提案 → owner 批准 → 内核写盘：`kill -9` 打断后重启按 hash 复核（补记或标失败）
+- [ ] 审批人校验：非 owner 回 `1` 被拒，且 `approval.resolved` 的 `by` 能看出是谁
+
 ## 已在开发机验证、板上只需复核环境差异的项
 
 | 项 | 开发机结论 | 板上要看什么 |

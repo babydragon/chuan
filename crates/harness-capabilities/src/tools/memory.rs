@@ -152,6 +152,7 @@ mod tests {
     #[tokio::test]
     async fn user_scope_maps_to_user_id() {
         let dir = std::sync::Arc::new(harness_kernel::Directory {
+            owner: Some("owner".into()),
             users: vec![harness_kernel::User {
                 id: "owner".into(),
                 name: None,

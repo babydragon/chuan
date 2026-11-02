@@ -346,9 +346,22 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
             let expires = now_ms() + (a.ttl_s as i64) * 1000;
             conn.execute(
                 "INSERT INTO approvals
-                 (id, conv_id, call_id, action, scope, status, expires_at, created_at)
-                 VALUES (?1,?2,?3,?4,?5,'pending',?6,?7)",
-                params![id, a.conv.0, a.call.0, a.action, a.scope, expires, now_ms()],
+                 (id, conv_id, call_id, action, scope, status, expires_at, created_at,
+                  kind, requester, entry_name, entry_hash)
+                 VALUES (?1,?2,?3,?4,?5,'pending',?6,?7,?8,?9,?10,?11)",
+                params![
+                    id,
+                    a.conv.0,
+                    a.call.0,
+                    a.action,
+                    a.scope,
+                    expires,
+                    now_ms(),
+                    a.kind.as_str(),
+                    a.requester,
+                    a.entry_name,
+                    a.entry_hash
+                ],
             )
             .map_err(map_err)?;
             let run = run_of_call(conn, &a.call).unwrap_or_else(|| RunId("approval".into()));
@@ -362,6 +375,8 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
                     payload: serde_json::json!({
                         "approval_id": id, "call_id": a.call.0,
                         "action": a.action, "scope": a.scope, "ttl_s": a.ttl_s,
+                        "kind": a.kind.as_str(), "requester": a.requester,
+                        "entry_name": a.entry_name, "entry_hash": a.entry_hash,
                     }),
                     dedupe_key: None,
                 },
@@ -1001,6 +1016,31 @@ impl Store for SqliteStore {
             OpResult::Resolved(r) => Ok(r),
             _ => Err(StoreError::Conflict),
         }
+    }
+
+    async fn approval_info(
+        &self,
+        id: &ApprovalId,
+    ) -> Result<Option<harness_kernel::ApprovalInfo>, StoreError> {
+        let conn = Connection::open_with_flags(
+            &self.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(map_err)?;
+        let row: Option<(String, String, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT kind, requester, entry_name, entry_hash FROM approvals WHERE id=?1",
+                params![id.0],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(map_err)?;
+        Ok(row.map(|(kind, requester, entry_name, entry_hash)| harness_kernel::ApprovalInfo {
+            kind: harness_kernel::ApprovalKind::parse(&kind),
+            requester,
+            entry_name,
+            entry_hash,
+        }))
     }
 
     async fn approval_card(

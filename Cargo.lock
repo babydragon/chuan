@@ -440,6 +440,7 @@ name = "harness-store"
 version = "0.1.0-rc.34"
 dependencies = [
  "async-trait",
+ "harness-capabilities",
  "harness-kernel",
  "rusqlite",
  "serde",

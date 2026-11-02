@@ -35,6 +35,12 @@ pub trait Store: Send + Sync + 'static {
         by: &str,
     ) -> Result<Resolve, StoreError>;
     /// 读审批卡片位置（审批结束后清理用）。
+    /// 审批的元信息（kind / 发起者 / 条目）——批准后要按 kind 决定"装条目"还是"就这一下"。
+    async fn approval_info(
+        &self,
+        id: &ApprovalId,
+    ) -> Result<Option<ApprovalInfo>, StoreError>;
+
     async fn approval_card(
         &self,
         id: &ApprovalId,

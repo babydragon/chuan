@@ -6,6 +6,7 @@
 
 mod any_driver;
 mod backup;
+mod command_admin;
 mod config;
 mod offsets;
 mod system_prompt;
@@ -14,7 +15,7 @@ mod workspace_gc;
 use std::sync::Arc;
 
 use harness_capabilities::{
-    CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache,
+    CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache, LanCommandTool,
     ElevatedClient, ElevatedTool, HostEnv, HostTool,
     HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
     NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
@@ -392,11 +393,16 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ExecTool::sandboxed().with_proxy(cfg.proxy.clone())));
     // 内网调试 lane：有网卡，逐条审批；看不到宿主文件
-    tools.register(Arc::new(ExecTool::lan(Arc::new(sandbox.lan(
+    let lan_env: Arc<dyn harness_kernel::ExecutionEnv> =
+        Arc::new(sandbox.lan(&cfg.workspace, cfg.sandbox_mounts.clone()));
+    tools.register(Arc::new(ExecTool::lan(Arc::clone(&lan_env)).with_proxy(cfg.proxy.clone())));
+    // 命令条目（D31）：同一条 lane，但不经 shell、参数域封闭，命中即免审批
+    tools.register(Arc::new(LanCommandTool::new(
+        Arc::new(harness_capabilities::CommandCache::new(&cfg.commands_dir)),
+        Arc::clone(&lan_env),
         &cfg.workspace,
-        cfg.sandbox_mounts.clone(),
-    )))
-    .with_proxy(cfg.proxy.clone())));
+        &cfg.lan_log,
+    )));
     // 装包 lane：有网络，只把运行时目录挂成可写（/rt）
     tools.register(Arc::new(InstallTool::new(
         Arc::new(sandbox.install(&cfg.workspace, &cfg.runtime_dir)),
@@ -499,10 +505,17 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         Arc::clone(&grants),
     )));
     // 权限申请（只写草稿，不改配置）：agent 被卡住时的唯一出口
-    tools.register(Arc::new(CapabilityTool::new(
-        cfg.config_dir.join("capabilities"),
-        Arc::clone(&grants),
-    )));
+    let capability_drafts = cfg.config_dir.join("capabilities");
+    tools.register(Arc::new(
+        CapabilityTool::new(&capability_drafts, Arc::clone(&grants))
+            .with_commands(cfg.commands_dir.clone()),
+    ));
+    // 命令条目的安装器（D31）：只在主人批准后被内核调用，落 `commands.d/`
+    let command_admin: Arc<dyn harness_kernel::CommandAdmin> =
+        Arc::new(command_admin::CommandFiles::new(
+            cfg.commands_dir.clone(),
+            capability_drafts.join("commands"),
+        ));
     // 角色管理（SelfModify → 逐次审批）：agent 可以注册"小弟"，主人批过才生效。
     tools.register(Arc::new(
         RoleTool::new(&cfg.roles_dir).with_allowed(cfg.agents.tools.clone()),
@@ -582,6 +595,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             roles: Some(Arc::new(DiskRoles::new(&cfg.roles_dir))
                 as Arc<dyn harness_kernel::RoleSource>),
             identity: Arc::clone(&cfg.identity),
+            commands: Some(Arc::clone(&command_admin)),
             vision: cfg.vision,
             proxy_hint: cfg.proxy.url.as_ref().map(|url| {
                 format!(

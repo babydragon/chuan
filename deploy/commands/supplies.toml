@@ -1,0 +1,6 @@
+# 耗材/详情：`lpstat -l` 在支持的驱动上会带 marker 信息；
+# 拿不到就说明驱动不报，交给技能里的 ipptool 方案。
+env = "lan"
+argv = ["/usr/bin/lpstat", "-l"]
+timeout_ms = 15000
+who = "anyone"

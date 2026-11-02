@@ -112,6 +112,8 @@ distill_prompt_file = "~/.config/chuan/prompts/distill.md"
 playbooks_dir = "~/.config/chuan/playbooks"
 
 [identity]
+# 主人是谁（D30）：owner = 下面某个 user 的 id。**不写 = 没有主人**，启动报错退出（退出码 2）。
+owner = "owner"
 # 白名单唯一来源（D26）。一人可以绑多个账号（同一通道也行），也可以写多个人。
 # 未绑定的地址会收到「未授权」，不跑模型；没有 default_user 兜底。
 [[identity.user]]
@@ -127,6 +129,10 @@ channels = [
 # id = "kid"
 # name = "小孩"
 # channels = ["telegram:555555555"]
+
+# 除 owner 外，其余已绑定的人一律是 **member**（fail closed）：
+# 不发审批卡、不能跑 host / install / 发技能；只能沙盒、出网、看宿主状态，
+# 以及 who = "anyone" 的命令条目（打印、查墨量）。给家人开口子用条目，不要放松 [policy]。
 
 [policy]
 # 审批轴是"执行域"（能力越界），不是命令黑名单：
@@ -147,6 +153,10 @@ host_elevated = "deny"
 # 额外加严的工具名（只能加严，不能放松 host_elevated = "deny"）
 require_approval = []
 
+# 角色上限（D30）：除 sandbox / outbound / host_observe 外，member 一律 Blocked
+# （不是 Ask，也不发卡）。给家人开放动作请用命令条目（见下面「命令条目 commands.d」），
+# 不要靠放松这里是 allow——那等于对所有人生效。
+
 # 命名服务（可选）。kind = "http"（默认）或 "mcp"。
 # token 只放凭据文件：LoadCredential 用 0400 root:root，服务 token 用 0440 root:chuan
 # [services.dida]
@@ -154,6 +164,76 @@ require_approval = []
 # base = "https://mcp.dida365.com"
 # token_file = "~/.config/chuan/secrets/dida_token"
 # tools = ["create_task", "list_undone_tasks_by_time_query"]
+```
+
+## 定时任务（提醒）的三种形态
+
+`remind` 建的是"到点做什么"，形态由参数决定，**优先级 `message` > `skill` > `text`**：
+
+| 形态 | 参数 | 到点行为 | 谁能建 |
+|---|---|---|---|
+| 静态 | `message` | 只发这句话（不跑模型、不跑脚本） | 任何人 |
+| 钉住脚本 | `skill`（不带 `polish`） | 跑已安装技能，stdout 发回 | 任何人 |
+| 脚本 + 加工 | `skill` + `polish` | 先跑脚本，**再跑一轮模型**加工输出 | 任何人 |
+| 跑模型 | 只有 `text` | 把 `text` 当用户消息重新跑一轮（**带着工具面**） | 任何人 |
+
+后两种会跑模型，但**执行时继承创建者自己的权限范围**（不是 owner 的），所以家人建它
+也做不了超出自己权限的事。家人建成这类任务后，owner 会收到一条通知（内容 + 下次时间 +
+怎么取消），只通知一次，不弹卡。
+
+- **`message` 与 `text` 互斥**：一旦有 `message`，`text` 里的指令永远不会执行。
+  "到点调钉钉"这类必须是 `text` 形态（或 `skill`），别同时给 `message`。
+- 到点对外发消息（钉钉机器人等）走**出网工具**（`http(service="dingtalk")`），不是"投递目标"：
+  `service` 只是配置，调用属于出网域（默认免问）。
+- 多通道：建提醒时记下 `channel` / `chat`（或 `targets` 数组）。静态形态逐个目标投递；
+  `text` 形态只把**模型回复**发回创建时的那个会话，其它目标要靠模型自己调 `http` 发。
+- 家人也能用 `text` / `skill` + `polish`；到点那一轮继承创建者的权限，owner 会收到一条
+  通知（可见性用于兜底，不靠拦）。
+- **到点那一轮不弹卡**：`text` / `polish` 的 run 遇到需要审批的步骤（`host` / `install` /
+  `lan` / `service` 这类）会**直接跳过**并立刻给 owner 一条"有条定时任务需要审批"，
+  不会建卡、不会白等 10 分钟。想让任务真正做完，就该用默认免问的路径：
+  `exec`（沙盒）、`http`（出网）、`read/write`、`keep`。
+- **失败不再无声**：定时任务整轮没跑成（失败 / 被挡 / 取消）→ owner 也会收到一条结果通知，
+  创建者那边照常收到那一轮自己的回复。
+- **创建时就有预告**：建 `text` / `skill`+`polish` 的提醒时，回执会写明"到点没有人在场，
+  需要审批的步骤会被跳过"——这是唯一能提前给出的诚实预告（那一轮具体调什么由模型决定）。
+
+## 命令条目（`commands.d`，D31）
+
+打印、查墨量这类**家人也要用**的动作不弹审批卡，而是走"命令条目"：一条 = 一个名字 +
+执行环境 + argv 模板 + 封闭参数域。写进表就免审批（`[policy]` 的 `deny` 仍是天花板）。
+
+- 目录：`<config>/commands.d/<name>.toml`，**一文件一条**；权限 `0770 root:chuan`
+  （同 `services.d`，否则重启后加载不到），并列入强制遮蔽。
+- 谁写：**只有内核在主人批准后写**。agent 走 `capability(action="propose_command", command={...})`
+  提交提案（只写草稿，且先自校验）；你不批，它不会落盘。`command.summary` 是**一句人话**
+  （"这个能力做什么"），审批通知只显示它，不显示命令与参数。批准方式：agent 提完后，
+  你的每个通道会收到一条“命令条目提案（新增/删除）… 批准：`/approve <id>`”的消息；
+  批准后内核原子写入 `commands.d/` 并记 `command.installed`，下一次调用即时生效（按 mtime）。
+  删除同样是提案：`capability(action="remove_command", name="print_file")`。
+- 坏了怎么办：单个文件解析失败**只废那一条**（其余照常），日志里有一行
+  `命令条目解析失败（只废这一条）`，指名是哪个文件、为什么。
+- 审计：每次执行写一行到 `[lan] log`（默认 `<data>/lan-access.jsonl`）：
+  条目名、解析后 argv、指纹、exit、耗时、发起者。
+
+```toml
+# commands.d/print_file.toml
+env = "lan"                  # lan（v1）| host（触发式）。install 永不进表
+argv = ["/usr/bin/lp", "-d", "{printer}", "-o", "media={media}", "{file}"]
+timeout_ms = 20000
+who = "anyone"               # owner（默认）| anyone —— 家人要用这条就写 anyone
+[params]
+printer = { enum = ["HP-DeskJet-2720"] }
+media   = { enum = ["A4", "B5", "photo_4x6"] }
+file    = { file = ["/ws"] }
+```
+
+参数域只有四种：`enum` / `file`（v1 的根只有 `/ws`；执行时 canonicalize，拒绝符号链接逃逸）/
+`int { min, max }` / 封闭 `pattern`（`{ chars = "A-Za-z0-9 _-", min = 1, max = 12 }`）。
+**没有"自由字符串"**——那正是免审批的前提。要打聊天里的图片，模型会先 `cp` 到 `/ws`：
+`lan` lane 不挂 `/media`，这是故意的。
+`argv[0]` 必须绝对路径。`install`（包名是开放域）与 `host_elevated`（双真相）不进表，
+理由与触发条件见 `DECISIONS.md` D31 §11。
 
 ## 视觉（图片理解）
 
@@ -259,6 +339,7 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 
 `<config>` 默认 `~/.config/chuan`，`<skills>/<library>/<media>` 默认在 `~/.local/share/chuan/` 下。
 
+```toml
 [library]
 # 文件库：keep 存下来的产物（永久）
 dir = "~/.local/share/chuan/files"
@@ -388,6 +469,7 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 |---|---|
 | `/etc/chuan/secrets` | token 就是 chuan 自己读的（`0440 root:chuan`），不遮等于白做 D18 |
 | `/etc/chuan/services.d` | 里面写着 `token_file` 的宿主路径 |
+| `/etc/chuan/commands.d` | 命令条目表就是授权面：能写一条等于能造一条免审批动作（D31） |
 | `/etc/chuan/chuan.toml` | 完整策略与身份绑定（`[identity]`） |
 
 `roles/`、`playbooks/` 保留可见（agent 自己要读）。`$CREDENTIALS_DIRECTORY` 永不可见（D15）。

@@ -302,6 +302,9 @@ impl Renderer for TurnRenderer {
             RunStatus::Done => {}
             RunStatus::Failed => head.push(Block::Paragraph("❌ 本次运行失败".into())),
             RunStatus::Cancelled => head.push(Block::Paragraph("⏹ 已取消".into())),
+            RunStatus::Blocked => {
+                head.push(Block::Paragraph("⛔ 没有权限执行，已停止".into()));
+            }
         }
         for t in &tools {
             head.push(self.tool_line(t));

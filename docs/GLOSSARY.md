@@ -29,6 +29,7 @@
 | **规范** | Playbook | 给模型看的操作流程文本（`playbook(topic)` 按需取，永久不进 prompt） | 文档、说明书、SOP 混用 |
 | **子 agent** | SubAgent | 由父会话派生、独立上下文（`sub:<parent_conv>#<n>`）、只回传结论的执行体；`depth ≤ 1`，不得请求审批 | 分身、worker |
 | **角色** | Role | 子 agent 的一组提示词/模型/工具子集/预算；只能收窄，模型只能点名 | 人设、persona |
+| **主体角色** | ActorRole（`Owner` / `Member`） | **人**的权限身份，由 `[identity] owner` 决定；未绑定按 `Member`（fail closed）。与"角色"（子 agent 配置）是两回事，变量名不得复用 `Role` | 权限等级、用户组、role |
 | **接手简报** | Handoff brief | 交给新子 agent 的"上次进展"（结论 + 产物路径，≤1600 字），不是历史重放 | 上下文迁移、续跑 |
 | **后台任务** | BackgroundTask | 落 doc 的 `agent_task`，前台静默后由 tick 领取；结果推回原会话 | 异步任务、队列 |
 | **委托** | Delegate / `delegate` | 父 turn 内派出子 agent 的那个工具调用；前台阻塞 ≤120s，后台落 `agent_task` | 分派、派活 |
@@ -72,9 +73,13 @@
 | **策略** | Policy | 白名单、角色、路径护栏等静态规则 | 权限系统 |
 | **执行域** | Domain / `[policy]` | 审批的授权轴，共 **8 个**：`sandbox` / `self_modify` / `outbound` / `lan` / `install` / `host` / `host_elevated` / `host_observe`，每个域一个 `Verdict`（`allow` / `ask` / `deny`）；`require_approval` 只能加严 | 权限等级、工具黑名单 |
 | **能力边界** | Capability Boundary | 授权轴：能否出网/打印/发送/改自身 | 权限等级 |
-| **审批** | Approval | 越界时向主人发起的确认，单次消费 | 确认框、授权 |
+| **审批** | Approval | 越界时**只向主人**发起的确认，单次消费；分两格：权限批准 / 单次确认。家人**不收到任何审批卡**（D30） | 确认框、授权、问一下家人 |
+| **权限批准** | `Permission` | 只改数据（命令条目表），**不执行任何动作**；请求方不等（run 已 `Blocked` 终止） | 授权、放行、永久允许 |
+| **单次确认** | `Confirm` | 批准那一次动作；短 TTL（默认 10 分钟），过期作废、不重放 | 允许一次、临时授权 |
+| **提案** | Proposal | agent 经 `capability` 提交、待主人批准的数据变更（条目 / 路径 / argv）；只写草稿，永不自动生效 | 申请、请求、自授权 |
+| **阻塞** | Blocked / `RunStatus::Blocked` | run 的第四种终态：越界且没有合法路径可走时**结束该 run** 并告诉人（≠"问一下"，≠"失败"） | 拒绝、挂起、重试 |
 | **本次允许** | `allow` | 仅本次调用有效 | 临时授权 |
-| **始终允许** | `always` | 绑定"动作类别 + 目标"，有 TTL 与频率熔断 | 白名单 |
+| **始终允许** | `always` | 现有实现：`[host.path]` / `[[host_elevated.grant]]` 上"同一形状不再问"；**命令条目**（D31）把这套"批形状"的思路做成独立数据 | 白名单 |
 | **副作用等级** | `EffectClass`：`Pure` / `Idempotent { key }` / `External` | 决定崩溃后能否重跑 | 幂等性（泛指） |
 | **幂等键** | Idempotency Key | `hash(tool + 规范化 args)`，与 call id 解耦 | 去重 id |
 | **挂载集** | Mount Set | 沙盒可见的文件系统白名单 | 挂载配置 |
@@ -84,7 +89,9 @@
 | **宿主执行** | Host / `host` | L1：在 bwrap 里以服务账号身份跑宿主命令；可见范围由授权表决定 | 提权、root 执行 |
 | **提权通道** | Elevated / `hostd` | L2：独立 root 单元 + unix socket，只做 argv 前缀匹配与审计，不含领域动词 | 特权模式、sudo 代理 |
 | **宿主观测** | HostObserve / `sys` | L3：进程内只读 `/proc`、`/sys`，无子进程 | 监控、指标系统 |
-| **授权表** | Grant table | 两份数据文件（`[host.path]` / `[[host_elevated.grant]]`），人手写、按 mtime 热加载 | 权限配置、白名单（泛指） |
+| **授权表** | Grant table | 三份数据：`[host.path]` / `[[host_elevated.grant]]`（**人手写**）+ `commands.d/`（**内核在批准后写**）；都按 mtime 热加载、fail-closed | 权限配置、白名单（泛指） |
+| **命令条目** | Command Entry / `CommandEntry` | 一条"执行环境 + argv 模板 + 封闭参数域 + `who`"的声明；写进表即免审批（D31），名字即文件名 | 动作、白名单项、脚本 |
+| **命令条目表** | Command Table / `commands.d/` | 一文件一条的条目目录；内核在主人批准后写入，单条解析失败只废该条（D31） | 动作表、权限配置 |
 | **临时挂载** | Ephemeral mount / `grant[]` | 随一次调用带出的额外**只读**路径，不落盘、不可为 `rw` | 临时授权、临时允许 |
 | **结构化拒绝** | `NotGranted` | 越界时返回：缺哪一项（路径 / argv / root）+ 已授权清单 + 下一步动作 | 权限错误 |
 
@@ -129,8 +136,18 @@
 4. **不要用 `sandbox` 指接口**：接口是 **ExecutionEnv**，沙盒是它的 bwrap 实现。
 5. **不要用 `memory` 指知识库**：**Memory = 结论**，**KB = 资料**。二者的正确性来源不同（置信度 vs 引用）。
 6. **不要用 `prompt` 指整个上下文**：整个输入叫 **Context**；`prompt` 只指 system 指令那一段。
-7. **不要用"用户"泛指**：主体是 **Actor**（`{channel, external_id}`）；人叫 **主人（owner）** 或 **成员（member）**。
+7. **不要用"用户"泛指**：主体是 **Actor**（`{channel, external_id}`）；人叫 **主人（owner）** 或 **成员（member）**，其权限身份是**主体角色 `ActorRole`**（不要复用 `Role`——那是子 agent 的配置）。
 8. **不要用"日志"**：状态用 **Journal（账本）**，运维输出用 **Log**，执行记录用 **Trace**。
+9. **输出文案里不要写死关系词**：给人看的句子不出现"主人 / 家人"这类身份称谓
+   （"已经记下来告诉主人了" → "已经记录下来了"）。注释、文档、配置报错可以写；
+   **代码里的用户可见字符串不行**。需要指代时用第二人称或"有权限的人"。
+   用户可见文案集中在 `harness-kernel/src/copy.rs`（模型可见的 `ToolSpec.description`
+   不在此列——那是提示词）。新增句子先加进 `copy`，由 `copy::tests::copy_is_neutral` 兜底。
+10. **用户文案不写实现名词**：`service` / `http` / `exec` / `argv` / `[policy]` / `token`
+    这类词只对写代码的人有意义。**例外只有两处**：
+    ① 指令（`/reminders`、`/approve`）——用户要照抄；
+    ② **审批卡**——它只发给有权限的人，且"批准哪一项"必须可辨认（D28 三段式），
+    所以可以出现工具名与命令原文。给普通用户的通知不在此列。
 
 ---
 

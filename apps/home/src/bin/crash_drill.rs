@@ -106,6 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 actor: "drill".into(),
                 context_budget_chars: 100_000,
                 token_budget: None,
+                // 演练用：没有真实身份，按 owner 跑，避免把演练变成"全被 Blocked"。
+                role: harness_kernel::ActorRole::Owner,
+                scheduled: false,
             };
             println!("drill running; kill -9 me now");
             let _ = runner.run(req, pair.sink, CancellationToken::new()).await;

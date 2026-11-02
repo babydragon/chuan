@@ -197,6 +197,8 @@ ensure_dir "$ETC/playbooks"  0750 root "$SVC_GROUP"
 ensure_dir "$ETC/prompts"    0750 root "$SVC_GROUP"
 # 运行期新增的服务写这里；必须让服务用户可写，否则重启就丢
 ensure_dir "$ETC/services.d" 0770 root "$SVC_GROUP"
+# 命令条目（D31）：内核在主人批准后写，agent 无写路径。与 services.d 同权限。
+ensure_dir "$ETC/commands.d"  0770 root "$SVC_GROUP"
 # 角色目录：agent 的 role 工具会往里写，必须让服务用户可写（与 services.d 同理）
 ensure_dir "$ETC/roles"      0770 root "$SVC_GROUP"
 # 权限申请草稿（capability 工具只写这里，不改配置）
@@ -209,6 +211,21 @@ ensure_dir "$STATE/timers" 0750 "$SVC_USER" "$SVC_GROUP"
 for d in workspaces inbox skills media files rt; do
   [[ -d "$STATE/$d" ]] && ensure_dir "$STATE/$d" 0750 "$SVC_USER" "$SVC_GROUP"
 done
+
+# 3b. 默认命令条目（只补缺，不覆盖）
+if [[ $DRY_RUN -eq 1 ]]; then
+  say "[dry-run] 会补齐 $ETC/commands.d/ 的默认条目"
+else
+  for f in printer_list printer_status supplies print_file; do
+    src="$(asset "commands/$f.toml" || true)"
+    [[ -n $src ]] || continue
+    if [[ -f "$ETC/commands.d/$f.toml" ]]; then
+      say "$ETC/commands.d/$f.toml 已存在，保持不变"
+    else
+      run install -Dm0640 -o root -g "$SVC_GROUP" "$src" "$ETC/commands.d/$f.toml" || true
+    fi
+  done
+fi
 
 # 4. 配置（不覆盖已有）
 CFG="$(asset chuan.toml.example)" || die "缺少 chuan.toml.example"
@@ -323,6 +340,7 @@ cat <<NEXT
   /etc/chuan                0750 root:$SVC_GROUP
   /etc/chuan/secrets        0750 root:$SVC_GROUP   （文件见上）
   /etc/chuan/services.d     0770 root:$SVC_GROUP   （运行期加的服务写这里）
+  /etc/chuan/commands.d     0770 root:$SVC_GROUP   （命令条目，D31：写进表即免审批）
   /etc/chuan/roles          0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
   /etc/chuan/capabilities   0770 root:$SVC_GROUP   （权限申请草稿，agent 只写这里）
   /etc/chuan/playbooks      0750 root:$SVC_GROUP

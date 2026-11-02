@@ -466,6 +466,40 @@ pub struct ToolOutput {
 `host` / `host_elevated` 是 L1 / L2 的**天花板**：置 `deny` 时授权表里所有条目一并失效。
 旧键 `host_exec` 从未实现过（只有枚举与配置位），直接改名为上面两个；读到旧键打 warning 并忽略。
 
+**命令条目（D31）不改 Tool 契约**。`Tool::domain()` 保持**无参静态**：按执行环境分工具
+（`lan_command`、将来的 `host_command`），不引入"按参数决定域"。理由：动态域会让
+`effect()` / `lane()` / `tier()` 只改半个契约，而且 gate 批准的条目可能与 execute 解析到的
+条目不是同一条（热加载/改名），审计无法自证。
+
+两个新增的**小契约**（都是 fail-closed 的默认值）：
+
+```rust
+trait Tool {
+    /// 这一条调用是否"结构上有界、不需要人批"。只能引用数据
+    /// （授权表 / 命令条目表 / 参数是否自指），不得有自由裁量。
+    fn skip_approval(&self, _args: &Value) -> bool { false }
+    /// member 能否在不经审批的情况下用这个工具。默认 false。
+    /// 注意：还得这一条调用同时 `skip_approval(args)` 为真（自证有界）才放行，
+    /// 且它**不能**替代命令条目——对家人开放一类动作应写 `who = "anyone"` 的条目（D31）。
+    fn member_safe(&self) -> bool { false }
+}
+```
+
+门（`ApprovalGate`）从 `Result<bool, String>` 改为三态**结果**，别再用 bool 表达"拒绝"：
+
+```rust
+enum GateOutcome {
+    Allowed,
+    Denied { reason: String },                      // 这条路不存在（域 deny / 参数非法 / 这次不批）
+    Blocked { reason: String, hint: String },       // 终态：结束 run（D30 §5）
+}
+```
+
+门**内部**还有一层判定（`policy::GateDecision`，多一个 `Ask`）：`Ask` 由门自己发卡并等待，
+不会以 `Ask` 的形式交回 runner。判定顺序见 `DECISIONS.md` D30 §1：
+`Deny`（天花板）→ 数据化免审 → member 角色上限 → `Ask`（只对 owner）。
+`RunRequest` 因此多一个 `role: ActorRole`——门不能从 `conv` 反推发起者（`conv` 只有 `channel:chat`）。
+
 内置工具的副作用等级（P0 验收要用）：
 
 | 工具 | effect | 说明 |

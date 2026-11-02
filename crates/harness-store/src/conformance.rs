@@ -96,6 +96,10 @@ pub async fn suite<S: Store>(store: &S) {
             action: "exec".into(),
             scope: "workspace".into(),
             ttl_s: 60,
+            kind: harness_kernel::ApprovalKind::Confirm,
+            requester: "owner".into(),
+            entry_name: None,
+            entry_hash: None,
         })
         .await
         .unwrap();
@@ -118,6 +122,10 @@ pub async fn suite<S: Store>(store: &S) {
             action: "exec".into(),
             scope: "workspace".into(),
             ttl_s: 0,
+            kind: harness_kernel::ApprovalKind::Confirm,
+            requester: "owner".into(),
+            entry_name: None,
+            entry_hash: None,
         })
         .await
         .unwrap();

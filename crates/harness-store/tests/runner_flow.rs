@@ -142,7 +142,9 @@ fn request() -> RunRequest {
         system_prompt: None,
         images: Vec::new(),
         context_budget_chars: 100_000,
-                token_budget: None,
+        token_budget: None,
+        role: harness_kernel::ActorRole::Owner,
+        scheduled: false,
     }
 }
 
@@ -309,7 +311,9 @@ async fn cancel_interrupts_running_tool_promptly() {
                     system_prompt: None,
                     images: Vec::new(),
                     context_budget_chars: 100_000,
-                token_budget: None,
+                    token_budget: None,
+                    role: harness_kernel::ActorRole::Owner,
+                    scheduled: false,
                 },
                 pair.sink,
                 c2,
@@ -503,6 +507,7 @@ async fn actor_turns_inbound_into_reply() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -568,6 +573,7 @@ async fn final_message_is_retried_after_rate_limit_window() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -631,6 +637,7 @@ async fn actor_answers_slash_status() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -712,6 +719,7 @@ async fn over_budget_blocks_run_with_visible_message() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -795,6 +803,7 @@ async fn over_budget_blocks_delegation() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -855,6 +864,7 @@ fn task_actor(
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ))
@@ -1163,6 +1173,7 @@ async fn agents_show_dumps_child_transcript() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -1223,6 +1234,7 @@ async fn actor_answers_slash_agents() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -1286,6 +1298,7 @@ async fn path_like_command_is_treated_as_text() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -1363,6 +1376,7 @@ async fn actor_answers_slash_prompt() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -1424,6 +1438,7 @@ async fn actor_answers_slash_usage() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -1448,8 +1463,8 @@ async fn actor_answers_slash_usage() {
     let msg = channel.delivered.lock().unwrap()[0].clone();
     assert!(msg.contains("今日"), "{msg}");
     assert!(msg.contains("本月"), "{msg}");
-    // 没配 [pricing] 时必须说清楚，不能让 0 看起来像"免费"
-    assert!(msg.contains("pricing"), "{msg}");
+    // 没配价格时必须说清楚，不能让 0 看起来像"免费"
+    assert!(msg.contains("金额未统计"), "{msg}");
 }
 
 
@@ -1600,6 +1615,7 @@ async fn role_shapes_child_prompt_tools_and_model() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -1712,6 +1728,7 @@ async fn role_catalog_is_visible_and_hot_loaded() {
             vision: false,
             proxy_hint: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -1886,6 +1903,7 @@ async fn spawn_extracts_pending_actions() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -1996,6 +2014,7 @@ async fn child_agent_is_isolated_and_cannot_self_modify() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -2046,7 +2065,7 @@ async fn child_agent_is_isolated_and_cannot_self_modify() {
     assert_eq!(calls[0].status, "finished");
     assert_eq!(
         calls[0].preview.as_deref(),
-        Some("用户拒绝"),
+        Some("子任务不能请求审批"),
         "拒绝原因要落在 preview 上（与 SQLite 后端一致）"
     );
 
@@ -2108,6 +2127,7 @@ async fn approval_gate_allows_after_callback() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -2257,6 +2277,7 @@ async fn done_run_with_writes_offers_publish_button() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -2323,6 +2344,7 @@ async fn skill_button_starts_distill_run() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -2436,6 +2458,7 @@ async fn clicking_publish_button_removes_keyboard() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -2508,9 +2531,11 @@ async fn approval_wait_does_not_burn_wall_clock() {
             _call: &CallId,
             _tool: &str,
             _args: &serde_json::Value,
-        ) -> Result<bool, String> {
+            _role: harness_kernel::ActorRole,
+            _scheduled: bool,
+        ) -> Result<harness_kernel::runner::GateOutcome, String> {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            Ok(true)
+            Ok(harness_kernel::runner::GateOutcome::Allowed)
         }
     }
 
@@ -2628,6 +2653,7 @@ async fn run_one_tool_call(
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     );
@@ -2720,6 +2746,7 @@ async fn slash_facts_empty_and_help_lists_commands() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -2786,6 +2813,7 @@ async fn due_reminder_fires_once_and_rearms() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -2915,6 +2943,7 @@ async fn pinned_reminder_runs_skill_without_model() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -3012,6 +3041,7 @@ async fn static_reminder_sends_text_only() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -3128,6 +3158,7 @@ async fn approval_card_uses_tool_hint() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -3170,6 +3201,7 @@ async fn reminders_are_per_user() {
     let driver = Arc::new(FakeDriver::new(vec![]));
     let channel = Arc::new(FakeChannel::default());
     let dir = Directory {
+        owner: Some("owner".into()),
         users: vec![
             User {
                 id: "owner".into(),
@@ -3209,6 +3241,7 @@ async fn reminders_are_per_user() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(dir),
+            commands: None,
         },
         None,
     ));
@@ -3334,6 +3367,7 @@ async fn pinned_reminder_with_polish_passes_data_to_model() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -3429,6 +3463,7 @@ async fn tool_catalog_is_injected_into_system_prompt() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -3510,6 +3545,7 @@ fn actor_with_registry(
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ))
@@ -3718,6 +3754,7 @@ async fn two_channels_do_not_cross_talk() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -3786,6 +3823,7 @@ async fn unbound_address_gets_unauthorized_without_running() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(dir),
+            commands: None,
         },
         None,
     ));
@@ -3809,7 +3847,7 @@ async fn unbound_address_gets_unauthorized_without_running() {
     actor.run(rx, CancellationToken::new()).await.unwrap();
 
     let said = channel.delivered.lock().unwrap().join("\n");
-    assert!(said.contains("未授权"), "应回一句未授权：{said:?}");
+    assert!(said.contains("没有被允许"), "应回一句人话：{said:?}");
     assert!(!said.contains("不该被调用"), "未授权的消息不该跑模型：{said:?}");
 }
 
@@ -3883,6 +3921,7 @@ async fn short_code_approval_with_human_readable_card() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -4008,6 +4047,7 @@ async fn bare_media_waits_for_instruction() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -4074,6 +4114,7 @@ async fn pending_media_merges_into_next_text() {
             budget: Default::default(),
             roles: None,
             identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+            commands: None,
         },
         None,
     ));
@@ -4114,4 +4155,1006 @@ async fn pending_media_merges_into_next_text() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(joined.contains("/media/xyz.pdf"), "暂存的附件要挂到这条消息：{joined}");
+}
+
+// ---------------- P4.7 / D30：主体角色与 Blocked 终态 ----------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// 模拟 `lan_exec`：域是 `Lan`（默认 ask），用来验证"家人走不到发卡这一步"。
+struct LanTool {
+    runs: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for LanTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "lan_exec".into(),
+            description: "内网命令（测试桩）".into(),
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+        }
+    }
+    fn effect(&self) -> EffectClass {
+        EffectClass::External
+    }
+    fn domain(&self) -> harness_kernel::Domain {
+        harness_kernel::Domain::Lan
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolCtx<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            content: vec![Block::Paragraph("printed".into())],
+            doc_writes: vec![],
+            artifacts: vec![],
+        })
+    }
+}
+
+fn two_people() -> harness_kernel::Directory {
+    use harness_kernel::{Binding, Directory, User};
+    Directory {
+        owner: Some("boss".into()),
+        users: vec![
+            User {
+                id: "boss".into(),
+                name: None,
+                channels: vec![Binding::parse("fake:1000").unwrap()],
+            },
+            User {
+                id: "kid".into(),
+                name: None,
+                channels: vec![Binding::parse("fake:2000").unwrap()],
+            },
+        ],
+    }
+}
+
+/// 家人触到域上限：**不发卡、不建审批行、不执行**，run 以 `Blocked` 收尾。
+/// 验收口径是"只烧一轮"——所以 driver 只能被调用一次（没有第二次模型往返）。
+#[tokio::test]
+async fn member_hits_ceiling_without_a_card() {
+    let store = Arc::new(EphemeralStore::new());
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(LanTool { runs: Arc::clone(&runs) }));
+
+    let driver = Arc::new(FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-print"),
+                name: "lan_exec".into(),
+                args: serde_json::json!({}),
+            }],
+        },
+        // 不该被用到的第二轮：Blocked 必须是终态
+        Step::Done { text: "不该到这里".into(), finish: FinishReason::Stop },
+    ]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::new(two_people()),
+            commands: None,
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "2000".into(),
+        actor: "2000".into(),
+        kind: InboundKind::Text,
+        text: Some("打印这张".into()),
+        dedupe_key: "u-blocked".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "被挡住的动作不能真的执行");
+    assert!(channel.cards.lock().unwrap().is_empty(), "家人不该收到审批卡");
+
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert!(sent.contains("没有权限"), "要明确告诉人做不了：{sent}");
+    assert!(!sent.contains("不该到这里"), "Blocked 必须是终态：{sent}");
+
+    // 只烧一轮：模型只被调用一次（没有"换个写法再试"）。
+    assert_eq!(driver.seen.lock().unwrap().len(), 1, "Blocked 之后不该再来一轮");
+}
+
+/// 不是 owner 的账号回 `/approve` 不能批准任何东西（D30 §2）。
+#[tokio::test]
+async fn non_owner_cannot_approve() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 2,
+            wall_clock_ms: 1_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::new(two_people()),
+            commands: None,
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "2000".into(),
+        actor: "2000".into(),
+        kind: InboundKind::Command,
+        text: Some("/approve some-approval-id".into()),
+        dedupe_key: "u-approve".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert!(sent.contains("更高权限"), "非 owner 的批准要被拒：{sent}");
+}
+
+// ---------------- P1 / D31：命令条目（lan_command） ----------------
+
+/// 记录 argv 的执行环境：lan_command 必须把**已解析的 argv** 原样交下来（不经 shell）。
+struct RecordingEnv {
+    seen: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl ExecutionEnv for RecordingEnv {
+    async fn exec(
+        &self,
+        argv: &[String],
+        _opts: ExecOpts,
+        _cancel: CancellationToken,
+    ) -> Result<ExecOutput, harness_kernel::EnvError> {
+        self.seen.lock().unwrap().push(argv.to_vec());
+        Ok(ExecOutput {
+            code: Some(0),
+            stdout: "printer ok\n".into(),
+            stderr: String::new(),
+            truncated: false,
+        })
+    }
+}
+
+const ENTRY_STATUS: &str = r#"
+env = "lan"
+argv = ["/usr/bin/lpstat", "-p", "-d"]
+timeout_ms = 5000
+who = "anyone"
+"#;
+
+/// 家人跑一条 `who = "anyone"` 的条目：**零卡、真的执行**，argv 与条目一致。
+#[tokio::test]
+async fn member_runs_a_command_entry_without_a_card() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("printer_status.toml"), ENTRY_STATUS).unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tool = harness_capabilities::LanCommandTool::new(
+        Arc::new(harness_capabilities::CommandCache::new(dir.path())),
+        Arc::new(RecordingEnv { seen: Arc::clone(&seen) }),
+        "/tmp/ws",
+        dir.path().join("lan-access.jsonl"),
+    );
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(tool));
+
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-lan-1"),
+                name: "lan_command".into(),
+                args: serde_json::json!({"name":"printer_status"}),
+            }],
+        },
+        Step::Done { text: "打印机在线".into(), finish: FinishReason::Stop },
+    ]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::new(two_people()),
+            commands: None,
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "2000".into(),
+        actor: "2000".into(),
+        kind: InboundKind::Text,
+        text: Some("打印机还好吗".into()),
+        dedupe_key: "u-entry".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    assert!(channel.cards.lock().unwrap().is_empty(), "命中条目不该发卡");
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "条目应该真的被执行: {calls:?}");
+    assert_eq!(calls[0], vec!["/usr/bin/lpstat", "-p", "-d"], "argv 必须是条目里那一条");
+
+    // 收尾消息是模型的话，不是工具输出；工具输出在账本里（这里只确认模型看到了结果）
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    // 模型在拿到工具结果之后还能继续收尾 → 这条调用没有被当成"拒绝"
+    assert!(sent.contains("打印机在线"), "{sent}");
+
+    // 审计必须落一行（条目名 + 指纹 + exit）
+    let audit = std::fs::read_to_string(dir.path().join("lan-access.jsonl")).unwrap();
+    assert!(audit.contains("printer_status"), "{audit}");
+    assert!(audit.contains("\"code\":0"), "{audit}");
+
+    // 部署默认条目也应该能解析（防止示例文件与加载器不同步）
+    for name in ["printer_list", "printer_status", "supplies", "print_file"] {
+        let p = format!(
+            "{}/../../deploy/commands/{name}.toml",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let body = std::fs::read_to_string(&p).unwrap_or_else(|_| panic!("缺默认条目 {p}"));
+        let one = tempfile::tempdir().unwrap();
+        std::fs::write(one.path().join(format!("{name}.toml")), body).unwrap();
+        let t = harness_capabilities::CommandTable::load_dir(one.path());
+        assert!(t.get(name).is_some(), "默认条目 {name} 解析失败：{:?}", t.errors);
+    }
+}
+
+/// 表外条目：直接 `Blocked` 终态（不发卡、不执行、不换路径重试）。
+#[tokio::test]
+async fn unknown_command_entry_is_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("printer_status.toml"), ENTRY_STATUS).unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tool = harness_capabilities::LanCommandTool::new(
+        Arc::new(harness_capabilities::CommandCache::new(dir.path())),
+        Arc::new(RecordingEnv { seen: Arc::clone(&seen) }),
+        "/tmp/ws",
+        dir.path().join("lan-access.jsonl"),
+    );
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(tool));
+
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-lan-2"),
+                name: "lan_command".into(),
+                args: serde_json::json!({"name":"format_disk"}),
+            }],
+        },
+        Step::Done { text: "不该到这里".into(), finish: FinishReason::Stop },
+    ]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            // owner 也一样：表外动作不发卡，直接 Blocked
+            identity: Arc::new(two_people()),
+            commands: None,
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "1000".into(),
+        kind: InboundKind::Text,
+        text: Some("把磁盘格式化".into()),
+        dedupe_key: "u-entry-bad".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    assert!(seen.lock().unwrap().is_empty(), "表外条目不能执行");
+    assert!(channel.cards.lock().unwrap().is_empty(), "表外条目不该发卡");
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert!(sent.contains("没有权限"), "{sent}");
+    assert!(sent.contains("format_disk"), "要点名是哪个条目被挡：{sent}");
+    assert_eq!(driver.seen.lock().unwrap().len(), 1, "Blocked 之后不该再来一轮");
+}
+
+// ---------------- P2 / D31：提案 → 批准 → 内核安装 ----------------
+
+struct TestCommandAdmin {
+    dir: std::path::PathBuf,
+    drafts: std::path::PathBuf,
+}
+
+fn read_summary(dir: &std::path::Path, name: &str) -> String {
+    std::fs::read_to_string(dir.join(format!("{name}.summary")))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("一项新能力（{name}）"))
+}
+
+impl harness_kernel::CommandAdmin for TestCommandAdmin {
+    fn pending(&self) -> Vec<harness_kernel::PendingCommand> {
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&self.drafts) else { return out };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Some(name) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+            match p.extension().and_then(|x| x.to_str()) {
+                Some("toml") => {
+                    if let Ok(body) = std::fs::read_to_string(&p) {
+                        out.push(harness_kernel::PendingCommand {
+                            name: name.to_owned(),
+                            hash: harness_capabilities::commands::body_hash(&body),
+                            summary: read_summary(&self.drafts, name),
+                            body: Some(body),
+                        });
+                    }
+                }
+                Some("remove") => out.push(harness_kernel::PendingCommand {
+                    name: name.to_owned(),
+                    hash: harness_capabilities::commands::body_hash(&format!("remove:{name}")),
+                    summary: read_summary(&self.drafts, name),
+                    body: None,
+                }),
+                _ => {}
+            }
+        }
+        out
+    }
+    fn install(&self, name: &str, body: &str) -> Result<(), String> {
+        harness_capabilities::commands::install_atomic(&self.dir, name, body).map(|_| ())
+    }
+    fn discard(&self, name: &str) -> Result<(), String> {
+        let _ = std::fs::remove_file(self.drafts.join(format!("{name}.toml")));
+        let _ = std::fs::remove_file(self.drafts.join(format!("{name}.remove")));
+        let _ = std::fs::remove_file(self.drafts.join(format!("{name}.summary")));
+        Ok(())
+    }
+    fn remove(&self, name: &str) -> Result<(), String> {
+        harness_capabilities::commands::remove_entry(&self.dir, name)
+    }
+}
+
+/// 完整闭环：agent 提提案 → 内核发 Permission 审批给 owner → owner `/approve` → 条目落盘。
+#[tokio::test]
+async fn proposal_is_installed_only_after_owner_approves() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg_file = root.path().join("chuan.toml");
+    std::fs::write(&cfg_file, "[host.path]\n").unwrap();
+    let commands_dir = root.path().join("commands.d");
+    let drafts = root.path().join("capabilities/commands");
+
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(
+        harness_capabilities::CapabilityTool::new(
+            root.path().join("capabilities"),
+            Arc::new(harness_capabilities::GrantsCache::new(&cfg_file)),
+        )
+        .with_commands(commands_dir.clone()),
+    ));
+
+    let store = Arc::new(EphemeralStore::new());
+    let driver = Arc::new(FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-propose"),
+                name: "capability".into(),
+                args: serde_json::json!({
+                    "action": "propose_command",
+                    "command": {
+                        "name": "printer_status",
+                        "env": "lan",
+                        "argv": ["/usr/bin/lpstat", "-p", "-d"],
+                        "timeout_ms": 5000,
+                        "who": "anyone"
+                    }
+                }),
+            }],
+        },
+        Step::Done { text: "已提交提案，等批准".into(), finish: FinishReason::Stop },
+        // 第二条消息（/approve）不会再跑模型
+    ]));
+    let channel = Arc::new(FakeChannel::default());
+    let admin: Arc<dyn harness_kernel::CommandAdmin> = Arc::new(TestCommandAdmin {
+        dir: commands_dir.clone(),
+        drafts: drafts.clone(),
+    });
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::new(two_people()),
+            commands: Some(Arc::clone(&admin)),
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "2000".into(),
+        actor: "2000".into(),
+        kind: InboundKind::Text,
+        text: Some("能不能加个查打印机的命令".into()),
+        dedupe_key: "u-propose".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    // 第一轮：提案 + 通知（先把 actor 跑起来，等它发出带 id 的消息）
+    let handle = tokio::spawn(Arc::clone(&actor).run(rx, CancellationToken::new()));
+    let mut approval_id = String::new();
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let text = channel.delivered.lock().unwrap().join("\n");
+        if let Some(i) = text.find("/approve ") {
+            let rest = &text[i + "/approve ".len()..];
+            approval_id = rest.split_whitespace().next().unwrap_or("").to_owned();
+            break;
+        }
+        if !drafts.join("printer_status.toml").exists() && text.contains("等批准") {
+            break;
+        }
+    }
+    assert!(!approval_id.is_empty(), "owner 应收到带 /approve 的提案通知");
+    assert!(
+        !commands_dir.join("printer_status.toml").exists(),
+        "没批准之前不能生效"
+    );
+
+    // 第二轮：owner 批准
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "1000".into(),
+        actor: "1000".into(),
+        kind: InboundKind::Command,
+        text: Some(format!("/approve {approval_id}")),
+        dedupe_key: "u-approve".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+    handle.abort();
+
+    let installed = commands_dir.join("printer_status.toml");
+    assert!(installed.exists(), "批准后应落盘：{:?}", installed);
+    let body = std::fs::read_to_string(&installed).unwrap();
+    let one = tempfile::tempdir().unwrap();
+    std::fs::write(one.path().join("printer_status.toml"), &body).unwrap();
+    let t = harness_capabilities::CommandTable::load_dir(one.path());
+    assert!(t.get("printer_status").is_some(), "{:?}", t.errors);
+    assert!(!drafts.join("printer_status.toml").exists(), "草稿要清掉");
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert!(sent.contains("已生效"), "{sent}");
+}
+
+// ---------------- P3 / D30 §7：提醒对家人免审批 ----------------
+
+/// 家人说"提醒我…" → 不弹卡、直接建成，并回显绝对时间。
+#[tokio::test]
+async fn member_sets_reminder_without_a_card() {
+    let store = Arc::new(EphemeralStore::new());
+    let identity = Arc::new(two_people());
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(
+        harness_capabilities::RemindTool::new(480).with_identity(Arc::clone(&identity)),
+    ));
+
+    let at = harness_kernel::schedule::format_local(harness_kernel::now_ms() + 3_600_000, 480)
+        .replace(' ', "T");
+    let driver = Arc::new(FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-remind"),
+                name: "remind".into(),
+                args: serde_json::json!({
+                    "action": "add",
+                    // 家人用静态形态（到点只发这句话，不跑模型）——`text` 形态只允许 owner
+                    "text": "吃药",
+                    "message": "该吃药了",
+                    "schedule": {"kind": "once", "at": at}
+                }),
+            }],
+        },
+        Step::Done { text: "好，到点提醒你".into(), finish: FinishReason::Stop },
+    ]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::clone(&identity),
+            commands: None,
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "2000".into(),
+        actor: "2000".into(),
+        kind: InboundKind::Text,
+        text: Some("提醒我一小时后吃药".into()),
+        dedupe_key: "u-remind".into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    actor.run(rx, CancellationToken::new()).await.unwrap();
+
+    assert!(channel.cards.lock().unwrap().is_empty(), "提醒不该弹审批卡");
+
+    let mut rd = store.begin_read().await.unwrap();
+    let docs = rd
+        .list_docs(harness_kernel::DocQuery {
+            kinds: vec!["reminder".into()],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(docs.len(), 1, "应该真的建了一条提醒: {docs:?}");
+    assert_eq!(docs[0].payload["user"], "kid", "归属要是发起者本人");
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert!(sent.contains("好，到点提醒你"), "{sent}");
+}
+
+// ---------------- P4 / D30 §8：同形状被挡两次才通知 owner ----------------
+
+#[tokio::test]
+async fn repeated_blocks_notify_owner_once() {
+    use harness_kernel::runner::ApprovalGate;
+
+    let store = Arc::new(EphemeralStore::new());
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(LanTool { runs }));
+
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(FakeDriver::new(vec![])),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 2,
+            wall_clock_ms: 1_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::new(two_people()),
+            commands: None,
+        },
+        None,
+    ));
+
+    let conv = ConversationId::from("fake:2000");
+    let args = serde_json::json!({});
+    for i in 0..2 {
+        let call = CallId::from(format!("c{i}").as_str());
+        let out = actor
+            .ask(&conv, &call, "lan_exec", &args, harness_kernel::ActorRole::Member, false)
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, harness_kernel::runner::GateOutcome::Blocked { .. }),
+            "家人应被 Blocked: {out:?}"
+        );
+        assert!(channel.cards.lock().unwrap().is_empty(), "不该发卡");
+    }
+
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    let hits = sent.matches("连续被挡了两次").count();
+    assert_eq!(hits, 1, "只在第 2 次通知一次: {sent}");
+
+    // 第 3 次不再重复通知
+    let _ = actor
+        .ask(&conv, &CallId::from("c3"), "lan_exec", &args, harness_kernel::ActorRole::Member, false)
+        .await
+        .unwrap();
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert_eq!(sent.matches("连续被挡了两次").count(), 1, "{sent}");
+}
+
+/// 家人可以排 `text` 形态的提醒（到点跑一轮模型）——不拦，但 owner 会收到一条通知。
+///
+/// 边界在"角色继承"而不是"建的时候拦"：到点那一轮继承创建者自己的权限面，
+/// 不会超过他本人在场时的范围；无人值守这件事用"看得见"来管。
+#[tokio::test]
+async fn member_can_schedule_a_model_reminder_but_owner_is_told() {
+    let store = Arc::new(EphemeralStore::new());
+    let identity = Arc::new(two_people());
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(
+        harness_capabilities::RemindTool::new(480).with_identity(Arc::clone(&identity)),
+    ));
+    let at = harness_kernel::schedule::format_local(harness_kernel::now_ms() + 3_600_000, 480)
+        .replace(' ', "T");
+    let driver = Arc::new(FakeDriver::new(vec![
+        Step::Tools {
+            text: String::new(),
+            calls: vec![ToolCallRequest {
+                call: CallId::from("call-remind-text"),
+                name: "remind".into(),
+                args: serde_json::json!({
+                    "action": "add",
+                    "text": "到点给老师回消息，并发钉钉",
+                    "schedule": {"kind": "once", "at": at}
+                }),
+            }],
+        },
+        Step::Done { text: "好，到点我会去看并通知".into(), finish: FinishReason::Stop },
+    ]));
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::clone(&driver),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 4,
+            wall_clock_ms: 5_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity,
+            commands: None,
+        },
+        None,
+    ));
+
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: "2000".into(),
+        actor: "2000".into(),
+        kind: InboundKind::Text,
+        text: Some("一小时后提醒我给老师回消息，顺便发钉钉".into()),
+        dedupe_key: "u-remind-text".into(),
+        callback_id: None,
+        msg: None,
+        received_at: harness_kernel::now_ms(),
+        attachments: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+    Arc::clone(&actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    assert!(channel.cards.lock().unwrap().is_empty(), "不该发卡");
+
+    let mut rd = store.begin_read().await.unwrap();
+    let docs = rd
+        .list_docs(harness_kernel::DocQuery {
+            kinds: vec!["reminder".into()],
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(docs.len(), 1, "家人应该能建成: {docs:?}");
+    assert_eq!(docs[0].payload["user"], "kid");
+
+    // owner 收到一条"到点自动处理的任务"的通知（不是审批卡）
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert!(sent.contains("到点自动处理的任务"), "owner 应被告知: {sent}");
+    assert!(sent.contains("给老师回消息"), "{sent}");
+
+    // 不重复通知
+    let _ = actor.notify_member_model_reminders(
+        &Inbound {
+            channel: harness_kernel::ChannelId("fake".into()),
+            conversation: "2000".into(),
+            actor: "2000".into(),
+            kind: InboundKind::Text,
+            text: None,
+            dedupe_key: "x".into(),
+            callback_id: None,
+            msg: None,
+            received_at: harness_kernel::now_ms(),
+            attachments: Vec::new(),
+        },
+        harness_kernel::ActorRole::Member,
+    ).await;
+    let sent2 = channel.delivered.lock().unwrap().join("\n");
+    assert_eq!(sent2.matches("到点自动处理的任务").count(), 1, "{sent2}");
+}
+
+// ---------------- D30 §7：定时任务里遇到审批 = 跳过 + 立刻通知（不等 10 分钟） ----------------
+
+#[tokio::test]
+async fn scheduled_run_skips_approval_and_tells_owner_once() {
+    use harness_kernel::runner::ApprovalGate;
+
+    let store = Arc::new(EphemeralStore::new());
+    let runs = Arc::new(AtomicUsize::new(0));
+    let mut registry = harness_kernel::ToolRegistry::new();
+    registry.register(Arc::new(LanTool { runs }));
+
+    let channel = Arc::new(FakeChannel::default());
+    let actor = Arc::new(ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(FakeDriver::new(vec![])),
+        Arc::new(registry),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        ActorConfig {
+            model: "m".into(),
+            max_turns: 2,
+            wall_clock_ms: 1_000,
+            workspace_root: "/tmp/ws".into(),
+            system_prompt: String::new(),
+            policy: harness_kernel::ApprovalPolicy::default(),
+            context_budget_chars: 100_000,
+            lanes: lanes().clone(),
+            agents: Default::default(),
+            skill_source: None,
+            tool_source: None,
+            distill_prompt: String::new(),
+            tz_offset_min: 480,
+            host_paths: None,
+            vision: false,
+            proxy_hint: None,
+            budget: Default::default(),
+            roles: None,
+            identity: Arc::new(two_people()),
+            commands: None,
+        },
+        None,
+    ));
+
+    // owner + lan 域（默认 ask）+ scheduled=true：不发卡、不等人，直接跳过
+    let conv = ConversationId::from("fake:1000");
+    let args = serde_json::json!({});
+    let out = actor
+        .ask(
+            &conv,
+            &CallId::from("job-1"),
+            "lan_exec",
+            &args,
+            harness_kernel::ActorRole::Owner,
+            true,
+        )
+        .await
+        .unwrap();
+    match out {
+        harness_kernel::runner::GateOutcome::Denied { reason } => {
+            assert!(reason.contains("定时任务"), "{reason}");
+        }
+        other => panic!("定时任务遇到审批应直接跳过: {other:?}"),
+    }
+
+    assert!(channel.cards.lock().unwrap().is_empty(), "到点没人点，不该发卡");
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert_eq!(
+        sent.matches("需要你确认").count(),
+        1,
+        "owner 应立刻收到一条: {sent}"
+    );
+
+    // 同一条任务反复试同一个工具 → 不再重复通知
+    let _ = actor
+        .ask(
+            &conv,
+            &CallId::from("job-2"),
+            "lan_exec",
+            &args,
+            harness_kernel::ActorRole::Owner,
+            true,
+        )
+        .await
+        .unwrap();
+    let sent = channel.delivered.lock().unwrap().join("\n");
+    assert_eq!(sent.matches("需要你确认").count(), 1, "{sent}");
 }

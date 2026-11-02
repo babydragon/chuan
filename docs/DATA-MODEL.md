@@ -78,13 +78,15 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `tool.call_dispatched` | **真正执行前的最后一刻** | `call_id` | kernel |
 | `tool.call_finished` | 执行结束 | `call_id`, `status`, `duration_ms`, `truncated` | kernel |
 | `tool.call_abandoned` | 恢复/取消判定不可续 | `call_id`, `reason`(`crash`/`approval_expired`/`cancelled`) | kernel |
-| `approval.requested` | 发起审批（卡片发出后另记 `card_sent`） | `approval_id`, `call_id`, `action`, `scope`, `ttl_s` | kernel |
+| `approval.requested` | 发起审批（卡片发出后另记 `card_sent`） | `approval_id`, `call_id`, `action`, `scope`, `ttl_s`, **`kind`**(`permission`/`confirm`), **`requester`** | kernel |
 | `approval.card_sent` | 卡片投递成功 | `approval_id`, `msg_ref` | kernel |
-| `approval.resolved` | 点击/超时/取消 | `approval_id`, `decision`, `by?`, `consumed_at` | kernel |
+| `approval.resolved` | 点击/超时/取消 | `approval_id`, `decision`, `by?`（**必须是 owner**）, `consumed_at` | kernel |
+| `command.installed` | owner 批准后条目原子落盘（**在事务外写文件，成功后才记**） | `name`, `hash`, `approval_id` | kernel |
+| `command.removed` | owner 批准后条目删除 | `name`, `hash`, `approval_id` | kernel |
 | `task.enqueued` | 建任务 | `task_id`, `kind`, `due_at`, `payload` | kernel |
 | `task.leased` | 抢到租约 | `task_id`, `lease_until`, `attempt_no` | kernel |
 | `task.finished` | 完成/失败/取消 | `task_id`, `status`, `result_ref` | kernel |
-| `run.finished` | run 终态（唯一终止点） | `status`(`done`/`failed`/`cancelled`), `stop_reason` | kernel |
+| `run.finished` | run 终态（唯一终止点） | `status`(`done`/`failed`/`cancelled`/**`blocked`**), `stop_reason` | kernel |
 | `agent.spawned` | 派出子 agent（前台或后台） | `child_conv`, `child_run`, `profile`, `task`, `depth`, `caps` | kernel |
 | `agent.concluded` | 子 agent 定稿，结论交回父 | `status`(`done`/`budget`/`timeout`/`failed`/`cancelled`), `summary`, `artifact_refs[]`, `usage` | kernel |
 | `usage.recorded` | 每次模型调用 | `model`, `prompt_tokens`, `completion_tokens`, `cost_est`, **`agent`**, **`parent_run?`** | kernel（engine 只返回 usage） |
@@ -108,7 +110,7 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 |---|---|---|
 | `tool_calls` | 调用状态、幂等键查找（CAS） | `tool.call_*` |
 | `tasks` | 调度与租约（CAS） | `task.*` |
-| `approvals` | 审批状态、单次消费、**卡片 msg_ref** | `approval.*` |
+| `approvals` | 审批状态、单次消费、**卡片 msg_ref**；V6 增 `kind`(`permission`/`confirm`) / `requester` / `entry_name` / `entry_hash` | `approval.*` |
 | `docs` | 记忆/配置/画像（含 payload 与 version） | `doc.upserted` |
 | `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出）；`cost_est` 恒 0（金额不估算，D20） | `usage.recorded` |
 | ~~`artifacts`~~ | **无独立表**：产物是 `artifacts/` 下的文件 + `artifact.created` 事件，按 sha256 寻址 | `artifact.created` |
@@ -193,5 +195,10 @@ async fn messages(&mut self, conv: ConversationId, from: Seq, max_turns: u16)
 - `PRAGMA user_version` 单调递增，只前向；迁移前自动 `VACUUM INTO`。
 - V5（用量归属）给 `usage_rollup` 加了 `conv_id` / `run_id` / `agent` 三列；历史行没有会话信息，
   `agent` 一律记 `main`，不猜测。
+- V6（审批分两类 + 命令条目，D30/D31）给 `approvals` 加 `kind` / `requester` / `entry_name` / `entry_hash`；
+  历史行按 `kind = 'confirm'` / `requester = ''` 补齐（那时确实只有"单次确认"一种）。
+  `commands.d/` 是**文件**，不进 schema——它由 `command.*` 事件与文件 hash 共同兜底，
+  不进 `rebuild` 的可重建集合（与 `services.d/` 同理）。
+- `run.finished.status` 增加 `blocked`：旧代码读到未知状态应按 `failed` 处理，不要当成成功。
 - `rebuild` 是验收工具，不是日常路径：删投影表 → 按 `(created_at, conv_id, seq)` 折叠 → 比对结果。
 - 不支持二进制回滚（旧代码读不了新 schema）。

@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod agent;
 pub mod budget;
+pub mod copy;
 pub mod channel;
 pub mod context;
 pub mod driver;
@@ -39,14 +40,19 @@ pub use env::{ExecOpts, ExecOutput, ExecutionEnv};
 pub use error::{EngineError, EnvError, ErrorCode, GrantKind, StoreError, ToolError};
 pub use event::{Event, EventKind, NewEvent};
 pub use ids::*;
-pub use identity::{Binding, Directory, User};
-pub use policy::{ApprovalPolicy, Domain, Verdict};
+pub use identity::{ActorRole, Binding, Directory, User};
+pub use policy::{ApprovalPolicy, BlockedReason, Domain, GateDecision, Verdict};
 pub use lanes::{Lane, LaneCancelled, LaneGuard, LaneLimits, Lanes};
 pub use schedule::Schedule;
 pub use record::*;
 pub use retriever::{Hit, Query, Retriever, SkillSource};
 pub use store::{ReadTx, Store, Tx};
-pub use tool::{DocReader, NullDocReader, NullOutbox, Outbox, Tool, ToolCallRequest, ToolCtx, ToolOutput, ToolSpec, Workspace};
+pub use tool::{
+    CommandAdmin, DocReader, EntryCheck, NullDocReader, NullOutbox, Outbox, PendingCommand, Tool,
+    ToolCallRequest,
+    ToolCtx,
+    ToolOutput, ToolSpec, Workspace,
+};
 pub use tool_registry::ToolRegistry;
 pub use runner::{RunOutcome, RunRequest, Runner, RunnerError};
 pub use view::{Block, Button, Caps, Choice, EditOutcome, Prompt, RenderAction, RenderEvent, Renderer, RunStatus, ToolState, View};

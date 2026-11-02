@@ -73,6 +73,9 @@ pub enum RunStatus {
     Done,
     Failed,
     Cancelled,
+    /// 越界且没有合法路径可走（D30）：run 结束，告诉人怎么办。
+    /// 与 `Failed` 的区别是"不是出错，是被治理挡住的"。
+    Blocked,
 }
 
 #[derive(Clone, Debug)]

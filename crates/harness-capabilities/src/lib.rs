@@ -8,6 +8,7 @@ use harness_kernel::{env::{ExecOpts, ExecOutput}, EnvError, ExecutionEnv};
 
 pub mod admin;
 pub mod auth;
+pub mod commands;
 pub mod elevated;
 pub mod grants;
 pub mod host;
@@ -35,6 +36,8 @@ pub use library::{FilesTool, KeepTool};
 pub use mcp::{McpCallTool, McpHub, McpServer};
 pub use net::{NetLogTool, WebFetchTool};
 pub use roles::{DiskRoles, RoleTool};
+pub use commands::{CommandCache, CommandEntry, CommandTable, ResolvedCommand};
+pub use tools::lan_command::LanCommandTool;
 pub use tools::remind::{RemindersTool, RemindTool};
 pub use tools::send::SendFileTool;
 pub use tools::task::TaskTool;

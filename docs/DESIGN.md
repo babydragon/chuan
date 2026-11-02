@@ -105,19 +105,19 @@
 | 模块 | 功能点 | 不做 |
 |---|---|---|
 | 工具注册表 | 运行时装配；角色裁剪；同名覆盖；延迟加载 | 不编译期写死 |
-| 内置工具 | `read` `write` `exec` `lan_exec` `remember` `remind` `reminders` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
+| 内置工具 | `read` `write` `exec` `lan_exec` `lan_command` `remember` `remind` `reminders` `send_file` `keep` `files` `playbook` `install_deps` `web_fetch` `net_log` | 不为每个 CLI 造包装 |
 | 编排工具 | `delegate`（派子 agent，tier=1）/ `role`（注册角色，SelfModify）/ `task`（查/停后台任务，tier=1） | 不做 workflow DSL |
 | 技能工具 | `run_skill` / `publish_skill` / `rollback_skill` | — |
 | 服务工具 | `http`（命名服务，支持 header/query/body/path 注入与 HMAC 签名）/ `mcp`（远端工具）/ `service`（运行期热加，写 `services.d/`） | token 不进上下文，也不进沙盒（D18） |
 | 技能执行 | manifest + scripts；stdin/stdout JSON；**纯函数** | 不直连打印/发送 |
 | 宿主特权工具 | `web_fetch`（宿主代取，逐次写审计日志）、`send_file`（把 workspace 里的产物发回当前通道）——两者都在宿主侧执行（已计入上面的内置工具） | 永不下沉沙盒 |
-| 宿主执行工具（P4.6 / D22：A 段已实现，B 待上板） | `host`（L1：bwrap + 路径授权表 + 宿主 netns）/ `sys`（L3：只读 `/proc`、`/sys`）/ `capability`（申请单草稿，只写不改配置）；`elevated`（L2：经独立 root 单元 `chuan hostd`，argv 授权表，域默认 deny，已实现待上板验证） | **不做通用 `host_exec` 任意宿主 shell**；扩展靠授权表与技能，不靠加工具（D22） |
-| 领域能力 | **用技能实现**（打印、发现、查墨量…）；内核只给通用挂载 `[sandbox] mounts` | 内核不提供 `print` 之类的领域工具 |
+| 宿主执行工具（P4.6 / D22：A 段已实现，B 待上板） | `host`（L1：bwrap + 路径授权表 + 宿主 netns）/ `sys`（L3：只读 `/proc`、`/sys`）/ `capability`（申请单草稿 + `propose_command` 命令条目提案，只写草稿、不改生效面）；`elevated`（L2：经独立 root 单元 `chuan hostd`，argv 授权表，域默认 deny，已实现待上板验证） | **不做通用 `host_exec` 任意宿主 shell**；扩展靠授权表与技能，不靠加工具（D22） |
+| 领域能力 | **用技能实现**（打印、发现、查墨量…）；内核只给通用挂载 `[sandbox] mounts` 与**命令条目**执行器（`lan_command`，跑的是主人批准过的条目，不是领域语义） | 内核不提供 `print` 之类的领域工具 |
 | MCP 客户端 | 自写 Streamable HTTP 客户端（initialize / tools-list / tools-call）；目录按需注入 | 不做 stdio；不引 `rmcp` |
 | 结果治理 | head/tail 截断；大结果落盘留引用；结构化错误 | 不塞整文件 |
 
-**工具总数 27**（与 `apps/home/src/main.rs` 的注册处一致）：上表 `内置工具` 14 + `编排工具` 3 + `技能工具` 3 +
-`服务工具` 3 + `宿主执行工具` 4。
+**工具总数 28**（与 `apps/home/src/main.rs` 的注册处一致）：上表 `内置工具` 15
+（含 `lan_command`）+ `编排工具` 3 + `技能工具` 3 + `服务工具` 3 + `宿主执行工具` 4。
 
 ### ⑤ 执行（L6）
 
@@ -134,8 +134,8 @@
 
 | 模块 | 功能点 | 不做 |
 |---|---|---|
-| 策略 | 白名单；路径护栏；**授权轴=能力边界**；owner/member 角色（**待实现**，见 D30） | 不按命令黑名单放行 |
-| 审批 | 仅能力越界时触发（打印/发送/宿主取网/改自身）；会话级 allow/always；TTL；频率熔断；单次消费；幂等键 | `External` 类不提供 always |
+| 策略 | 白名单；路径护栏；**授权轴=能力边界**；主体角色 `ActorRole`（owner / member）+ 命令条目表（**设计已定，未实现**，见 D30 / D31） | 不按命令黑名单放行 |
+| 审批 | **只对主人**；两格（权限批准 / 单次确认）；TTL 分档；单次消费；幂等键。家人零卡，越界即 `Blocked` 终态（D30） | 不给家人发卡；`External` 类不提供 always |
 | 副作用 | `Pure`/`Idempotent(key)`/`External`；执行前后记账 | 不假设工具幂等 |
 | 预算 | attempts、token（日/月）上限；超限直接拒绝；子 agent 计入父 run 汇总（D20）；**金额不记账**（`cost_est` 恒 0，`/usage` 明说"金额未配"） | 不静默降级 |
 

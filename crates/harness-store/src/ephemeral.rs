@@ -20,6 +20,10 @@ struct EApproval {
     status: String,
     expires_at: i64,
     card: Option<(String, String)>,
+    kind: harness_kernel::ApprovalKind,
+    requester: String,
+    entry_name: Option<String>,
+    entry_hash: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -202,6 +206,10 @@ impl Store for EphemeralStore {
                 status: "pending".into(),
                 expires_at: now_ms() + (a.ttl_s as i64) * 1000,
                 card: None,
+                kind: a.kind,
+                requester: a.requester,
+                entry_name: a.entry_name,
+                entry_hash: a.entry_hash,
             },
         );
         Ok(ApprovalId(id))
@@ -234,6 +242,19 @@ impl Store for EphemeralStore {
                 Ok(Resolve::Applied)
             }
         }
+    }
+
+    async fn approval_info(
+        &self,
+        id: &ApprovalId,
+    ) -> Result<Option<harness_kernel::ApprovalInfo>, StoreError> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.approvals.get(&id.0).map(|a| harness_kernel::ApprovalInfo {
+            kind: a.kind,
+            requester: a.requester.clone(),
+            entry_name: a.entry_name.clone(),
+            entry_hash: a.entry_hash.clone(),
+        }))
     }
 
     async fn approval_card(

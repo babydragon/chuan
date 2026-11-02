@@ -37,6 +37,38 @@ pub struct ArtifactWrite {
     pub kind: String,
 }
 
+/// 一条待批准的条目提案（草稿文件里读出来的）。
+#[derive(Clone, Debug)]
+pub struct PendingCommand {
+    pub name: String,
+    /// 安装提案的正文字；`None` = 删除提案
+    pub body: Option<String>,
+    pub hash: String,
+    /// 提案人写的一句人话（审批通知只显示它，不显示命令与参数）
+    pub summary: String,
+}
+
+/// 命令条目的安装/删除（D31）。**由应用层实现**：内核只负责"主人批准之后调用它"，
+/// 不碰 TOML 格式与目录布局（分层纪律：kernel 的依赖树里没有 toml / 文件路径知识）。
+pub trait CommandAdmin: Send + Sync {
+    /// 待批准的提案（草稿目录）。运行结束后内核据此建 `Permission` 审批。
+    fn pending(&self) -> Vec<PendingCommand>;
+    fn install(&self, name: &str, body: &str) -> Result<(), String>;
+    /// 丢掉草稿（无论批准与否，处理完都要清）。
+    fn discard(&self, name: &str) -> Result<(), String>;
+    fn remove(&self, name: &str) -> Result<(), String>;
+}
+
+/// 命令条目的判定（D31）。`NotApplicable` = 这不是条目工具。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryCheck {
+    NotApplicable,
+    /// 命中一条对当前主体开放的条目，且参数都在域内。
+    Allowed,
+    /// 条目工具，但这条不合法（表外名字 / 参数越界 / 条目只对 owner 开放）。
+    Denied(String),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ToolOutput {
     pub content: Vec<Block>,
@@ -144,6 +176,38 @@ pub trait Tool: Send + Sync {
     /// `approval = "always"` 的路径、没有临时挂载）。它只能把 `Ask` 放成"放行"，
     /// **不能**绕过 `Deny`——策略天花板仍在（D22）。每次跳过都会记日志。
     fn skip_approval(&self, _args: &serde_json::Value) -> bool {
+        false
+    }
+
+    /// 这一条对**当前主体**是否免审。默认与角色无关，回落到 [`Tool::skip_approval`]。
+    ///
+    /// 只有"同一条调用对家人和对主人风险不同"的工具才需要覆盖它——目前只有 `remind`：
+    /// 静态 `message` / 钉住 `skill` 到点不碰工具面，谁建都行；`text` 形态到点要跑一轮模型
+    /// （带着工具面），只允许主人建（D30 §7）。
+    fn preapproved_for(
+        &self,
+        args: &serde_json::Value,
+        _role: crate::identity::ActorRole,
+    ) -> bool {
+        self.skip_approval(args)
+    }
+
+    /// 这一条调用是否命中**命令条目**（D31），以及该条目对当前主体是否开放。
+    ///
+    /// 只有持有条目表的工具（`lan_command`、将来的 `host_command`）会返回非 `NotApplicable`。
+    /// `Denied` 表示"是条目工具，但这条不合法"——门会直接转成 `Blocked` 终态，
+    /// **不会发卡**（D31 §5：表外动作不许换路径重试）。
+    fn command_entry(&self, _args: &serde_json::Value, _role: crate::identity::ActorRole) -> EntryCheck {
+        EntryCheck::NotApplicable
+    }
+
+    /// 家人（member）能否在不经审批的情况下用这个工具（D30）。
+    ///
+    /// **默认 false（fail closed）**。只有"效果只作用于发起者本人、且能由数据判定"的工具
+    /// 才该返回 true（目前只有 `remind`）。它不能替代命令条目：
+    /// 对家人开放一类动作，正确做法是写一条 `who = "anyone"` 的命令条目（D31），
+    /// 而不是在这里放松——这里放松等于对所有家人永久放开这个工具。
+    fn member_safe(&self) -> bool {
         false
     }
 

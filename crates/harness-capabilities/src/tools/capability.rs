@@ -33,11 +33,25 @@ const SECTIONS: [(&str, &str); 8] = [
 pub struct CapabilityTool {
     dir: PathBuf,
     grants: Arc<GrantsCache>,
+    /// 已生效的命令条目目录（`commands.d`）：只用来判"是不是已经有了"
+    commands: PathBuf,
 }
 
 impl CapabilityTool {
     pub fn new(dir: impl Into<PathBuf>, grants: Arc<GrantsCache>) -> Self {
-        Self { dir: dir.into(), grants }
+        let dir = dir.into();
+        let commands = dir.parent().map(|p| p.join("commands.d")).unwrap_or_default();
+        Self { dir, grants, commands }
+    }
+
+    pub fn with_commands(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.commands = dir.into();
+        self
+    }
+
+    /// 提案草稿目录：运行结束后内核从这里读（`CommandAdmin::pending`）。
+    fn drafts(&self) -> PathBuf {
+        self.dir.join("commands")
     }
 
     fn summary(&self, g: &Grants) -> String {
@@ -104,7 +118,27 @@ impl Tool for CapabilityTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "check", "request"] },
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "check", "request", "propose_command", "remove_command"]
+                    },
+                    "name": { "type": "string", "description": "remove_command 用：要删的条目名" },
+                    "command": {
+                        "type": "object",
+                        "description": "propose_command 用：{name, summary, env?, argv[], timeout_ms?, who?, params{}}；\
+params 每项只能声明 enum / file / int / pattern 之一；\
+summary 是一句人话（审批通知只显示它，不显示命令与参数）",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "summary": { "type": "string", "description": "一句人话：这个能力做什么（≤80 字）" },
+                            "env": { "type": "string", "enum": ["lan"] },
+                            "argv": { "type": "array", "items": { "type": "string" } },
+                            "timeout_ms": { "type": "integer" },
+                            "who": { "type": "string", "enum": ["owner", "anyone"] },
+                            "params": { "type": "object", "additionalProperties": true }
+                        },
+                        "required": ["name", "argv"]
+                    },
                     "kind": { "type": "string", "enum": ["host_path", "host_argv", "host_root"] },
                     "item": { "type": "string", "description": "绝对路径或 argv 前缀（空格分隔）" },
                     "mode": { "type": "string", "enum": ["ro", "rw"] },
@@ -248,6 +282,89 @@ impl Tool for CapabilityTool {
                      不要换写法重试，也不要一边申请一边绕路。",
                     path.display()
                 )
+            }
+            "propose_command" => {
+                let spec = args.get("command").ok_or_else(|| {
+                    ToolError::new(ErrorCode::InvalidArgs, "propose_command 需要 command 对象", false)
+                })?;
+                let (name, body) = crate::commands::render_entry(spec)
+                    .map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
+                // 审批通知只显示这一句人话：写不清用途的提案，人也没法审。
+                let summary = spec
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_owned())
+                    .unwrap_or_else(|| format!("一项新能力（{name}）"));
+                if summary.chars().count() > 80 {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        "summary 太长（≤80 字，一句话说清做什么）",
+                        false,
+                    ));
+                }
+                if self.commands.join(format!("{name}.toml")).exists() {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("条目 {name} 已经存在（只增不改；要改先 remove_command）"),
+                        false,
+                    ));
+                }
+                let drafts = self.drafts();
+                std::fs::create_dir_all(&drafts).map_err(|e| {
+                    ToolError::new(
+                        ErrorCode::Unavailable,
+                        format!("创建 {} 失败：{e}", drafts.display()),
+                        false,
+                    )
+                })?;
+                let path = drafts.join(format!("{name}.toml"));
+                std::fs::write(&path, &body).map_err(|e| {
+                    ToolError::new(ErrorCode::Unavailable, format!("写草稿失败：{e}"), false)
+                })?;
+                let _ = std::fs::write(drafts.join(format!("{name}.summary")), &summary);
+                // 删除提案与安装提案互斥
+                let _ = std::fs::remove_file(drafts.join(format!("{name}.remove")));
+                format!(
+                    "已生成命令条目提案 `{name}`（**还没生效**）。\n\n```toml\n{body}```\n\n\
+                     批准后由内核原子写入 `commands.d/`；不批准不会生效。之后会单独发一条带 \
+                     `/approve <id>` 的确认消息。"
+                )
+            }
+            "remove_command" => {
+                let name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        ToolError::new(ErrorCode::InvalidArgs, "remove_command 需要 name", false)
+                    })?;
+                if !self.commands.join(format!("{name}.toml")).exists() {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("没有这个条目：{name}"),
+                        false,
+                    ));
+                }
+                let drafts = self.drafts();
+                std::fs::create_dir_all(&drafts).map_err(|e| {
+                    ToolError::new(
+                        ErrorCode::Unavailable,
+                        format!("创建 {} 失败：{e}", drafts.display()),
+                        false,
+                    )
+                })?;
+                std::fs::write(drafts.join(format!("{name}.remove")), name).map_err(|e| {
+                    ToolError::new(ErrorCode::Unavailable, format!("写草稿失败：{e}"), false)
+                })?;
+                let _ = std::fs::write(
+                    drafts.join(format!("{name}.summary")),
+                    format!("不再使用「{name}」"),
+                );
+                let _ = std::fs::remove_file(drafts.join(format!("{name}.toml")));
+                format!("已生成删除提案：`{name}`（还没生效，等批准）。")
             }
             other => {
                 return Err(ToolError::new(

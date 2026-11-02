@@ -90,6 +90,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub net: NetFile,
     #[serde(default)]
+    pub lan: LanFile,
+    #[serde(default)]
     pub identity: IdentityFile,
     #[serde(default)]
     pub media: MediaFile,
@@ -207,6 +209,8 @@ pub struct MediaFile {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct IdentityFile {
+    /// 主人是哪个 user（D30）。**必填**：没有主人就没人能批审批，启动直接报错。
+    pub owner: Option<String>,
     /// **已废弃**（D26）：只用于启动时提示删除，不再参与任何判定
     pub default_user: Option<String>,
     #[serde(default)]
@@ -225,6 +229,12 @@ pub struct UserFile {
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct NetFile {
     /// 出网访问记录（JSONL，供 net_log 审计）
+    pub log: Option<String>,
+}
+
+/// 内网 lane 的审计文件（命令条目每次执行写一行，D31）。
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct LanFile {
     pub log: Option<String>,
 }
 
@@ -627,6 +637,10 @@ pub struct Config {
     pub tz_offset_min: i32,
     pub identity: std::sync::Arc<harness_kernel::Directory>,
     pub net_log: String,
+    /// `lan_command` 的审计（条目名 + 解析后 argv + 指纹）
+    pub lan_log: String,
+    /// 命令条目目录（`<config>/commands.d`，与 services.d 同构）
+    pub commands_dir: std::path::PathBuf,
     pub media_dir: String,
     pub media_keep_days: u64,
     pub sandbox_mounts: Vec<harness_capabilities::Mount>,
@@ -854,6 +868,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         Some(format!("{}/.config/chuan/secrets/telegram_token", std::env::var("HOME").unwrap_or_default()))
     });
     let identity = std::sync::Arc::new(harness_kernel::Directory {
+        owner: file.identity.owner.clone(),
         users: file
             .identity
             .user
@@ -869,6 +884,14 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             })
             .collect(),
     });
+
+    // 身份必须能判出"谁是主人"（D30）：没有审批人 = 所有越界动作都只能拒绝，而且是静默的。
+    // 空表允许（内核保持中立），但配了人就必须指明 owner 且它确实是个 user。
+    if !identity.users.is_empty() {
+        if let Some(problem) = identity.owner_problem() {
+            return Err(format!("配置错误：{problem}"));
+        }
+    }
 
     // 白名单只有一个来源：`[identity]` 绑定（D26）。通道级白名单已废弃，明确报错而不是静默忽略。
     if !file.telegram.allowed_users.is_empty() {
@@ -1065,6 +1088,11 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .net
             .log
             .unwrap_or_else(|| format!("{home}/.local/share/chuan/net-access.jsonl")),
+        lan_log: file
+            .lan
+            .log
+            .unwrap_or_else(|| format!("{home}/.local/share/chuan/lan-access.jsonl")),
+        commands_dir: config_dir.join("commands.d"),
         media_dir: file
             .media
             .dir

@@ -1,0 +1,6 @@
+# 打印机列表（CUPS）。免审批：argv 固定、无参数。
+# 装好后目录里改这个文件即可生效（按 mtime 热加载），不用重启。
+env = "lan"
+argv = ["/usr/bin/lpstat", "-e"]
+timeout_ms = 10000
+who = "anyone"

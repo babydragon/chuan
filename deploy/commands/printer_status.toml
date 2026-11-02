@@ -1,0 +1,5 @@
+# 打印机状态：-p 列出队列，-d 标出默认打印机。
+env = "lan"
+argv = ["/usr/bin/lpstat", "-p", "-d"]
+timeout_ms = 10000
+who = "anyone"

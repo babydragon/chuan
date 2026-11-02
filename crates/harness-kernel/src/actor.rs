@@ -18,7 +18,7 @@ use crate::ids::{ApprovalId, CallId, ChannelId, ConversationId, MsgRef, RunId, n
 use crate::effect::EffectClass;
 use crate::event::{EventKind, NewEvent};
 use crate::record::{NewApproval, ToolCallRecord};
-use crate::identity::Directory;
+use crate::identity::{ActorRole, Directory};
 use crate::render::{ActionOutcome, TurnRenderer, apply_action};
 use crate::runner::{ApprovalGate, RunRequest, Runner};
 use crate::store::Store;
@@ -97,7 +97,7 @@ fn usage_line(label: &str, u: &crate::record::UsageTotal, limit: u64) -> String 
     let money = if u.cost_est > 0.0 {
         format!("¥{:.4}", u.cost_est)
     } else {
-        "金额未配 [pricing]".to_owned()
+        crate::copy::MONEY_UNKNOWN.to_owned()
     };
     let quota = if limit > 0 {
         format!(" · 额度 {}/{}", short_tokens(u.tokens()), short_tokens(limit))
@@ -105,7 +105,7 @@ fn usage_line(label: &str, u: &crate::record::UsageTotal, limit: u64) -> String 
         String::new()
     };
     format!(
-        "{label}：{} in / {} out · {money}{quota}",
+        "{label}：{} 输入 / {} 输出 · {money}{quota}",
         short_tokens(u.prompt_tokens),
         short_tokens(u.completion_tokens)
     )
@@ -148,7 +148,13 @@ pub struct ActorConfig {
     pub proxy_hint: Option<String>,
     /// 身份表：channel+addr → user。单用户时只有一条绑定。
     pub identity: Arc<Directory>,
+    /// 命令条目的安装/删除（D31）：内核只负责"批准之后调用"，文件布局与 TOML 由应用层提供。
+    /// `None` = 当前应用不支持命令条目（提案会被明确拒绝）。
+    pub commands: Option<Arc<dyn crate::tool::CommandAdmin>>,
 }
+
+/// 被挡形状的计数表：`tool|domain` → (窗口起点, 次数, 是否已通知)。
+type BlockedShapes = Arc<Mutex<HashMap<String, (i64, u32, bool)>>>;
 
 pub struct ConversationActor<S: Store, D: TurnDriver> {
     pub store: Arc<S>,
@@ -186,6 +192,15 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     pending_approval: Arc<Mutex<HashMap<String, String>>>,
     /// 只发了媒体、还没说要做什么：会话键 → (时刻, 附件)。微信图片没有 caption（D29）
     pending_media: Arc<Mutex<HashMap<String, (i64, Vec<crate::Attachment>)>>>,
+    /// 已经通知过主人的提案指纹（name:hash）：避免每轮都重发同一条提案
+    proposal_seen: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// 家人被挡的"形状"计数：`tool|domain` → (窗口起点, 次数, 是否已通知)。
+    /// 只在内存里：重启后重新计数，宁可少通知一次也不要写一堆账本噪声。
+    blocked_shapes: BlockedShapes,
+    /// 已经通知过 owner 的"家人建的模型形态提醒"（reminder doc id）：只通知一次
+    notified_reminders: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// 已经报过的"定时任务需要审批"：`conv|tool`，避免一条任务反复刷屏
+    notified_scheduled_asks: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
@@ -213,6 +228,10 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             unauth_notice: Arc::clone(&self.unauth_notice),
             pending_approval: Arc::clone(&self.pending_approval),
             pending_media: Arc::clone(&self.pending_media),
+            proposal_seen: Arc::clone(&self.proposal_seen),
+            blocked_shapes: Arc::clone(&self.blocked_shapes),
+            notified_reminders: Arc::clone(&self.notified_reminders),
+            notified_scheduled_asks: Arc::clone(&self.notified_scheduled_asks),
         }
     }
 }
@@ -262,9 +281,26 @@ enum RunEnd {
     Done,
     Failed,
     Cancelled,
+    /// 被治理挡住（D30）：已经回过人话，不算出错。
+    Blocked,
+}
+
+impl RunEnd {
+    fn label(self) -> &'static str {
+        match self {
+            RunEnd::Done => "完成",
+            RunEnd::Failed => "失败",
+            RunEnd::Cancelled => "被取消",
+            RunEnd::Blocked => "被权限挡住",
+        }
+    }
 }
 
 /// 终稿重发预算：run 已经结束，等满 retry_after 不会拖累 run（与流式刷新不同）。
+/// `Permission`（改能力面）的存活时间：几小时内回来批都还有意义。
+/// `Confirm`（这一次动作）仍是短 TTL——过去那一下过期就不该再执行。
+const PERMISSION_TTL_S: u64 = 86_400;
+
 const FINAL_ATTEMPTS: usize = 3;
 const FINAL_WAIT_CAP_MS: u64 = 60_000;
 
@@ -357,6 +393,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             unauth_notice: Arc::new(Mutex::new(HashMap::new())),
             pending_approval: Arc::new(Mutex::new(HashMap::new())),
             pending_media: Arc::new(Mutex::new(HashMap::new())),
+            proposal_seen: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            blocked_shapes: Arc::new(Mutex::new(HashMap::new())),
+            notified_reminders: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            notified_scheduled_asks: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -683,22 +723,50 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     return self.reply(&inb.channel.0, &inb.conversation, "用法：/approve <id> 或 /deny <id>").await;
                 }
                 let yes = cmd == "approve";
+                // 审批只对 owner（D30 §2）：别的账号回 1 也算"没有批准权"。
+                let user_id = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
+                if self.cfg.identity.role(&user_id) != ActorRole::Owner {
+                    return self
+                        .reply(
+                            &inb.channel.0,
+                            &inb.conversation,
+                            crate::copy::NOT_APPROVER,
+                        )
+                        .await;
+                }
+                let id = ApprovalId(rest.to_owned());
                 let sender = self.approvals.lock().unwrap().remove(rest);
                 match sender {
                     Some(tx) => {
-                        let _ = self
-                            .store
-                            .resolve_approval(&ApprovalId(rest.to_owned()), yes, "owner")
-                            .await;
+                        let _ = self.store.resolve_approval(&id, yes, &user_id).await;
                         let _ = tx.send(yes);
                         self.reply(
                             &inb.channel.0,
                             &inb.conversation,
-                            if yes { "✅ 已允许（记录见账本）" } else { "❌ 已拒绝" },
+                            if yes { crate::copy::APPROVED } else { crate::copy::DENIED },
                         )
                         .await
                     }
-                    None => self.reply(&inb.channel.0, &inb.conversation, "审批不存在或已过期").await,
+                    None => {
+                        // `Permission` 提案没有在等结果的 run（run 早就以 Blocked 收尾），
+                        // 所以这里不能只看内存里的 sender——直接查表。
+                        if self.store.approval_info(&id).await.ok().flatten().is_none() {
+                            return self
+                                .reply(&inb.channel.0, &inb.conversation, crate::copy::APPROVAL_MISSING)
+                                .await;
+                        }
+                        let head = match self.store.resolve_approval(&id, yes, &user_id).await {
+                            Err(_) => "审批处理失败（存储不可用）",
+                            Ok(crate::record::Resolve::Applied) => {
+                                if yes { crate::copy::APPROVED_SHORT } else { crate::copy::DENIED_SHORT }
+                            }
+                            Ok(crate::record::Resolve::AlreadyResolved) => crate::copy::ALREADY_RESOLVED,
+                            Ok(crate::record::Resolve::NotFound) => crate::copy::APPROVAL_MISSING,
+                        };
+                        let note = self.apply_permission(&id, yes).await.unwrap_or_default();
+                        let msg = if note.is_empty() { head.to_owned() } else { format!("{head}\n{note}") };
+                        self.reply(&inb.channel.0, &inb.conversation, &msg).await
+                    }
                 }
             }
             "facts" => {
@@ -1067,7 +1135,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let agent_tokens = split.agent.tokens();
                 if agent_tokens > 0 {
                     text.push_str(&format!(
-                        "\n其中子 agent 今日 {}（{} in / {} out）",
+                        "\n其中子任务今日 {}（{} 输入 / {} 输出）",
                         short_tokens(agent_tokens),
                         short_tokens(split.agent.prompt_tokens),
                         short_tokens(split.agent.completion_tokens)
@@ -1146,13 +1214,28 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             _ => return false,
         };
         let key = Self::conv_key(inb);
+        // 先判批准权，再取出待审批：没有权限的人回 `1` 不能把别人的卡消费掉。
+        let user_id = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
+        if self.cfg.identity.role(&user_id) != ActorRole::Owner {
+            if self.pending_approval.lock().unwrap().contains_key(&key) {
+                let _ = self
+                    .reply(
+                        &inb.channel.0,
+                        &inb.conversation,
+                        crate::copy::NOT_APPROVER,
+                    )
+                    .await;
+                return true;
+            }
+            return false;
+        }
         let Some(id) = self.pending_approval.lock().unwrap().remove(&key) else {
             return false;
         };
         let sender = self.approvals.lock().unwrap().remove(&id);
         let _ = self
             .store
-            .resolve_approval(&ApprovalId(id.clone()), yes, &inb.actor)
+            .resolve_approval(&ApprovalId(id.clone()), yes, &user_id)
             .await;
         if let Some(tx) = sender {
             let _ = tx.send(yes);
@@ -1166,7 +1249,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             .reply(
                 &inb.channel.0,
                 &inb.conversation,
-                if yes { "✅ 已允许。" } else { "❌ 已拒绝。" },
+                if yes { crate::copy::APPROVED_SHORT } else { crate::copy::DENIED_SHORT },
             )
             .await;
         true
@@ -1199,14 +1282,14 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         tracing::warn!(channel = %inb.channel.0, actor = %inb.actor, "未绑定的地址");
         let ch = self.channel_for(&inb.channel);
         if let Some(cb) = &inb.callback_id {
-            let _ = ch.ack(cb, "未授权").await;
+            let _ = ch.ack(cb, "未允许").await;
             return;
         }
         let _ = self
             .reply(
                 &inb.channel.0,
                 &inb.conversation,
-                "⛔ 未授权：这个账号还没有绑定。请主人在 [identity] 里加上这条通道地址。",
+                crate::copy::NOT_ALLOWED,
             )
             .await;
     }
@@ -1221,26 +1304,28 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     }
 
     /// 收尾时统一打状态：所有 `?` 早退、panic 之外的分支都从这里出去（D24）。
-    async fn handle_run(&self, inb: Inbound) -> Result<(), ChannelError> {
+    async fn handle_run(&self, inb: Inbound) -> Result<RunEnd, ChannelError> {
         let ch = self.channel_for(&inb.channel);
         let msg = inb.msg.clone();
         let conv = inb.conversation.clone();
         let res = self.handle_run_inner(inb).await;
         let emoji = match &res {
             Ok(RunEnd::Done) => EMOJI_OK,
-            Ok(RunEnd::Failed) | Err(_) => EMOJI_FAIL,
+            Ok(RunEnd::Failed) | Ok(RunEnd::Blocked) | Err(_) => EMOJI_FAIL,
             Ok(RunEnd::Cancelled) => "", // 取消 = 清空
         };
         self.mark(&*ch, &conv, msg.as_ref(), emoji).await;
         // typing 任务已经在 RunScope 里取消了；这里让通道把"正在输入"收掉
         let _ = ch.typing_stop(&conv).await;
-        res.map(|_| ())
+        res
     }
 
     async fn handle_run_inner(&self, inb: Inbound) -> Result<RunEnd, ChannelError> {
         let ch = self.channel_for(&inb.channel);
         // 记忆归属用 **user id**，与通道无关（D26）：同一个人两个账号看到同一份
         let user_id = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
+        // 主体角色（D30）：决定"越界时发卡"还是"直接 Blocked"。没配 owner 一律 member（fail closed）。
+        let role = self.cfg.identity.role(&user_id);
         if let Some(msg) = self.budget_exceeded().await {
             self.reply(&inb.channel.0, &inb.conversation, &format!("⛔ {msg}")).await?;
             return Ok(RunEnd::Failed);
@@ -1424,6 +1509,9 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             workspace: Workspace { run: run.clone(), root: self.cfg.workspace_root.clone() },
             context_budget_chars: self.cfg.context_budget_chars,
             token_budget: None,
+            role,
+            // 定时任务触发的那一轮：没有人在场（见 `InboundKind::Scheduled`）。
+            scheduled: matches!(inb.kind, InboundKind::Scheduled),
         };
 
         let outbox = RunOutbox { channel: &*ch, conversation: inb.conversation.clone() };
@@ -1517,7 +1605,9 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Ok(o) if o.status == RunStatus::Done
                 && o.tools.iter().any(|t| t == "write" || t == "exec")
         );
-        if !from_skill_button && wrote_files {
+        // 家人不给「沉淀为 Skill」按钮：那是改自身（SelfModify）的入口，
+        // 点了只会走到一个必然被挡的 run，白白制造一次"没权限"。
+        if !from_skill_button && wrote_files && role == ActorRole::Owner {
             let data = format!("skill:{}", run.0);
             if data.len() <= 64 {
                 renderer.set_trailing_buttons(vec![vec![crate::view::Button {
@@ -1532,7 +1622,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             }
         }
         // 记住按钮挂在哪条消息上：点击后要把它撤掉，别让过期按钮留在对话里
-        if !from_skill_button && wrote_files {
+        if !from_skill_button && wrote_files && role == ActorRole::Owner {
             if let Some(m) = renderer.msg_ref() {
                 let _ = self
                     .store
@@ -1541,11 +1631,20 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             }
         }
 
+        // 本轮如果生成了命令条目提案，转成 Permission 审批并通知 owner（D31 §7）。
+        self.publish_command_proposals(&inb).await;
+        // 家人建了"到点会跑模型"的提醒 → 给 owner 一条通知（不拦，只是让人看得见）。
+        self.notify_member_model_reminders(&inb, role).await;
+
         match outcome {
             Ok(o) if o.status == RunStatus::Cancelled => {
                 self.reply(&inb.channel.0, &inb.conversation, "已取消。").await.map(|_| RunEnd::Cancelled)
             }
             Ok(o) if o.status == RunStatus::Failed => Ok(RunEnd::Failed),
+            Ok(o) if o.status == RunStatus::Blocked => {
+                let msg = crate::copy::blocked(o.text.trim());
+                self.reply(&inb.channel.0, &inb.conversation, &msg).await.map(|_| RunEnd::Blocked)
+            }
             Ok(_) => Ok(RunEnd::Done),
             Err(e) => {
                 tracing::error!(error = %e, "run failed");
@@ -1557,22 +1656,22 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         let wait = retry_after_s
                             .map(|s| format!("约 {s} 秒后可再试"))
                             .unwrap_or_else(|| "请查看配额周期（5 小时 / 每周 / 每月）".into());
-                        format!(
-                            "⛔ 模型额度已用尽，本次任务已停止（不会自动重试）。{wait}\n\n{message}"
-                        )
+                        crate::copy::quota_exhausted(&wait, message)
                     }
                     crate::runner::RunnerError::Engine(crate::error::EngineError::Auth(m)) => {
-                        format!("🔑 模型鉴权失败（key 无效或已过期），已停止。\n\n{m}")
+                        {
+                            tracing::warn!(detail = %m, "模型鉴权失败");
+                            crate::copy::AUTH_FAILED.to_owned()
+                        }
                     }
-                    crate::runner::RunnerError::Budget(what) if what == "stalled" => format!(
-                        "⏱ 任务卡住了：3 分钟内没有任何进展，已取消。\n\n\
-                         可以换个说法重试；如果是某个服务无响应，先用 /status 看一下。"
-                    ),
-                    crate::runner::RunnerError::Budget(what) => format!(
-                        "⏱ 任务超出预算（{what}），已停止。\n\n\
-                         等你确认的时间不计入预算；仍超时就把任务拆小，\
-                         或调大 [actor] 的 `wall_clock_ms` / `max_turns`。"
-                    ),
+                    crate::runner::RunnerError::Blocked { hint, .. } => crate::copy::blocked(&hint),
+                    crate::runner::RunnerError::Budget(what) if what == "stalled" => {
+                        crate::copy::STALLED.to_owned()
+                    }
+                    crate::runner::RunnerError::Budget(what) => {
+                        tracing::info!(budget = %what, "任务超出预算");
+                        crate::copy::OUT_OF_TIME.to_owned()
+                    }
                     other => format!("出错了：{other}"),
                 };
                 self.reply(&inb.channel.0, &inb.conversation, &msg).await.map(|_| RunEnd::Failed)
@@ -1612,13 +1711,22 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let id = parts[1].to_owned();
         let yes = parts[2] == "y";
 
+        // 按钮也一样：只有 owner 能批（D30 §2）。别人的点击不能消费这张卡。
+        let user_id = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
+        if self.cfg.identity.role(&user_id) != ActorRole::Owner {
+            if let Some(cb) = &inb.callback_id {
+                let _ = ch.ack(cb, crate::copy::NOT_APPROVER).await;
+            }
+            return;
+        }
+
         let sender = self.approvals.lock().unwrap().remove(&id);
         let card = self.store.approval_card(&ApprovalId(id.clone())).await.ok().flatten();
         match sender {
             Some(tx) => {
                 let _ = self
                     .store
-                    .resolve_approval(&ApprovalId(id.clone()), yes, "owner")
+                    .resolve_approval(&ApprovalId(id.clone()), yes, &user_id)
                     .await;
                 self.clear_pending(&Self::conv_key(&inb), &id);
                 let _ = tx.send(yes);
@@ -1790,7 +1898,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 channel: crate::ids::ChannelId(channel),
                 conversation: chat,
                 actor,
-                kind: InboundKind::Text,
+                // 标记成 Scheduled：这一轮没有人在场，门不会发卡（D30 §7）。
+                kind: InboundKind::Scheduled,
                 text: Some(format!("（定时任务）{text}")),
                 dedupe_key: format!("task-{now}"),
                 callback_id: None,
@@ -1801,10 +1910,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             };
             fired += 1;
             let me = Arc::clone(self);
+            let title = text.to_owned();
             tokio::spawn(async move {
-                if let Err(e) = me.handle_run(inb).await {
+                let end = me.handle_run(inb).await;
+                if let Err(e) = &end {
                     tracing::warn!(error = %e, "reminder run failed");
                 }
+                me.notify_scheduled_outcome(&title, &end).await;
             });
         }
         fired
@@ -1908,7 +2020,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             crate::schedule::format_local(now, self.cfg.tz_offset_min)
         );
         let Some(tool) = self.tools.get("run_skill") else {
-            let _ = self.reply(channel, chat, "❌ 定时任务失败：没有 run_skill 工具").await;
+            tracing::warn!("定时任务失败：没有 run_skill 工具（技能执行入口不可用）");
+            let _ = self.reply(channel, chat, "❌ 定时任务失败：这项功能暂时不可用。").await;
             return;
         };
         let run = RunId(format!("job-{now}"));
@@ -1964,7 +2077,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 channel: crate::ids::ChannelId(channel.to_owned()),
                 conversation: chat.to_owned(),
                 actor: chat.to_owned(),
-                kind: InboundKind::Text,
+                kind: InboundKind::Scheduled,
                 text: Some(format!(
                     "{instruction}\n\n（数据来自技能 `{name}`，原文如下，不要编造条目）\n\n{data}"
                 )),
@@ -1974,9 +2087,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 received_at: now,
                 attachments: Vec::new(),
             };
-            if let Err(e) = self.handle_run(inb).await {
+            let end = self.handle_run(inb).await;
+            if let Err(e) = &end {
                 tracing::warn!(error = %e, "polish run failed");
             }
+            self.notify_scheduled_outcome(title, &end).await;
             return;
         }
 
@@ -2569,19 +2684,38 @@ impl crate::runner::ApprovalGate for ChildGate<'_> {
         _conv: &ConversationId,
         _call: &CallId,
         tool: &str,
-        _args: &serde_json::Value,
-    ) -> Result<bool, String> {
+        args: &serde_json::Value,
+        _role: ActorRole,
+        _scheduled: bool,
+    ) -> Result<crate::runner::GateOutcome, String> {
+        use crate::runner::GateOutcome;
         let domain = self
             .tools
             .get(tool)
             .map(|t| t.domain())
             .unwrap_or(crate::policy::Domain::Sandbox);
-        match self.policy.verdict(tool, domain) {
-            crate::policy::Verdict::Allow => Ok(true),
-            crate::policy::Verdict::Deny => Ok(false),
-            crate::policy::Verdict::Ask => {
+        // 子 agent 没有通道：一律按 member 判定，且**永远不能走 Ask**。
+        // 子 agent 需要审批的动作应当写进结论的 `[待父执行]`，由父会话去做（D19）。
+        let entry_tool = self.tools.get(tool);
+        // 子 agent 按 member 判（它没有通道；需要审批的事应写进结论的 [待父执行]）。
+        let bounded = entry_tool
+            .as_ref()
+            .is_some_and(|t| t.preapproved_for(args, ActorRole::Member));
+        let entry = matches!(
+            entry_tool.as_ref().map(|t| t.command_entry(args, ActorRole::Member)),
+            Some(crate::tool::EntryCheck::Allowed)
+        );
+        match self.policy.decide(ActorRole::Member, tool, domain, bounded, entry, false) {
+            crate::policy::GateDecision::Allow => Ok(GateOutcome::Allowed),
+            crate::policy::GateDecision::Deny(reason) => Ok(GateOutcome::Denied { reason }),
+            // 子 agent 没有通道：Ask 与 Blocked 都只能是"拒绝"。
+            // 它该做的是把这件事写进结论的 `[待父执行]`，由父会话在本轮决定做不做（D19）。
+            crate::policy::GateDecision::Ask => {
                 tracing::info!(tool, "child agent cannot request approval; denied");
-                Ok(false)
+                Ok(GateOutcome::Denied { reason: "子任务不能请求审批".into() })
+            }
+            crate::policy::GateDecision::Blocked { .. } => {
+                Ok(GateOutcome::Denied { reason: "子任务不能请求审批".into() })
             }
         }
     }
@@ -2855,6 +2989,9 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             workspace: Workspace { run: child_run.clone(), root: self.cfg.workspace_root.clone() },
             context_budget_chars: self.cfg.context_budget_chars,
             token_budget: Some(max_tokens),
+            // 子 agent 没有通道：按最严格的一档判定，且它本来就不能走 Ask（D19）。
+            role: ActorRole::Member,
+            scheduled: false,
         };
 
         let docs = StoreDocs { store: &*self.store };
@@ -2931,6 +3068,9 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
                     RunStatus::Done => AgentStatus::Done,
                     RunStatus::Cancelled => AgentStatus::Cancelled,
                     RunStatus::Failed => AgentStatus::Failed,
+                    // 子 agent 触不到审批门（`ChildGate` 一律拒绝 ask），所以正常不会走到这里；
+                    // 真出现就按失败呈现，别伪装成"被取消"。
+                    RunStatus::Blocked => AgentStatus::Failed,
                 };
                 (status, out.text)
             }
@@ -2983,6 +3123,281 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
     }
 }
 
+impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
+    /// 运行结束后：把草稿提案变成 `Permission` 审批，并逐个绑定通知 owner。
+    ///
+    /// 提案是**文件**（`capability` 写的草稿），审批是**账本**（approvals + `approval.*` 事件）：
+    /// 批准之后才由内核调用 `CommandAdmin::install` 落盘（D31 §7）。
+    async fn publish_command_proposals(&self, inb: &Inbound) {
+        let Some(admin) = &self.cfg.commands else { return };
+        let pending = admin.pending();
+        if pending.is_empty() {
+            return;
+        }
+        let Some(owner) = self.cfg.identity.owner.clone() else {
+            tracing::warn!("有命令条目提案，但没配 [identity] owner，无法审批");
+            return;
+        };
+        let requester = self.cfg.identity.resolve(&inb.channel.0, &inb.actor);
+        for p in pending {
+            // 同一条目同一份正文只通知一次（否则每轮都重发）
+            let key = format!("{}:{}", p.name, p.hash);
+            if !self.proposal_seen.lock().unwrap().insert(key) {
+                continue;
+            }
+            let what = if p.body.is_some() { "新增" } else { "删除" };
+            let id = match self
+                .store
+                .create_approval(NewApproval {
+                    conv: ConversationId(inb.conversation.clone()),
+                    call: CallId(format!("proposal-{}", p.name)),
+                    action: format!("{what}命令条目 `{}`", p.name),
+                    scope: "command".into(),
+                    ttl_s: PERMISSION_TTL_S,
+                    kind: crate::record::ApprovalKind::Permission,
+                    requester: requester.clone(),
+                    entry_name: Some(p.name.clone()),
+                    entry_hash: Some(p.hash.clone()),
+                })
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(error = %e, entry = %p.name, "创建提案审批失败");
+                    continue;
+                }
+            };
+            let text = crate::copy::command_proposal(what, &p.summary, &id.0);
+            for b in self.cfg.identity.channels(&owner) {
+                let ch = self.channel_for(&ChannelId(b.channel.clone()));
+                let view = crate::view::View {
+                    blocks: vec![crate::view::Block::Paragraph(text.clone())],
+                    ..Default::default()
+                };
+                if let Err(e) = ch.deliver(&b.addr, view).await {
+                    tracing::warn!(error = %e, channel = %b.channel, "提案通知发送失败");
+                }
+            }
+        }
+    }
+
+    /// 家人建了"到点会自己跑模型"的提醒（`text`，或 `skill` + `polish`）→ 通知 owner 一次。
+    ///
+    /// 为什么不拦：到点那一轮继承**创建者的主体角色**，所以能力面不会超过他本人在场时的
+    /// 范围；把形态拦掉等于家人永远用不了需要模型的提醒（D30 §7 的目标是家人零审批，
+    /// 不是把家人变成只能收静态消息）。无人值守这件事用"让人看得见"来管。
+    pub async fn notify_member_model_reminders(&self, inb: &Inbound, role: ActorRole) {
+        if role == ActorRole::Owner {
+            return;
+        }
+        let Some(owner) = self.cfg.identity.owner.clone() else { return };
+        let docs = match self.store.begin_read().await {
+            Ok(mut rd) => rd
+                .list_docs(crate::record::DocQuery {
+                    scopes: Vec::new(),
+                    kinds: vec!["reminder".into()],
+                    limit: 200,
+                })
+                .await
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        // 只看本轮创建的（留 2s 余量，避免时间戳边界）
+        let cutoff = inb.received_at.saturating_sub(2_000);
+        for d in docs {
+            if d.payload["created_at"].as_i64().unwrap_or(0) < cutoff {
+                continue;
+            }
+            let runs_model = d.payload["message"]
+                .as_str()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
+                || (d.payload["skill"].is_object()
+                    && d.payload["polish"].as_str().is_some_and(|s| !s.trim().is_empty()));
+            if !runs_model {
+                continue;
+            }
+            if !self.notified_reminders.lock().unwrap().insert(d.id.0.clone()) {
+                continue;
+            }
+            let text = d.payload["text"].as_str().unwrap_or("").chars().take(80).collect::<String>();
+            let next = d.payload["next_at"].as_i64().unwrap_or(0);
+            let msg = crate::copy::member_model_reminder(
+                &text,
+                &crate::schedule::format_local(next, self.cfg.tz_offset_min),
+            );
+            for b in self.cfg.identity.channels(&owner) {
+                let ch = self.channel_for(&ChannelId(b.channel.clone()));
+                let _ = ch
+                    .deliver(
+                        &b.addr,
+                        crate::view::View {
+                            blocks: vec![crate::view::Block::Paragraph(msg.clone())],
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// 到点这一轮需要审批（没人能点）→ 立刻告诉 owner，而不是等 10 分钟超时。
+    ///
+    /// 只对"同一个会话 + 同一个工具"报一次：一条任务里连续试五次同一个工具不该刷屏。
+    async fn notice_scheduled_needs_approval(&self, tool: &str, conv: &ConversationId) {
+        let key = format!("{}|{}", conv.0, tool);
+        if !self.notified_scheduled_asks.lock().unwrap().insert(key) {
+            return;
+        }
+        let Some(owner) = self.cfg.identity.owner.clone() else { return };
+        let _ = tool; // 具体工具名只进日志/账本，不进来给用户看的这句话
+        let msg = crate::copy::scheduled_needs_approval();
+        for b in self.cfg.identity.channels(&owner) {
+            let ch = self.channel_for(&ChannelId(b.channel.clone()));
+            let _ = ch
+                .deliver(&b.addr, crate::view::View {
+                    blocks: vec![crate::view::Block::Paragraph(msg.clone())],
+                    ..Default::default()
+                })
+                .await;
+        }
+    }
+
+    /// 定时任务没跑成（失败/被挡/取消）→ 告诉 owner，别让后台失败无声无息。
+    ///
+    /// 创建者本来就会收到那一轮自己的回复；这条是给"能修它的人"的。
+    async fn notify_scheduled_outcome(&self, title: &str, end: &Result<RunEnd, ChannelError>) {
+        let what = match end {
+            Ok(RunEnd::Done) => return,
+            Ok(RunEnd::Failed) => "失败",
+            Ok(RunEnd::Cancelled) => "被取消",
+            Ok(RunEnd::Blocked) => "被权限挡住",
+            Err(_) => "出错",
+        };
+        let Some(owner) = self.cfg.identity.owner.clone() else { return };
+        let msg = crate::copy::scheduled_outcome(title, what);
+        for b in self.cfg.identity.channels(&owner) {
+            let ch = self.channel_for(&ChannelId(b.channel.clone()));
+            let _ = ch
+                .deliver(&b.addr, crate::view::View {
+                    blocks: vec![crate::view::Block::Paragraph(msg.clone())],
+                    ..Default::default()
+                })
+                .await;
+        }
+    }
+
+    /// 同一形状被挡到第 2 次（24h 内）时，给主人发一条**一次性的**提示（D30 §8）。
+    ///
+    /// 只记内存：这是"要不要开口子"的线索，不是账本事实；重启后重新计数即可。
+    async fn note_blocked(&self, tool: &str, domain: crate::policy::Domain) {
+        const WINDOW_MS: i64 = 24 * 3600 * 1000;
+        let key = format!("{}|{}", tool, domain.as_str());
+        let now = now_ms();
+        let fire = {
+            let mut g = self.blocked_shapes.lock().unwrap();
+            let e = g.entry(key).or_insert((now, 0, false));
+            if now - e.0 > WINDOW_MS {
+                *e = (now, 0, false);
+            }
+            e.1 += 1;
+            if e.1 >= 2 && !e.2 {
+                e.2 = true;
+                true
+            } else {
+                false
+            }
+        };
+        if !fire {
+            return;
+        }
+        let Some(owner) = self.cfg.identity.owner.clone() else { return };
+        let text = format!(
+            "想做的动作已经连续被挡了两次（`{tool}`，24 小时内）。\n\n             这通常意味着需要一个长期能力：可以让有权限的账号加一条命令条目，             或者直接用有权限的账号来处理。我不再重复提醒。"
+        );
+        for b in self.cfg.identity.channels(&owner) {
+            let ch = self.channel_for(&ChannelId(b.channel.clone()));
+            let _ = ch.deliver(&b.addr, crate::view::View {
+                blocks: vec![crate::view::Block::Paragraph(text.clone())],
+                ..Default::default()
+            }).await;
+        }
+    }
+
+    /// 能力面变更必须留痕：`command.installed` / `command.removed` + 审批 id + 指纹。
+    async fn log_command_change(&self, id: &ApprovalId, name: &str, hash: &str, kind: EventKind) {
+        let kind_str = kind.as_str();
+        let Ok(mut tx) = self.store.begin_write().await else { return };
+        let _ = tx
+            .append(NewEvent {
+                conv: ConversationId("__commands__".into()),
+                run: RunId("__commands__".into()),
+                turn: None,
+                kind,
+                payload: serde_json::json!({
+                    "name": name, "hash": hash, "approval_id": id.0,
+                }),
+                dedupe_key: Some(format!("{}-{}-{}", kind_str, name, hash)),
+            })
+            .await;
+        let _ = tx.commit().await;
+    }
+
+    /// 主人批准/拒绝了一条 `Permission`：装/删条目并清掉草稿。返回一句给主人的补充说明。
+    ///
+    /// 三道保险：草稿必须还在、指纹必须与批准时一致（防止"批准后被改"）、安装只增不改。
+    async fn apply_permission(&self, id: &ApprovalId, approved: bool) -> Option<String> {
+        let info = self.store.approval_info(id).await.ok().flatten()?;
+        if info.kind != crate::record::ApprovalKind::Permission {
+            return None;
+        }
+        let Some(admin) = &self.cfg.commands else {
+            return Some(crate::copy::NO_INSTALLER.into());
+        };
+        let Some(name) = info.entry_name.clone() else {
+            return Some(crate::copy::PROPOSAL_NO_NAME.into());
+        };
+        if !approved {
+            let _ = admin.discard(&name);
+            return Some(crate::copy::PROPOSAL_DISCARDED.into());
+        }
+        let pending = admin.pending().into_iter().find(|p| p.name == name);
+        let msg = match pending {
+            None => crate::copy::PROPOSAL_GONE.to_owned(),
+            Some(p) if Some(&p.hash) != info.entry_hash.as_ref() => {
+                crate::copy::PROPOSAL_CHANGED.to_owned()
+            }
+            Some(p) => match &p.body {
+                Some(body) => match admin.install(&name, body) {
+                    Ok(()) => {
+                        let _ = admin.discard(&name);
+                        self.log_command_change(id, &name, &p.hash, EventKind::CommandInstalled)
+                            .await;
+                        crate::copy::install_ok(&p.summary)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, entry = %name, "命令条目安装失败");
+                        crate::copy::INSTALL_FAILED.to_owned()
+                    }
+                },
+                None => match admin.remove(&name) {
+                    Ok(()) => {
+                        let _ = admin.discard(&name);
+                        self.log_command_change(id, &name, &p.hash, EventKind::CommandRemoved)
+                            .await;
+                        crate::copy::remove_ok(&p.summary)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, entry = %name, "命令条目删除失败");
+                        crate::copy::REMOVE_FAILED.to_owned()
+                    }
+                },
+            },
+        };
+        Some(msg)
+    }
+}
+
 #[async_trait::async_trait]
 impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
     async fn ask(
@@ -2991,24 +3406,64 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
         call: &CallId,
         tool: &str,
         args: &serde_json::Value,
-    ) -> Result<bool, String> {
+        role: ActorRole,
+        scheduled: bool,
+    ) -> Result<crate::runner::GateOutcome, String> {
+        use crate::runner::GateOutcome;
         let domain = self
             .tools
             .get(tool)
             .map(|t| t.domain())
             .unwrap_or(crate::policy::Domain::Sandbox);
-        match self.cfg.policy.verdict(tool, domain) {
-            crate::policy::Verdict::Allow => return Ok(true),
-            crate::policy::Verdict::Deny => {
-                tracing::info!(tool, "denied by policy");
-                return Ok(false);
+        let entry = self.tools.get(tool);
+        // "结构上有界"由工具自己核对数据后声明（D22 / 命令条目 D31）；
+        // "家人也能免审"必须额外显式声明，默认 false（否则 host 的 always 路径会漏给家人）。
+        let bounded = entry.as_ref().is_some_and(|t| t.preapproved_for(args, role));
+        let member_safe = entry.as_ref().is_some_and(|t| t.member_safe());
+        // 命令条目（D31）：命中且对当前主体开放 → 免审；是条目工具但这条不合法 →
+        // 直接 Blocked（不是发卡）。其余工具返回 NotApplicable，走原来的判定。
+        let entry = match entry.map(|t| t.command_entry(args, role)) {
+            Some(crate::tool::EntryCheck::Allowed) => true,
+            Some(crate::tool::EntryCheck::Denied(reason)) => {
+                tracing::info!(tool, %reason, "command entry rejected");
+                return Ok(GateOutcome::Blocked {
+                    reason: "NotAuthorized".into(),
+                    hint: reason,
+                });
             }
-            crate::policy::Verdict::Ask => {
-                // 工具可以在自己核对过授权表后声明"这一条不需要打扰人"（D22：
-                // `approval = "always"` 的路径）。只能把 Ask 放成放行，Deny 已在上面返回。
-                if self.tools.get(tool).is_some_and(|t| t.skip_approval(args)) {
-                    tracing::info!(tool, "preapproved by tool (grant=always)");
-                    return Ok(true);
+            _ => false,
+        };
+        match self.cfg.policy.decide(role, tool, domain, bounded, entry, member_safe) {
+            crate::policy::GateDecision::Allow => {
+                if bounded && role == ActorRole::Owner {
+                    tracing::info!(tool, "preapproved by data (grant=always / command entry)");
+                }
+                return Ok(GateOutcome::Allowed);
+            }
+            crate::policy::GateDecision::Deny(reason) => {
+                tracing::info!(tool, %reason, "denied by policy");
+                return Ok(GateOutcome::Denied { reason });
+            }
+            crate::policy::GateDecision::Blocked { reason, hint } => {
+                // 家人到域上限：不建审批行、不发卡，直接把结构化原因交回（D30 §8）。
+                tracing::info!(tool, ?reason, "blocked by policy");
+                if reason == crate::policy::BlockedReason::MemberCeiling {
+                    self.note_blocked(tool, domain).await;
+                }
+                return Ok(GateOutcome::Blocked {
+                    reason: format!("{:?}", reason),
+                    hint,
+                });
+            }
+            crate::policy::GateDecision::Ask => {
+                if scheduled {
+                    // 到点没人能点：发卡只会白等 10 分钟，还会把整轮拖垮。
+                    // 直接跳过这一步，并告诉 owner"这条任务需要审批"（D30 §7）。
+                    tracing::warn!(tool, "scheduled run needs approval; skipped");
+                    self.notice_scheduled_needs_approval(tool, conv).await;
+                    return Ok(GateOutcome::Denied {
+                        reason: "定时任务里不能请求审批，这一步已跳过".into(),
+                    });
                 }
             }
         }
@@ -3039,13 +3494,20 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
                 action,
                 scope: "workspace".into(),
                 ttl_s: APPROVAL_TTL_S,
+                // 这条是"执行这一次动作"：短 TTL，批准后由 runner 继续执行。
+                kind: crate::record::ApprovalKind::Confirm,
+                // 门只有会话键，拿不到发送者；审计用 raw actor 只会是一串 chat id，
+                // 所以这里留空，真正的发起者在 `run.started` 里。
+                requester: String::new(),
+                entry_name: None,
+                entry_hash: None,
             })
             .await
             .map_err(|e| e.to_string())?;
 
         let chat = conv.0.split(':').nth(1).unwrap_or_default().to_owned();
         // 三段式：做什么 / 影响面 / 命令。给不看代码的人判断（D28）
-        let mut text = String::from("🔐 需要你确认\n\n");
+        let mut text = format!("{}\n\n", crate::copy::APPROVAL_ASK);
         match why {
             Some(w) => {
                 text.push_str(w);
@@ -3059,6 +3521,8 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
         if let Some(h) = &hint {
             text.push_str(&format!("说明：{h}\n"));
         }
+        // 审批卡保留工具名：它只有主人能看到，而"批准哪一项"必须可辨认（D28 三段式）。
+        // 给用户看的**通知**（不是审批卡）不写实现名词，见 `copy`。
         text.push_str(&format!("工具：{tool}\n"));
         if !brief.is_empty() {
             text.push_str(&format!("命令：{brief}\n"));
@@ -3100,7 +3564,8 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.approvals.lock().unwrap().insert(id.0.clone(), tx);
         match tokio::time::timeout(Duration::from_secs(APPROVAL_TTL_S), rx).await {
-            Ok(Ok(yes)) => Ok(yes),
+            Ok(Ok(true)) => Ok(GateOutcome::Allowed),
+            Ok(Ok(false)) => Ok(GateOutcome::Denied { reason: "未获批准".into() }),
             _ => {
                 self.approvals.lock().unwrap().remove(&id.0);
                 self.clear_pending(&conv.0, &id.0);
@@ -3108,7 +3573,7 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
                 let _ = ch
                     .clear_prompt(&chat, &card, "⏱ 审批超时，已拒绝执行。")
                     .await;
-                Ok(false)
+                Ok(GateOutcome::Denied { reason: "审批超时".into() })
             }
         }
     }
