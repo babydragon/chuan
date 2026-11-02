@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use harness_capabilities::{BwrapEnv, ReadTool, WriteTool};
+use harness_capabilities::{BwrapEnv, Mount, ReadTool, SandboxProfile, WriteTool};
 use harness_kernel::{ExecOpts, ExecutionEnv, Tool, ToolCtx, Workspace};
 use tokio_util::sync::CancellationToken;
 
@@ -749,4 +749,148 @@ async fn proxy_env_only_exists_in_network_lane() {
         .unwrap();
     let text = format!("{:?}", out.content);
     assert!(text.contains("[http://127.0.0.1:7890]"), "{text}");
+}
+
+// ---- SandboxProfile：具名 lane 的参数断言 ----
+//
+// 这里直接看渲染出来的 bwrap 参数，不依赖宿主是否允许 userns；
+// 覆盖"少一个 --unshare 就是静默沙盒洞"的那类回归。
+
+fn preview(env: &BwrapEnv) -> Vec<String> {
+    env.preview_args(&["true".into()], &opts(1000))
+}
+
+fn has_pair(args: &[String], flag: &str, a: &str, b: &str) -> bool {
+    args.windows(3)
+        .any(|w| w[0] == flag && w[1] == a && w[2] == b)
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
+}
+
+/// 默认执行 lane：`--unshare-all`、inbox/skills/media 只读、运行时只读、遮蔽生效。
+#[test]
+fn profile_offline_args_are_hermetic() {
+    let ws = tempfile::tempdir().unwrap();
+    let inbox = tempfile::tempdir().unwrap();
+    let skills = tempfile::tempdir().unwrap();
+    let media = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let secrets = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(runtime.path().join("py")).unwrap();
+    std::fs::create_dir_all(runtime.path().join("node")).unwrap();
+
+    let env = SandboxProfile::new(secrets.path()).offline(
+        ws.path(),
+        inbox.path(),
+        skills.path(),
+        media.path(),
+        vec![Mount {
+            src: extra.path().to_path_buf(),
+            dst: "/run/extra".into(),
+            ro: true,
+        }],
+        runtime.path(),
+    );
+    let args = preview(&env);
+    let p = |d: &std::path::Path| d.display().to_string();
+
+    assert!(has_flag(&args, "--unshare-all"), "离线 lane 应整块隔离");
+    assert!(!has_flag(&args, "--unshare-net"), "离线 lane 不该单独保留网络");
+    assert!(has_pair(&args, "--ro-bind", &p(inbox.path()), "/inbox"));
+    assert!(has_pair(&args, "--ro-bind", &p(skills.path()), "/skills"));
+    assert!(has_pair(&args, "--ro-bind", &p(media.path()), "/media"));
+    assert!(has_pair(&args, "--ro-bind", &p(&runtime.path().join("py")), "/py"));
+    assert!(has_pair(&args, "--ro-bind", &p(&runtime.path().join("node")), "/node"));
+    assert!(has_pair(&args, "--ro-bind", &p(extra.path()), "/run/extra"));
+    assert!(!has_flag(&args, "/rt"), "只读运行时不该出现 /rt");
+    // 遮蔽目录：空 tmpfs + 重挂只读
+    assert!(args.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == p(secrets.path())));
+    assert!(args.windows(2).any(|w| w[0] == "--remount-ro" && w[1] == p(secrets.path())));
+}
+
+/// 内网 lane：保留网卡，但只有 workspace 与显式授权挂载。
+#[test]
+fn profile_lan_keeps_net_and_drops_default_mounts() {
+    let ws = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let secrets = tempfile::tempdir().unwrap();
+    let env = SandboxProfile::new(secrets.path()).lan(
+        ws.path(),
+        vec![Mount {
+            src: extra.path().to_path_buf(),
+            dst: "/run/extra".into(),
+            ro: true,
+        }],
+    );
+    let args = preview(&env);
+
+    assert!(!has_flag(&args, "--unshare-all"), "联网 lane 不能整块 unshare");
+    assert!(!has_flag(&args, "--unshare-net"), "lan 必须保留网卡");
+    assert!(has_flag(&args, "--unshare-pid"));
+    assert!(has_pair(&args, "--ro-bind", &extra.path().display().to_string(), "/run/extra"));
+    for p in ["/inbox", "/skills", "/media", "/rt", "/py", "/node"] {
+        assert!(!has_flag(&args, p), "lan 不该挂 {p}");
+    }
+    // 有网 + 能读 /etc ⇒ 必须遮凭据目录
+    assert!(args.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == secrets.path().display().to_string()));
+}
+
+/// 装包 lane：有网，只看得到可写的 `/rt`。
+#[test]
+fn profile_install_mounts_writable_rt_only() {
+    let ws = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let secrets = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(runtime.path().join("py")).unwrap();
+    let env = SandboxProfile::new(secrets.path()).install(ws.path(), runtime.path());
+    let args = preview(&env);
+    let rt = runtime.path().display().to_string();
+
+    assert!(!has_flag(&args, "--unshare-all"));
+    assert!(!has_flag(&args, "--unshare-net"), "装包 lane 必须能出网");
+    assert!(has_pair(&args, "--bind", &rt, "/rt"), "运行时目录应可写挂到 /rt");
+    for p in ["/inbox", "/skills", "/media", "/py", "/node"] {
+        assert!(!has_flag(&args, p), "装包 lane 不该挂 {p}");
+    }
+    // 装包 lane 有网、能读 /etc ⇒ 凭据目录同样要遮
+    assert!(args.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == secrets.path().display().to_string()));
+}
+
+/// 技能联网 lane：有网，inbox/skills 只读、运行时只读；不挂 media；凭据目录遮蔽。
+#[test]
+fn profile_skill_net_matches_current_lane() {
+    let ws = tempfile::tempdir().unwrap();
+    let inbox = tempfile::tempdir().unwrap();
+    let skills = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let secrets = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(runtime.path().join("py")).unwrap();
+
+    let env = SandboxProfile::new(secrets.path()).skill_net(
+        ws.path(),
+        inbox.path(),
+        skills.path(),
+        Vec::new(),
+        runtime.path(),
+    );
+    let args = preview(&env);
+
+    assert!(!has_flag(&args, "--unshare-all"));
+    assert!(!has_flag(&args, "--unshare-net"), "技能联网 lane 必须能出网");
+    assert!(has_pair(&args, "--ro-bind", &inbox.path().display().to_string(), "/inbox"));
+    assert!(has_pair(&args, "--ro-bind", &skills.path().display().to_string(), "/skills"));
+    assert!(has_pair(
+        &args,
+        "--ro-bind",
+        &runtime.path().join("py").display().to_string(),
+        "/py"
+    ));
+    assert!(!has_flag(&args, "/media"), "技能联网 lane 现状不挂 /media");
+    assert!(!has_flag(&args, "/rt"), "技能运行时只读");
+    // 联网技能最容易成为外泄通道：凭据目录必须遮（D18）
+    assert!(args.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == secrets.path().display().to_string()));
+    assert!(args.windows(2).any(|w| w[0] == "--remount-ro" && w[1] == secrets.path().display().to_string()));
 }

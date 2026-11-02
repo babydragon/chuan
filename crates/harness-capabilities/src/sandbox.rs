@@ -332,6 +332,93 @@ impl BwrapEnv {
         cmd.args(argv);
         cmd
     }
+
+    /// 诊断用：渲染将要传给 bwrap 的参数，**不执行**。
+    ///
+    /// 仅用于测试与排障（检查某个 lane 是否漏了 `--unshare-*` 或挂载），
+    /// 不参与执行路径，也不改变 `BwrapEnv` 的语义。
+    #[doc(hidden)]
+    pub fn preview_args(&self, argv: &[String], opts: &ExecOpts) -> Vec<String> {
+        self.build_command(argv, opts)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+/// 执行 lane 的**具名**组合：把"无网/有网、挂哪些目录、运行时是否可写"固化成构造器，
+/// 避免每个调用点手写一条 `BwrapEnv` 链（漏一处就是静默的沙盒洞）。
+///
+/// **凭据目录由这里统一遮蔽**：所有 lane 都会 `ro-bind /etc`，而 daemon 与沙盒同 uid，
+/// 权限位分不开（D18）。遮蔽是 profile 的属性，不是某个 lane 的额外选项——
+/// 之前 `lan` / `install` / `skill_net` 就漏了这一步，等于给联网技能留了读 token 的口子。
+pub struct SandboxProfile {
+    secrets: PathBuf,
+}
+
+impl SandboxProfile {
+    pub fn new(secrets: impl Into<PathBuf>) -> Self {
+        Self { secrets: secrets.into() }
+    }
+
+    /// 默认执行 lane（离线）：无网络；workspace 可写；inbox/skills/media 只读；
+    /// 运行时只读挂 `/py` `/node`。
+    pub fn offline(
+        &self,
+        workspace: impl Into<PathBuf>,
+        inbox: impl Into<PathBuf>,
+        skills: impl Into<PathBuf>,
+        media: impl Into<PathBuf>,
+        mounts: Vec<Mount>,
+        runtime: impl Into<PathBuf>,
+    ) -> BwrapEnv {
+        BwrapEnv::new(workspace)
+            .with_inbox(inbox)
+            .with_skills(skills)
+            .with_media(media)
+            .with_mounts(mounts)
+            .with_runtime(runtime, false)
+            .with_masked_dir(&self.secrets)
+    }
+
+    /// 内网调试 lane：保留网卡（逐条审批），只看 workspace 与授权挂载；
+    /// 不挂 inbox/skills/media/运行时。
+    pub fn lan(&self, workspace: impl Into<PathBuf>, mounts: Vec<Mount>) -> BwrapEnv {
+        BwrapEnv::new(workspace)
+            .with_network(true)
+            .with_mounts(mounts)
+            .with_masked_dir(&self.secrets)
+    }
+
+    /// 装包 lane：有网络；运行时目录整块可写挂到 `/rt`；不挂 inbox/skills/media。
+    pub fn install(&self, workspace: impl Into<PathBuf>, runtime: impl Into<PathBuf>) -> BwrapEnv {
+        BwrapEnv::new(workspace)
+            .with_network(true)
+            .with_runtime(runtime, true)
+            .with_masked_dir(&self.secrets)
+    }
+
+    /// 声明 `network: true` 的技能 lane：有网络；inbox/skills 只读；运行时只读。
+    ///
+    /// 与 `offline` 的差异（现状）：不挂 `/media`。凭据目录同样遮蔽。
+    pub fn skill_net(
+        &self,
+        workspace: impl Into<PathBuf>,
+        inbox: impl Into<PathBuf>,
+        skills: impl Into<PathBuf>,
+        mounts: Vec<Mount>,
+        runtime: impl Into<PathBuf>,
+    ) -> BwrapEnv {
+        BwrapEnv::new(workspace)
+            .with_inbox(inbox)
+            .with_skills(skills)
+            .with_runtime(runtime, false)
+            .with_mounts(mounts)
+            .with_network(true)
+            .with_masked_dir(&self.secrets)
+    }
 }
 
 /// 宿主 lane 的挂载集（由授权表生成）

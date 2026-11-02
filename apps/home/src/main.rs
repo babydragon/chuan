@@ -14,12 +14,12 @@ mod workspace_gc;
 use std::sync::Arc;
 
 use harness_capabilities::{
-    BwrapEnv, CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache,
+    CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache,
     ElevatedClient, ElevatedTool, HostEnv, HostTool,
     HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
     NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
     RoleTool,
-    RollbackSkillTool, RunSkillTool, SendFileTool, ServiceTool, SkillCatalog, SysTool, TaskTool,
+    RollbackSkillTool, RunSkillTool, SandboxProfile, SendFileTool, ServiceTool, SkillCatalog, SysTool, TaskTool,
     WebFetchTool,
     WriteTool,
 };
@@ -377,33 +377,29 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
     let skills = SkillCatalog::new(&cfg.skills_dir);
-    let env = BwrapEnv::new(&cfg.workspace)
-        .with_inbox(&cfg.inbox)
-        .with_skills(&cfg.skills_dir)
-        .with_media(&cfg.media_dir)
-        .with_mounts(cfg.sandbox_mounts.clone())
-        .with_runtime(&cfg.runtime_dir, false)
-        // /etc 整块只读挂进沙盒，凭据目录也在它下面；daemon 与沙盒同 uid，
-        // 权限位分不开，只能盖掉。沙盒里看到的是空目录。
-        .with_masked_dir(cfg.config_dir.join("secrets"));
+    // 所有 lane 共用同一份遮蔽配置：凭据目录不因 lane 不同而露出（D18）
+    let sandbox = SandboxProfile::new(cfg.config_dir.join("secrets"));
+    let env = sandbox.offline(
+        &cfg.workspace,
+        &cfg.inbox,
+        &cfg.skills_dir,
+        &cfg.media_dir,
+        cfg.sandbox_mounts.clone(),
+        &cfg.runtime_dir,
+    );
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ExecTool::sandboxed().with_proxy(cfg.proxy.clone())));
     // 内网调试 lane：有网卡，逐条审批；看不到宿主文件
-    tools.register(Arc::new(ExecTool::lan(Arc::new(
-        BwrapEnv::new(&cfg.workspace)
-            .with_network(true)
-            .with_mounts(cfg.sandbox_mounts.clone()),
-    ))
+    tools.register(Arc::new(ExecTool::lan(Arc::new(sandbox.lan(
+        &cfg.workspace,
+        cfg.sandbox_mounts.clone(),
+    )))
     .with_proxy(cfg.proxy.clone())));
     // 装包 lane：有网络，只把运行时目录挂成可写（/rt）
     tools.register(Arc::new(InstallTool::new(
-        Arc::new(
-            BwrapEnv::new(&cfg.workspace)
-                .with_network(true)
-                .with_runtime(&cfg.runtime_dir, true),
-        ),
+        Arc::new(sandbox.install(&cfg.workspace, &cfg.runtime_dir)),
         cfg.pip_index.clone(),
         cfg.npm_registry.clone(),
     )
@@ -457,25 +453,19 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             ("timer", crate::system_prompt::TIMER),
         ],
     ));
+    let skill_net_env: Arc<dyn harness_kernel::ExecutionEnv> =
+        Arc::new(sandbox.skill_net(
+            &cfg.workspace,
+            &cfg.inbox,
+            &cfg.skills_dir,
+            cfg.sandbox_mounts.clone(),
+            &cfg.runtime_dir,
+        ));
     tools.register(Arc::new(
-        RunSkillTool::new(Arc::clone(&skills)).with_network(Arc::new(
-            BwrapEnv::new(&cfg.workspace)
-                .with_inbox(&cfg.inbox)
-                .with_skills(&cfg.skills_dir)
-                .with_runtime(&cfg.runtime_dir, false)
-                .with_mounts(cfg.sandbox_mounts.clone())
-                .with_network(true),
-        )),
+        RunSkillTool::new(Arc::clone(&skills)).with_network(Arc::clone(&skill_net_env)),
     ));
     tools.register(Arc::new(
-        PublishSkillTool::new(Arc::clone(&skills)).with_network(Arc::new(
-            BwrapEnv::new(&cfg.workspace)
-                .with_inbox(&cfg.inbox)
-                .with_skills(&cfg.skills_dir)
-                .with_runtime(&cfg.runtime_dir, false)
-                .with_mounts(cfg.sandbox_mounts.clone())
-                .with_network(true),
-        )),
+        PublishSkillTool::new(Arc::clone(&skills)).with_network(Arc::clone(&skill_net_env)),
     ));
     tools.register(Arc::new(RollbackSkillTool::new(Arc::clone(&skills))));
     // 子 agent 委托（D19）。tier=1：子 agent 的工具集里没有它。

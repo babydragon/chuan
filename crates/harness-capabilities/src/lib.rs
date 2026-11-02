@@ -41,7 +41,7 @@ pub use tools::task::TaskTool;
 pub use playbook::PlaybookTool;
 pub use services::{HttpServiceTool, Service};
 pub use proxy::{Mode as ProxyMode, ProxyConfig};
-pub use sandbox::{BwrapEnv, Mount, validate_mount};
+pub use sandbox::{BwrapEnv, Mount, SandboxProfile, validate_mount};
 pub use skills::{PublishSkillTool, RollbackSkillTool, RunSkillTool, SkillCatalog};
 pub use tools::{
     CapabilityTool, DelegateTool, ElevatedTool, ExecTool, HostTool, ReadTool, RememberTool, SysTool,
