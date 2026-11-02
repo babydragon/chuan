@@ -10,7 +10,7 @@
 
 | 层 | 模块组 | 职责 | crate | 目录 |
 |---|---|---|---|---|
-| L1 接入 | ① | 收发、鉴权、流式回显 | `harness-channels` | `channels/telegram`, `channels/cli` |
+| L1 接入 | ① | 收发、鉴权、流式回显 | `harness-channels` | `channels/telegram`, `channels/weixin` |
 | L2 状态 | ⑦ | Journal、投影、迁移、FTS 维护 | `harness-store` | `store/` |
 | L3 循环 | ② | Turn 状态机、预算、取消、事件流 | `harness-kernel` + `harness-engine` | `kernel/turn`, `engine/` |
 | L4 上下文 | ③ | 组装、压缩、注入 | `harness-kernel` | `kernel/context` |
@@ -110,7 +110,7 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `tasks` | 调度与租约（CAS） | `task.*` |
 | `approvals` | 审批状态、单次消费、**卡片 msg_ref** | `approval.*` |
 | `docs` | 记忆/配置/画像（含 payload 与 version） | `doc.upserted` |
-| `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出）；`cost_est` 待 `[pricing]` | `usage.recorded` |
+| `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出）；`cost_est` 恒 0（金额不估算，D20） | `usage.recorded` |
 | ~~`artifacts`~~ | **无独立表**：产物是 `artifacts/` 下的文件 + `artifact.created` 事件，按 sha256 寻址 | `artifact.created` |
 | `docs_fts`（未来） | FTS5 检索 | `doc.upserted` |
 | `chunks` / `chunks_fts` / `doc_vectors`（未来） | 知识库 | ingest 管道 |

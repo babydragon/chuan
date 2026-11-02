@@ -7,9 +7,9 @@
 
 ## 1. 这是什么
 
-跑在**一块 RISC-V SBC 单板机（riscv64 / 8GB）**上的常驻个人助理。Telegram 是主入口，CLI 并级。
+跑在**一块 RISC-V SBC 单板机（riscv64 / 8GB）**上的常驻个人助理。Telegram 与微信是双入口（没有 CLI 聊天通道，只有 `--config` 这类启动参数）。
 
-- **主人（owner）** 可扩展；**成员（member）** 只读。一期 `allowed_users` 内同权、暂不做隔离（见 ROADMAP P4.5），但身份结构已按「一个 user 绑多个通道」预留。
+- **主人（owner）** 可扩展；**成员（member）** 只读。一期 `[identity]` 内同权、暂不做隔离（见 ROADMAP P4.5），但身份结构已按「一个 user 绑多个通道」预留（通道级 `allowed_users` 已移除）。
 - 核心差异化：**自我提升闭环**——在沙盒里调试脚本 → 主人确认 → 泛化为技能 → 热加载生效。
 - 它不是聊天机器人，是**能安全执行动作**的 agent 运行时：跑命令、取网、定时提醒、沉淀技能，且每次动作可审计、可恢复、可回滚。
   **打印这类领域能力由技能实现，不进内核**（见不变量 15）。
@@ -41,7 +41,7 @@
 4. **恢复按崩溃点分级**，不重放整个 turn；副作用分 `Pure` / `Idempotent{key}` / `External`。
 5. **`call_dispatched` 是"从未执行"与"执行后丢结果"的唯一分界**；`External` 永不自动重发。
 6. **三段式执行**：短事务写意图 → 无事务执行（含审批）→ 短事务写结果。**事务内禁止**执行工具、调 LLM、发消息、等审批。
-7. **授权轴是执行域，不是命令黑名单**：`sandbox`（沙盒内，免审批）/ `self_modify`（改自身）/ `outbound`（出网）/ `lan`（内网调试）/ `install`（装依赖）/ `host_exec`（宿主提权）；`[policy]` 按域配置，`require_approval` 只能加严、不能放松。
+7. **授权轴是执行域，不是命令黑名单**：共 8 个（`sandbox` 沙盒内，免审批 / `self_modify` 改自身 / `outbound` 出网 / `lan` 内网调试 / `install` 装依赖 / `host` 宿主执行 L1 / `host_elevated` 宿主提权 L2 / `host_observe` 宿主观测 L3），见 `harness-kernel/src/policy.rs`；`[policy]` 按域配置，`require_approval` 只能加严、不能放松。
 8. **沙盒是安全边界**：白名单挂载（**绝不 `ro-bind /`**）、`/home` 不可见、默认断网、cgroup 内存与 pids 硬限、超时 `killpg`。
    联网是**独立 lane**（`lan_exec`、声明 `network: true` 的技能），不是默认能力；额外宿主挂载只能由主人在 `[sandbox] mounts` 里显式授权。
 9. **出网只有两条路，且都留痕**：宿主 `web_fetch` 代取（拒绝内网/回环地址、逐次写审计日志）；或技能声明 `network: true` 走联网 lane。
@@ -49,7 +49,7 @@
 10. **技能是纯函数**：只能读写 workspace；`SKILL.md` 正文**永不进上下文**（只注入结构化 manifest）；权限不可自授。
 11. **loop 是 dumb loop**：只负责终止、预算、取消、续跑；聪明逻辑属于上下文层或工具层。
 12. **记忆是 doc 容器 + 应用语义**：内核只提供 `doc(type, scope, payload)`，`fact` 只是其中一种。
-13. **宿主/提权执行必须逐条审批**：`ExecProfile::Host` 需 owner 显式指令（仅下一条生效），`HostElevated` 只能使用 sudoers 白名单内的命令（见 `DECISIONS.md` D15）。
+13. **宿主/提权执行必须逐条审批**：`host`（L1）与 `host_elevated`（L2）都只能花授权表里已写明的东西——`[host.path]` 给路径、`[[host_elevated.grant]]` 给 argv 前缀；L2 经独立 root 单元 `chuan hostd`（unix socket + `SO_PEERCRED`），`host_elevated` 域默认 deny；`host_observe`（L3）默认放行。扩展靠改数据，不靠加代码（`DECISIONS.md` D22，取代 D15 的 sudoers 形态）。
 14. **凭据不进入执行环境**：密钥只经 systemd 凭据（`LoadCredential[Encrypted]`）注入；宿主/提权子进程必须 `env -i` 启动且不挂载凭据目录；沙盒永久不挂载凭据。工具需要的凭据由内核显式传 fd/stdin，不得经环境变量。
 15. **内核只给边界与通用传输，领域能力下沉为技能**：判断标准是"换一个环境还要改 Rust 吗"——要，就说明它属于技能。
     打印/发现/查墨量、某个服务的 API 语义，都是技能或 playbook；只有 `[sandbox] mounts`、`http`/`mcp` 这类**通用传输**才进内核（见 D17）。
@@ -60,8 +60,9 @@
 
 | 用途 | 选择 | 备注 |
 |---|---|---|
-| 运行时 | `tokio`，`worker_threads=4` | 并发按 lane：`io=2 / compile=1 / external=1` |
-| Telegram | **`teloxide-core`**（不用 `teloxide` 的 dispatcher） | dispatcher 的每 update 起 task 与会话串行冲突 |
+| 运行时 | `tokio`（`rt-multi-thread`，线程数用默认 = 核数） | 并发按 lane：`io=2 / compile=1 / external=1 / agent=1` |
+| 通道 | **自写 Telegram Bot API 客户端**（`reqwest` + serde，只实现用到的方法：长轮询/收发/编辑/按钮/状态反应/媒体） | 不引 `teloxide` / `teloxide-core`：dispatcher 的每 update 起 task 与会话串行冲突，类型层收益抵不过依赖重量 |
+| 微信 | **自写 iLink 客户端**（`reqwest` + AES-128-ECB 媒体解密） | 不引第三方 wechaty 系；公众号/企业微信不在范围 |
 | HTTP/TLS | `reqwest 0.12` + `rustls`（ring） | 已实测交叉编译 |
 | LLM 客户端 | **自写**（≈400 行，OpenAI 兼容 SSE） | 接口冻结为 `TurnDriver`；rig 只作备份方案 |
 | 存储 | `rusqlite`（`bundled`） | 单写者线程 + WAL |
@@ -75,7 +76,7 @@
 
 - ❌ Node/TypeScript 内核（Pi 方案）——用户坚持 Rust。
 - ❌ `rig` 的 `AgentRun` 作为 loop——journal-first 下用不上，且每两周破坏性变更。
-- ❌ `teloxide` 全量（含 dispatcher）。
+- ❌ `teloxide` 全量（含 dispatcher），以及 `teloxide-core`：最终自写 Telegram 客户端，只留 `reqwest`。
 - ❌ 30MB 这类硬性数字门槛（改为"低占用取向"，见 C5）、`RLIMIT_AS` 限 Python、`ro-bind / /`、系统 cron、`/tmp/workspace/<session>` 形态。
 - ❌ 以命令黑名单作为安全边界。
 
@@ -143,7 +144,7 @@ apps/<name>/            # 薄二进制 crate + config/prompts/skills/evals
 | 2 | `docs/DESIGN.md` | 分层（L1–L10）、模块、功能点、关键流程 |
 | 3 | `docs/DATA-MODEL.md` | 层→模块→crate 映射、事件分类、Journal、恢复判定 |
 | 4 | `docs/INTERFACES.md` | 契约：Channel / Store / Retriever / TurnDriver / Tool / ExecutionEnv / Renderer |
-| 5 | `docs/DECISIONS.md` | ADR（D1–D13、D15–D18）+ 已废弃清单 |
+| 5 | `docs/DECISIONS.md` | ADR（D1–D13、D15–D30）+ 已废弃清单 |
 | 6 | `docs/SELECTION.md` | 按层选型、依赖清单、排除项 |
 | 7 | `docs/OPS.md` | 配置、密钥、systemd、时间、重试、备份、降级 |
 | 8 | `docs/PLATFORM.md` | 目标板实测基线（沙盒/cgroup/glibc/bwrap） |

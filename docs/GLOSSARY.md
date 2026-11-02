@@ -13,6 +13,8 @@
 | **内核** | Kernel / `harness-kernel` | 编排、状态机、治理接口；不碰 IO、不含业务 | 引擎、runtime |
 | **引擎** | Engine / `harness-engine` | `TurnDriver` 的实现：请求构造、SSE 解析、usage 提取 | 内核、客户端库 |
 | **通道** | Channel | 传输适配器：收消息、发/编辑消息、声明能力 | 网关、适配器、connector |
+| **微信通道** | Weixin / ClawBot · iLink | 第二入口（`WeixinChannel`）：长轮询、文本、入站图片/PDF、出站文件、平台自带语音转写；无编辑、无按钮 → 审批回 `1`/`2`（D25–D27） | 公众号、企业微信（均不在范围） |
+| **语音识别** | ASR | 把语音条转成文字。微信侧用平台自带转写（已通，rc.31）；TG 侧尚未接入，方案见 `ASR.md`（本地 sherpa-onnx + SenseVoice，K1 走 RVV） | 语音通道、听写服务 |
 | **状态反应** | Reaction / `react()` | 通道给某条**入站**消息挂表情的能力，用于表示"处理到哪一步"；无此能力的通道静默 no-op（D24） | 已读回执、表情回执 |
 | **存储** | Store | 持久化后端：事务、seq、CAS、迁移 | 数据库层、DAO |
 | **检索器** | Retriever | 索引与召回；返回 `doc_id` 与分数构成 | 搜索、向量库 |
@@ -68,6 +70,7 @@
 | 术语 | 英文 / 代码名 | 定义 | 不要这样说 |
 |---|---|---|---|
 | **策略** | Policy | 白名单、角色、路径护栏等静态规则 | 权限系统 |
+| **执行域** | Domain / `[policy]` | 审批的授权轴，共 **8 个**：`sandbox` / `self_modify` / `outbound` / `lan` / `install` / `host` / `host_elevated` / `host_observe`，每个域一个 `Verdict`（`allow` / `ask` / `deny`）；`require_approval` 只能加严 | 权限等级、工具黑名单 |
 | **能力边界** | Capability Boundary | 授权轴：能否出网/打印/发送/改自身 | 权限等级 |
 | **审批** | Approval | 越界时向主人发起的确认，单次消费 | 确认框、授权 |
 | **本次允许** | `allow` | 仅本次调用有效 | 临时授权 |
@@ -75,8 +78,9 @@
 | **副作用等级** | `EffectClass`：`Pure` / `Idempotent { key }` / `External` | 决定崩溃后能否重跑 | 幂等性（泛指） |
 | **幂等键** | Idempotency Key | `hash(tool + 规范化 args)`，与 call id 解耦 | 去重 id |
 | **挂载集** | Mount Set | 沙盒可见的文件系统白名单 | 挂载配置 |
-| **工作区** | Workspace | 按 **run** 创建；P0 为单可写根 `/ws`，三段式列 P2 | 临时目录 |
+| **工作区** | Workspace | 单可写根 `/ws`（所有 run 共用 `actor.workspace`，会话内延续，不按 run 重建） | 临时目录 |
 | **孤儿回收** | Orphan Reap | 启动时清理残留的沙盒子进程 | 清理 |
+| **宿主 lane** | Host lane L1/L2/L3 | 三档宿主能力：L1 `host`（服务账号 + bwrap + 路径授权）/ L2 `host_elevated`（root 单元 `hostd` + argv 授权表）/ L3 `host_observe`（只读 `/proc`、`/sys`）。这里的 L1/L2/L3 **不是**分层号 | 提权、root lane |
 | **宿主执行** | Host / `host` | L1：在 bwrap 里以服务账号身份跑宿主命令；可见范围由授权表决定 | 提权、root 执行 |
 | **提权通道** | Elevated / `hostd` | L2：独立 root 单元 + unix socket，只做 argv 前缀匹配与审计，不含领域动词 | 特权模式、sudo 代理 |
 | **宿主观测** | HostObserve / `sys` | L3：进程内只读 `/proc`、`/sys`，无子进程 | 监控、指标系统 |

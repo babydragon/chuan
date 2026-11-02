@@ -503,6 +503,20 @@ HTTP 通道、知识库入库、向量检索、多 provider 自动路由、git w
 
 ---
 
+## 7.5 P4.7 审批与身份（**设计已定，未实现**）
+
+> 设计见 `DECISIONS.md` D30。目标：**家人日常零审批**，同时不放弃"值不进沙盒、动作有界"。
+
+| 段 | 内容 | 状态 |
+|---|---|---|
+| P0 | `[identity] owner` + `verdict(tool, domain, role)`；member 触达 `host`/`host_elevated`/`install` 一律 Deny；未绑定 actor 按 member | 未做（2026-11-02 曾开工，因 `Role` 与消息角色撞名回滚） |
+| P1 | `lan` 命名动作白名单（`print_file`/`printer_status`/`supplies`/`printer_list`）+ 参数域校验 + `Blocked` 终态 | 未做 |
+| P2 | 审批分 `Permission`/`Confirm`；`capability propose/approve`（只改白名单，不自批） | 未做 |
+| P3 | 提醒默认不审批（仅歧义问发起者） | 未做 |
+| P4 | 家人 UX：无审批按钮、非技术文案、转 owner、不挂起 | 未做 |
+
+---
+
 ## 8. 完成定义（DoD）
 
 一个阶段算完成，需同时满足：

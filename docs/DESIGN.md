@@ -1,6 +1,6 @@
 # 家庭智能管家 Harness · 概要设计
 
-> 部署约束：**Rust 单二进制 · RISC-V SBC（riscv64 / 8GB / 无第二台机器）· 无中间件 · Telegram 为主入口，CLI 并级**。
+> 部署约束：**Rust 单二进制 · RISC-V SBC（riscv64 / 8GB / 无第二台机器）· 无中间件 · Telegram 与微信双通道**。
 > 层编号以 **L1–L10** 为唯一体系（映射见 `DATA-MODEL.md §1`）；契约见 `INTERFACES.md`；取舍见 `DECISIONS.md`；运维见 `OPS.md`。
 
 ---
@@ -71,9 +71,12 @@
 
 | 模块 | 功能点 | 不做 |
 |---|---|---|
-| Telegram 通道 | 长轮询与 offset 持久化；update 去重；文本/图片/文档/回调解析；流式编辑（节流合并、4096 分片、代码块闭合）；inline 按钮；429 退避；入站新鲜度（>5min 丢弃）；入站消息状态反应（`setMessageReaction`，三态） | 业务判断、拼 prompt |
-| CLI 通道 | 同契约的 stdin/stdout | 不复用 TUI |
+| Telegram 通道 | 长轮询与 offset 持久化；update 去重；文本/图片/文档/回调解析；流式编辑（节流合并、4096 分片、代码块闭合）；inline 按钮；429 退避；入站新鲜度（>5min 丢弃）；入站消息状态反应（`setMessageReaction`，三态）；`typing` | 业务判断、拼 prompt |
+| 微信通道（ClawBot / iLink） | 长轮询与游标按 bot 分开；文本；入站图片/PDF（AES-128-ECB 解密后落 `/media`）；出站文件（CDN 上传，图片走 `image_item`、其余 `file_item`）；平台自带语音转写（有转写就用，无则回"听不清"）；一凭据文件多账号（`accounts` 数组，每人一个 bot）；「正在输入」；`context_token` 落盘（重启后仍能主动发）。无编辑、无按钮 → 定稿一次 + 审批回 `1`/`2`（D25–D27） | 公众号、企业微信、个人号 hook（均未实测） |
 | 能力声明 | `caps`（编辑/按钮/富文本/最大长度），上层据此降级；**状态反应**（`react`）不进 `caps`，默认 no-op，有则实现（D24） | 不假设通道等价 |
+
+> **CLI 通道不在实现中**：`[channels] enabled` 只接受 `telegram` / `weixin`（其它名字在配置校验阶段直接报错），
+> `apps/home` 也只装配这两个通道。
 
 ### ② 循环与编排（L3 / L9）
 
@@ -106,19 +109,22 @@
 | 编排工具 | `delegate`（派子 agent，tier=1）/ `role`（注册角色，SelfModify）/ `task`（查/停后台任务，tier=1） | 不做 workflow DSL |
 | 技能工具 | `run_skill` / `publish_skill` / `rollback_skill` | — |
 | 服务工具 | `http`（命名服务，支持 header/query/body/path 注入与 HMAC 签名）/ `mcp`（远端工具）/ `service`（运行期热加，写 `services.d/`） | token 不进上下文，也不进沙盒（D18） |
-| 技能工具 | manifest + scripts；stdin/stdout JSON；**纯函数** | 不直连打印/发送 |
-| 宿主特权工具 | `web_fetch`（唯一出网路径，已实现）、`send`（待做） | 永不下沉沙盒 |
-| 宿主执行工具（P4.6，未实现） | `host`（L1：bwrap + 路径授权 + 宿主 netns）/ `sys`（L3：只读 `/proc`）/ `capability`（申请单草稿）；L2 走独立单元 `chuan hostd`，不是工具 | **不做通用 `host_exec` 任意宿主 shell**；扩展靠授权表与技能，不靠加工具（D22） |
+| 技能执行 | manifest + scripts；stdin/stdout JSON；**纯函数** | 不直连打印/发送 |
+| 宿主特权工具 | `web_fetch`（宿主代取，逐次写审计日志）、`send_file`（把 workspace 里的产物发回当前通道）——两者都在宿主侧执行（已计入上面的内置工具） | 永不下沉沙盒 |
+| 宿主执行工具（P4.6 / D22：A 段已实现，B 待上板） | `host`（L1：bwrap + 路径授权表 + 宿主 netns）/ `sys`（L3：只读 `/proc`、`/sys`）/ `capability`（申请单草稿，只写不改配置）；`elevated`（L2：经独立 root 单元 `chuan hostd`，argv 授权表，域默认 deny，已实现待上板验证） | **不做通用 `host_exec` 任意宿主 shell**；扩展靠授权表与技能，不靠加工具（D22） |
 | 领域能力 | **用技能实现**（打印、发现、查墨量…）；内核只给通用挂载 `[sandbox] mounts` | 内核不提供 `print` 之类的领域工具 |
 | MCP 客户端 | 自写 Streamable HTTP 客户端（initialize / tools-list / tools-call）；目录按需注入 | 不做 stdio；不引 `rmcp` |
 | 结果治理 | head/tail 截断；大结果落盘留引用；结构化错误 | 不塞整文件 |
+
+**工具总数 27**（与 `apps/home/src/main.rs` 的注册处一致）：上表 `内置工具` 14 + `编排工具` 3 + `技能工具` 3 +
+`服务工具` 3 + `宿主执行工具` 4。
 
 ### ⑤ 执行（L6）
 
 | 模块 | 功能点 | 不做 |
 |---|---|---|
 | 沙盒 | **白名单挂载**（绝不 `ro-bind /`）；默认 `--unshare-all` 无网；联网走独立 lane（`lan_exec` / `network: true` 技能） | 不自研 seccomp |
-| 宿主边界（P4.6，未实现） | `Host`：bwrap + 路径授权 + 宿主 netns（不做 pid/net 隔离）；`HostElevated`：独立 root 单元 + unix socket + argv 授权表 | 不做通用 `host_exec`，不 `ro-bind /` |
+| 宿主边界（P4.6：L1/L2 已实现，L2 待上板验证） | `Host`：bwrap + 路径授权 + 宿主 netns（不做 pid/net 隔离）；`HostElevated`：独立 root 单元 + unix socket + argv 授权表 | 不做通用 `host_exec`，不 `ro-bind /` |
 | 资源限制 | cgroup v2 `memory.max`/`pids.max`；rlimit 兜底；编译任务 `nice` | 不用 `RLIMIT_AS` 限 Python |
 | 超时与清理 | 独立进程组；超时 `killpg`；启动回收孤儿 | 不留残留 |
 | Workspace | 单可写根 `/ws`（按任务子目录约定）+ `/media` 只读附件 + `/py` `/node` 运行时；7 天/256MB 清理 | 不复用上一 run 的目录这一条已放宽（会话内需要延续） |
@@ -128,10 +134,10 @@
 
 | 模块 | 功能点 | 不做 |
 |---|---|---|
-| 策略 | 白名单；owner/member；路径护栏；**授权轴=能力边界** | 不按命令黑名单放行 |
+| 策略 | 白名单；路径护栏；**授权轴=能力边界**；owner/member 角色（**待实现**，见 D30） | 不按命令黑名单放行 |
 | 审批 | 仅能力越界时触发（打印/发送/宿主取网/改自身）；会话级 allow/always；TTL；频率熔断；单次消费；幂等键 | `External` 类不提供 always |
 | 副作用 | `Pure`/`Idempotent(key)`/`External`；执行前后记账 | 不假设工具幂等 |
-| 预算 | attempts、token、金额上限；超限直接拒绝；子 agent 计入父 run 汇总（D20） | 不静默降级 |
+| 预算 | attempts、token（日/月）上限；超限直接拒绝；子 agent 计入父 run 汇总（D20）；**金额不记账**（`cost_est` 恒 0，`/usage` 明说"金额未配"） | 不静默降级 |
 
 ### ⑦ 状态与记忆（L2 / L8）
 
@@ -236,7 +242,7 @@ remind(时间, 内容) → 写任务行 → 调度器 sleep 到期
 |---|---|---|
 | 可用性 | 崩溃自愈 | systemd 重启 + `StartLimitBurst` 熔断 + 降级模式 |
 | 安全 | 默认最小权限，但少打扰 | 沙盒即边界 + 角色裁剪 + 技能不自我授权 |
-| 成本 | 有硬上限 | attempts 账本 + 日/月上限 + 异常轮告警 |
+| 成本 | 有硬上限 | attempts 账本 + 日/月 token 上限 + 异常轮告警（金额不记，见 D20） |
 | 可维护 | 改一层不牵动其它层 | 依赖方向约束 + 层间只走契约 |
 | 可移植 | riscv64 交叉编译 | 无原生私有依赖；TLS/C 依赖已实测 |
 | 可观测 | 任一异常可定位到轮/工具 | 结构化 trace + 回放 |
@@ -249,7 +255,7 @@ remind(时间, 内容) → 写任务行 → 调度器 sleep 到期
 
 | 模块 | 家用 | 客服 | 家教 | 复用度 |
 |---|---|---|---|---|
-| 通道 | Telegram | Web+工单 | TG/App | 高 |
+| 通道 | Telegram / 微信 | Web+工单 | TG/App | 高 |
 | Turn loop | 单人低频 | 高并发 | 一家多孩子 | 高 |
 | 工具面 | 打印/提醒/看图 | 查单/退款 | 出题/批改 | 高 |
 | 治理机制 | owner/member | 客户/坐席 | 家长/孩子 | 机制高、策略不同 |
@@ -271,7 +277,7 @@ apps/cs/      ...
 
 ## 10. 非目标
 
-- 不做多租户权限体系（只有 owner / member）。
+- 不做多租户权限体系（只有 owner / member；角色门禁尚未实现，见 D30）。
 - 不做向量检索（触发条件见 `INTERFACES.md §3.4`）。
 - 不做对等多 agent 网络（拓扑单层、`depth ≤ 1`，见 D19）。
 - 不做子 agent 递归派生、共享父历史、代其申请审批。
