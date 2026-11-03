@@ -4,6 +4,10 @@
 # 其余常用属性显式列出——这样"支持哪些纸型""能不能双面"都能直接答。
 # 真遇到超大输出也不怕：工具结果超过 12k 字会落盘，只留首尾 + 路径。
 #
+# 注意：`requested-attributes` 的值必须**写在一行、用逗号分隔**。
+# 旧版 ipptool（板上的 CUPS 2.3/2.4 早期）不接受多行关键字列表，
+# 报错形如 `Unexpected token printer-info`——别改成一行一个。
+#
 # 用法（由 commands.d/supplies.toml 调用）：
 #   ipptool -t ipp://localhost/printers/<队列> /etc/chuan/ipptool/supplies.test
 {
@@ -13,34 +17,7 @@
     ATTR charset attributes-charset utf-8
     ATTR language attributes-natural-language en
     ATTR uri printer-uri $uri
-    ATTR keyword requested-attributes
-        printer-description
-        printer-info
-        printer-location
-        printer-make-and-model
-        printer-state
-        printer-state-reasons
-        printer-is-accepting-jobs
-        document-format-default
-        document-format-supported
-        media-default
-        media-supported
-        media-ready
-        sides-default
-        sides-supported
-        print-color-mode-default
-        print-color-mode-supported
-        print-quality-default
-        print-quality-supported
-        copies-default
-        copies-supported
-        output-bin-default
-        output-bin-supported
-        finishing-supported
-        marker-names
-        marker-levels
-        marker-colors
-    DISPLAY printer-description
+    ATTR keyword requested-attributes printer-info,printer-location,printer-make-and-model,printer-state,printer-state-reasons,printer-is-accepting-jobs,document-format-default,document-format-supported,media-default,media-supported,media-ready,sides-default,sides-supported,print-color-mode-default,print-color-mode-supported,print-quality-default,print-quality-supported,copies-default,copies-supported,output-bin-default,output-bin-supported,finishing-supported,marker-names,marker-levels,marker-colors
     DISPLAY printer-location
     DISPLAY printer-make-and-model
     DISPLAY printer-state
