@@ -323,6 +323,12 @@ MITM（自签 CA 进沙盒信任库）；要覆盖两条 lane 就得在离线 ne
    直接停 run、不自动重试，并把"额度已用尽 + 约多久可再试"回给主人（5 小时 / 每周 / 每月口径由服务商给）。
 5. 观测：`/usage`（今日/本月，按 agent 与 conv 分）、`/agents`（运行中子 agent，可取消）、
    `/tasks`（后台任务进度）。
+6. **缓存命中单独记账**（schema V7）：`usage_rollup` / `usage.recorded` 增 `cache_hit_tokens` 与
+   `cache_write_tokens`，只存原始 token，命中率查询时算；`/usage` 按模型分行展示，跨模型不平均。
+   解析层把 DeepSeek（`prompt_cache_hit_tokens`）、OpenAI/智谱（`prompt_tokens_details.cached_tokens`）、
+   Anthropic（`cache_read/creation_input_tokens`）归一化为"输入包含命中"的统一口径。
+   目的：换模型（如 DeepSeek 缓存命中/未命中差价大）前先有基线，后续据此优化上下文前缀稳定性。
+   仍旧不引入 `[pricing]`：缓存 token 数本地能算准，单价随时变。
 
 **理由**：没有账本的多 agent 是费用放大器。实测基线：37 个有用量的 run 均 9.4k prompt token，
 一次委托 ≈ 一次普通 run——放大倍数就等于派发次数，必须有硬闸门。

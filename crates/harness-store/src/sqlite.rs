@@ -563,13 +563,17 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
             let agent = agent_of(&conv.0);
             conn.execute(
                 "INSERT INTO usage_rollup
-                   (at, model, prompt_tokens, completion_tokens, cost_est, conv_id, run_id, agent)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                   (at, model, prompt_tokens, completion_tokens,
+                    cache_hit_tokens, cache_write_tokens,
+                    cost_est, conv_id, run_id, agent)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![
                     now_ms(),
                     u.model,
                     u.prompt_tokens,
                     u.completion_tokens,
+                    u.cache_hit_tokens,
+                    u.cache_write_tokens,
                     u.cost_est,
                     conv.0,
                     run.0,
@@ -589,6 +593,8 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
                         "model": u.model,
                         "prompt_tokens": u.prompt_tokens,
                         "completion_tokens": u.completion_tokens,
+                        "cache_hit_tokens": u.cache_hit_tokens,
+                        "cache_write_tokens": u.cache_write_tokens,
                         "cost_est": u.cost_est,
                     }),
                     dedupe_key: None,
@@ -876,13 +882,17 @@ fn rebuild(conn: &Connection) -> Result<(), StoreError> {
             EventKind::UsageRecorded => {
                 conn.execute(
                     "INSERT INTO usage_rollup
-                       (at, model, prompt_tokens, completion_tokens, cost_est, conv_id, run_id, agent)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                       (at, model, prompt_tokens, completion_tokens,
+                        cache_hit_tokens, cache_write_tokens,
+                        cost_est, conv_id, run_id, agent)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                     params![
                         at,
                         v["model"].as_str().unwrap_or("unknown"),
                         v["prompt_tokens"].as_u64().unwrap_or(0) as i64,
                         v["completion_tokens"].as_u64().unwrap_or(0) as i64,
+                        v["cache_hit_tokens"].as_u64().unwrap_or(0) as i64,
+                        v["cache_write_tokens"].as_u64().unwrap_or(0) as i64,
                         v["cost_est"].as_f64().unwrap_or(0.0),
                         conv_id,
                         run_id,
@@ -1342,6 +1352,8 @@ impl ReadTx for SqliteRead {
                 "SELECT agent,
                         COALESCE(SUM(prompt_tokens),0),
                         COALESCE(SUM(completion_tokens),0),
+                        COALESCE(SUM(cache_hit_tokens),0),
+                        COALESCE(SUM(cache_write_tokens),0),
                         COALESCE(SUM(cost_est),0)
                  FROM usage_rollup WHERE at>=?1 GROUP BY agent",
             )
@@ -1353,7 +1365,9 @@ impl ReadTx for SqliteRead {
                     UsageTotal {
                         prompt_tokens: r.get::<_, i64>(1)? as u64,
                         completion_tokens: r.get::<_, i64>(2)? as u64,
-                        cost_est: r.get::<_, f64>(3)?,
+                        cache_hit_tokens: r.get::<_, i64>(3)? as u64,
+                        cache_write_tokens: r.get::<_, i64>(4)? as u64,
+                        cost_est: r.get::<_, f64>(5)?,
                     },
                 ))
             })
@@ -1371,20 +1385,57 @@ impl ReadTx for SqliteRead {
     }
 
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError> {
-        let (p, c, cost): (i64, i64, f64) = self
+        let (p, c, hit, write, cost): (i64, i64, i64, i64, f64) = self
             .conn
             .query_row(
                 "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
+                        COALESCE(SUM(cache_hit_tokens),0), COALESCE(SUM(cache_write_tokens),0),
                         COALESCE(SUM(cost_est),0) FROM usage_rollup WHERE at>=?1",
                 params![since],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .map_err(map_err)?;
         Ok(UsageTotal {
             prompt_tokens: p as u64,
             completion_tokens: c as u64,
+            cache_hit_tokens: hit as u64,
+            cache_write_tokens: write as u64,
             cost_est: cost,
         })
+    }
+
+    async fn usage_by_model(
+        &mut self,
+        since: Timestamp,
+    ) -> Result<Vec<(String, UsageTotal)>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT model,
+                        COALESCE(SUM(prompt_tokens),0),
+                        COALESCE(SUM(completion_tokens),0),
+                        COALESCE(SUM(cache_hit_tokens),0),
+                        COALESCE(SUM(cache_write_tokens),0),
+                        COALESCE(SUM(cost_est),0)
+                 FROM usage_rollup WHERE at>=?1 GROUP BY model
+                 ORDER BY SUM(prompt_tokens)+SUM(completion_tokens) DESC",
+            )
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map(params![since], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    UsageTotal {
+                        prompt_tokens: r.get::<_, i64>(1)? as u64,
+                        completion_tokens: r.get::<_, i64>(2)? as u64,
+                        cache_hit_tokens: r.get::<_, i64>(3)? as u64,
+                        cache_write_tokens: r.get::<_, i64>(4)? as u64,
+                        cost_est: r.get::<_, f64>(5)?,
+                    },
+                ))
+            })
+            .map_err(map_err)?;
+        rows.collect::<Result<_, _>>().map_err(map_err)
     }
 
     async fn tool_calls(&mut self, conv: ConversationId) -> Result<Vec<harness_kernel::ToolCallRow>, StoreError> {

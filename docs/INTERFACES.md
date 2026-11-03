@@ -177,6 +177,11 @@ pub trait ReadTx: Send {
     async fn get_doc(&mut self, id: DocId) -> Result<Option<Doc>, StoreError>;
     async fn list_docs(&mut self, q: DocQuery) -> Result<Vec<Doc>, StoreError>;
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError>;
+    /// 主会话 / 子 agent 拆分；预算闸门与 `/usage` 共用。
+    async fn usage_split(&mut self, since: Timestamp) -> Result<UsageSplit, StoreError>;
+    /// 按模型拆分（总 token 降序）。命中率跨模型不可比，展示必须分行。
+    async fn usage_by_model(&mut self, since: Timestamp)
+        -> Result<Vec<(String, UsageTotal)>, StoreError>;
     async fn task(&mut self, id: TaskId) -> Result<Option<TaskRecord>, StoreError>;
     /// 恢复用：该会话全部工具调用及其状态（intent/dispatched/finished/abandoned）。
     async fn tool_calls(&mut self, conv: ConversationId) -> Result<Vec<ToolCallRow>, StoreError>;
@@ -209,6 +214,9 @@ pub trait Tx: Send {
     // 归属必须随写操作传入：doc/usage 事件要落在正确的会话与 run 上，否则 rebuild 无法还原。
     async fn upsert_doc(&mut self, conv: ConversationId, run: RunId, doc: Doc) -> Result<(), StoreError>;
     async fn record_usage(&mut self, conv: ConversationId, run: RunId, u: UsageRecord) -> Result<(), StoreError>;
+    // UsageRecord: model, prompt_tokens, completion_tokens,
+    //               cache_hit_tokens, cache_write_tokens, cost_est
+    // cache_* 只存原始 token，命中率查询时算（口径可能随服务商变，不落库）。
 
     async fn commit(self: Box<Self>) -> Result<(), StoreError>;
 }
@@ -333,7 +341,7 @@ stream     中立聚合（文本、推理、工具参数拼接、usage）
 driver     Turn 驱动（调 wire、消费 stream、产出 Step）
 ```
 
-- `WireDelta`：`Text | Reasoning | ToolCall{index,id,name,args} | Finish | Usage`。`args` 既可是分片（OpenAI/Anthropic），也可是完整 JSON（Gemini）。
+- `WireDelta`：`Text | Reasoning | ToolCall{index,id,name,args} | Finish | Usage(UsageDelta)`。`UsageDelta` 统一为 `prompt_tokens`（含命中）/ `completion_tokens` / `cache_hit_tokens` / `cache_write_tokens`：DeepSeek 取 `prompt_cache_hit_tokens`，OpenAI/智谱取 `prompt_tokens_details.cached_tokens`，Anthropic 把 `cache_read/creation_input_tokens` 加回输入。`args` 既可是分片（OpenAI/Anthropic），也可是完整 JSON（Gemini）。
 - `Wire::decode(payload) -> Vec<WireDelta>`；`Wire::conversation(history, tools) -> Box<dyn WireConversation>`。
 - `WireConversation`：`encode(model, tools) -> Vec<u8>` / `on_assistant` / `on_tool_result`。消息模型、system 位置、tool_result 形状都归它管。
 - **加一个新协议 = 新写一个 `Wire` 实现**；聚合器、传输、driver、内核一行不动。

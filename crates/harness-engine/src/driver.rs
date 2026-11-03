@@ -214,11 +214,13 @@ impl<T: SseTransport + 'static> WireTurn<T> {
             return Err(EngineError::Interrupted);
         }
 
-        if let Some((p, c)) = done.usage {
+        if let Some(u) = done.usage {
             self.usage.push(UsageRecord {
                 model: self.model.clone(),
-                prompt_tokens: p,
-                completion_tokens: c,
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                cache_hit_tokens: u.cache_hit_tokens,
+                cache_write_tokens: u.cache_write_tokens,
                 cost_est: 0.0,
             });
         }

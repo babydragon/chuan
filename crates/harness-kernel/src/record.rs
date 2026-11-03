@@ -158,6 +158,10 @@ pub struct UsageRecord {
     pub model: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// 本次输入中命中缓存的 token 数。服务商不上报时记 0（区分不了"没命中"与"没上报"）。
+    pub cache_hit_tokens: u32,
+    /// 写入缓存的 token 数（Anthropic 口径；OpenAI 兼容面通常为 0）。
+    pub cache_write_tokens: u32,
     pub cost_est: f64,
 }
 
@@ -165,12 +169,24 @@ pub struct UsageRecord {
 pub struct UsageTotal {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub cache_hit_tokens: u64,
+    pub cache_write_tokens: u64,
     pub cost_est: f64,
 }
 
 impl UsageTotal {
     pub fn tokens(&self) -> u64 {
         self.prompt_tokens + self.completion_tokens
+    }
+
+    /// 缓存命中率 = 命中 / 输入。三种主流口径的 `prompt_tokens` 都含命中部分，
+    /// 所以可直接相除；`prompt=0`（没有调用或服务商没上报）返回 `None`，
+    /// 不要当成 0% 展示。
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        if self.prompt_tokens == 0 {
+            return None;
+        }
+        Some((self.cache_hit_tokens.min(self.prompt_tokens) as f64) / (self.prompt_tokens as f64))
     }
 }
 

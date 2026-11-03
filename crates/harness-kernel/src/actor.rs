@@ -91,6 +91,20 @@ fn shard_text(s: &str, n: usize) -> Vec<String> {
     out
 }
 
+/// 缓存命中率后缀。服务商不上报（`cache_hit_tokens == 0`）时整段省略：
+/// 不写"0%"——那会把"没上报"误读成"完全没命中"。
+fn cache_suffix(u: &crate::record::UsageTotal) -> String {
+    match u.cache_hit_rate() {
+        Some(rate) if u.cache_hit_tokens > 0 => format!(
+            " · 缓存命中 {:.1}%（{}/{}）",
+            rate * 100.0,
+            short_tokens(u.cache_hit_tokens),
+            short_tokens(u.prompt_tokens)
+        ),
+        _ => String::new(),
+    }
+}
+
 /// `/usage` 的一行。`cost_est` 为 0 时明说未配价目，别让人以为是免费；
 /// `limit > 0` 时把额度一起写出来，省得再去翻配置。
 fn usage_line(label: &str, u: &crate::record::UsageTotal, limit: u64) -> String {
@@ -105,9 +119,20 @@ fn usage_line(label: &str, u: &crate::record::UsageTotal, limit: u64) -> String 
         String::new()
     };
     format!(
-        "{label}：{} 输入 / {} 输出 · {money}{quota}",
+        "{label}：{} 输入 / {} 输出 · {money}{quota}{}",
         short_tokens(u.prompt_tokens),
-        short_tokens(u.completion_tokens)
+        short_tokens(u.completion_tokens),
+        cache_suffix(u)
+    )
+}
+
+/// 按模型拆的行（只有多模型时才展示）：命中率跨模型不可比，必须分开看。
+fn model_usage_line(model: &str, u: &crate::record::UsageTotal) -> String {
+    format!(
+        "· {model}：{} 输入 / {} 输出{}",
+        short_tokens(u.prompt_tokens),
+        short_tokens(u.completion_tokens),
+        cache_suffix(u)
     )
 }
 
@@ -1117,15 +1142,18 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let zero = || crate::record::UsageTotal {
                     prompt_tokens: 0,
                     completion_tokens: 0,
+                    cache_hit_tokens: 0,
+                    cache_write_tokens: 0,
                     cost_est: 0.0,
                 };
-                let (day, month, split) = match self.store.begin_read().await {
+                let (day, month, split, by_model) = match self.store.begin_read().await {
                     Ok(mut rd) => (
                         rd.usage_total(day_start).await.unwrap_or_else(|_| zero()),
                         rd.usage_total(month_start).await.unwrap_or_else(|_| zero()),
                         rd.usage_split(day_start).await.unwrap_or_default(),
+                        rd.usage_by_model(day_start).await.unwrap_or_default(),
                     ),
-                    Err(_) => (zero(), zero(), Default::default()),
+                    Err(_) => (zero(), zero(), Default::default(), Vec::new()),
                 };
                 let mut text = format!(
                     "{}\n{}",
@@ -1135,11 +1163,21 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let agent_tokens = split.agent.tokens();
                 if agent_tokens > 0 {
                     text.push_str(&format!(
-                        "\n其中子任务今日 {}（{} 输入 / {} 输出）",
+                        "\n其中子任务今日 {}（{} 输入 / {} 输出）{}",
                         short_tokens(agent_tokens),
                         short_tokens(split.agent.prompt_tokens),
-                        short_tokens(split.agent.completion_tokens)
+                        short_tokens(split.agent.completion_tokens),
+                        cache_suffix(&split.agent)
                     ));
+                }
+                // 换过模型时，总量之外再按模型分行：总量对成本有意义，但命中率跨模型不可比，
+                // 要看清各自表现只能分开看。
+                if by_model.len() > 1 {
+                    text.push_str("\n按模型（今日）：");
+                    for (model, u) in &by_model {
+                        text.push('\n');
+                        text.push_str(&model_usage_line(model, u));
+                    }
                 }
                 self.reply(&inb.channel.0, &inb.conversation, &text).await
             }
@@ -3599,7 +3637,8 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunScope, attachment_lines, summarize_args};
+    use super::{RunScope, attachment_lines, cache_suffix, model_usage_line, summarize_args, usage_line};
+    use crate::record::UsageTotal;
 
     /// 早退（`?` / panic）时也必须停 typing、摘掉 runs 条目，
     /// 否则：界面一直"正在输入"、`/status` 永远"运行中"。
@@ -3658,5 +3697,51 @@ mod tests {
         assert!(summarize_args(&args).contains("\"k\""));
         let long = serde_json::json!({ "text": "x".repeat(300) });
         assert!(summarize_args(&long).ends_with('…'));
+    }
+
+    #[test]
+    fn usage_shows_cache_hit_rate_only_when_reported() {
+        let with_cache = UsageTotal {
+            prompt_tokens: 20_000,
+            completion_tokens: 500,
+            cache_hit_tokens: 12_400,
+            cache_write_tokens: 0,
+            cost_est: 0.0,
+        };
+        assert_eq!(cache_suffix(&with_cache), " · 缓存命中 62.0%（12.4k/20.0k）");
+        let line = usage_line("今日", &with_cache, 0);
+        assert!(line.contains("12.4k/20.0k"), "{line}");
+        assert!(line.contains("金额未统计"), "{line}");
+
+        // 服务商不上报时不要写 0%：那会把"没上报"说成"没命中"。
+        let no_cache = UsageTotal {
+            prompt_tokens: 20_000,
+            completion_tokens: 500,
+            cache_hit_tokens: 0,
+            cache_write_tokens: 0,
+            cost_est: 0.0,
+        };
+        assert!(cache_suffix(&no_cache).is_empty());
+        assert!(!usage_line("今日", &no_cache, 0).contains("缓存命中"));
+    }
+
+    #[test]
+    fn model_line_keeps_models_separate() {
+        let a = UsageTotal {
+            prompt_tokens: 1_000,
+            completion_tokens: 100,
+            cache_hit_tokens: 800,
+            cache_write_tokens: 0,
+            cost_est: 0.0,
+        };
+        let b = UsageTotal {
+            prompt_tokens: 1_000,
+            completion_tokens: 100,
+            cache_hit_tokens: 100,
+            cache_write_tokens: 0,
+            cost_est: 0.0,
+        };
+        assert!(model_usage_line("glm-5.3-flash", &a).contains("80.0%"));
+        assert!(model_usage_line("deepseek-v4.1-flash", &b).contains("10.0%"));
     }
 }

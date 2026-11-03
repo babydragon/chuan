@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     fn total(p: u64, c: u64) -> UsageTotal {
-        UsageTotal { prompt_tokens: p, completion_tokens: c, cost_est: 0.0 }
+        UsageTotal { prompt_tokens: p, completion_tokens: c, ..Default::default() }
     }
 
     #[test]

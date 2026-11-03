@@ -1,6 +1,6 @@
 //! Schema 与迁移。只前向，靠 `PRAGMA user_version` 记录版本。
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub const V1: &str = r#"
 CREATE TABLE journal (
@@ -117,4 +117,14 @@ ALTER TABLE approvals ADD COLUMN entry_name TEXT;
 ALTER TABLE approvals ADD COLUMN entry_hash TEXT;
 "#;
 
-pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6)];
+pub const V7: &str = r#"
+-- 缓存命中统计（D20 补充）：
+--   cache_hit_tokens   = 本次输入中命中缓存的部分（DeepSeek / OpenAI / GLM 均上报）
+--   cache_write_tokens = 写入缓存的部分（Anthropic 口径，兼容面通常为 0）
+-- 只存原始 token，命中率在查询时算：口径（分母）可能随服务商变化，不写死。
+ALTER TABLE usage_rollup ADD COLUMN cache_hit_tokens   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage_rollup ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+"#;
+
+pub const MIGRATIONS: &[(i64, &str)] =
+    &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7)];

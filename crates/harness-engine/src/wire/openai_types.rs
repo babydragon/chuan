@@ -106,6 +106,48 @@ pub struct UsageJson {
     pub prompt_tokens: u32,
     #[serde(default)]
     pub completion_tokens: u32,
+    /// DeepSeek：命中/未命中的输入 token；`prompt_tokens = hit + miss`。
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: Option<u32>,
+    /// OpenAI / 智谱 GLM：命中部分是 `prompt_tokens` 的子集。
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Anthropic 口径（当前没有对应 wire，先兼容字段，避免以后重复改结构）。
+    /// 注意：它的 `input_tokens` 不含缓存读写，归一化时要加回去。
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u32>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
+}
+
+impl UsageJson {
+    /// 归一化成统一口径：`prompt` 始终包含缓存命中部分。
+    /// 返回 `(prompt, completion, hit, write)`。
+    pub fn normalized(&self) -> (u32, u32, u32, u32) {
+        let write = self.cache_creation_input_tokens.unwrap_or(0);
+        if let Some(hit) = self.prompt_cache_hit_tokens {
+            // DeepSeek：prompt 已含命中
+            return (self.prompt_tokens, self.completion_tokens, hit, write);
+        }
+        if let Some(hit) = self.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens) {
+            // OpenAI / GLM：cached 是 prompt 的子集
+            return (self.prompt_tokens, self.completion_tokens, hit, write);
+        }
+        if let Some(hit) = self.cache_read_input_tokens {
+            // Anthropic：input 不含缓存读/写，加回去才是完整输入
+            let prompt = self.prompt_tokens.saturating_add(hit).saturating_add(write);
+            return (prompt, self.completion_tokens, hit, write);
+        }
+        (self.prompt_tokens, self.completion_tokens, 0, write)
+    }
 }
 
 impl Msg {
@@ -156,5 +198,48 @@ impl Msg {
             tool_calls: None,
             tool_call_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::UsageJson;
+
+    fn parse(raw: &str) -> UsageJson {
+        serde_json::from_str(raw).expect("usage 应可解析")
+    }
+
+    #[test]
+    fn deepseek_hit_and_miss_are_already_in_prompt() {
+        let u = parse(
+            r#"{"prompt_tokens":100,"completion_tokens":7,
+                "prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20}"#,
+        );
+        assert_eq!(u.normalized(), (100, 7, 80, 0));
+    }
+
+    #[test]
+    fn openai_and_glm_cached_tokens_are_a_subset() {
+        let u = parse(
+            r#"{"prompt_tokens":100,"completion_tokens":7,
+                "prompt_tokens_details":{"cached_tokens":60}}"#,
+        );
+        assert_eq!(u.normalized(), (100, 7, 60, 0));
+    }
+
+    #[test]
+    fn anthropic_cache_tokens_are_added_to_input() {
+        let u = parse(
+            r#"{"prompt_tokens":10,"completion_tokens":7,
+                "cache_read_input_tokens":90,"cache_creation_input_tokens":5}"#,
+        );
+        // input 不含缓存读写 → 完整输入 = 10 + 90 + 5
+        assert_eq!(u.normalized(), (105, 7, 90, 5));
+    }
+
+    #[test]
+    fn providers_without_cache_fields_report_zero() {
+        let u = parse(r#"{"prompt_tokens":12,"completion_tokens":3}"#);
+        assert_eq!(u.normalized(), (12, 3, 0, 0));
     }
 }

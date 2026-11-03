@@ -88,6 +88,9 @@ pub trait ReadTx: Send {
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError>;
     /// 同一时间窗内按主体拆分（主会话 / 子 agent）。`/usage` 与预算闸门都用它。
     async fn usage_split(&mut self, since: Timestamp) -> Result<UsageSplit, StoreError>;
+    /// 同一时间窗内按模型拆分，按总 token 降序。
+    /// 不同模型的命中率不可比，`/usage` 必须分行展示。
+    async fn usage_by_model(&mut self, since: Timestamp) -> Result<Vec<(String, UsageTotal)>, StoreError>;
     async fn task(&mut self, id: TaskId) -> Result<Option<TaskRecord>, StoreError>;
     /// 恢复用：该会话里尚未 finished/abandoned 的调用。
     async fn tool_calls(&mut self, conv: ConversationId) -> Result<Vec<ToolCallRow>, StoreError>;

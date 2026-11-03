@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use harness_kernel::{CallId, EventSink, StreamEvent, ToolCallRequest};
 
-use crate::wire::WireDelta;
+use crate::wire::{UsageDelta, WireDelta};
 
 #[derive(Default)]
 struct CallAcc {
@@ -19,7 +19,7 @@ pub struct Aggregator {
     pub reasoning: String,
     calls: BTreeMap<u32, CallAcc>,
     pub finish_reason: Option<String>,
-    pub usage: Option<(u32, u32)>,
+    pub usage: Option<UsageDelta>,
 }
 
 pub struct Aggregate {
@@ -27,7 +27,7 @@ pub struct Aggregate {
     pub reasoning: String,
     pub calls: Vec<ToolCallRequest>,
     pub finish_reason: Option<String>,
-    pub usage: Option<(u32, u32)>,
+    pub usage: Option<UsageDelta>,
 }
 
 impl Aggregator {
@@ -58,8 +58,8 @@ impl Aggregator {
                 }
             }
             WireDelta::Finish(f) => self.finish_reason = Some(f),
-            WireDelta::Usage { prompt_tokens, completion_tokens } => {
-                self.usage = Some((prompt_tokens, completion_tokens));
+            WireDelta::Usage(u) => {
+                self.usage = Some(u);
             }
         }
     }

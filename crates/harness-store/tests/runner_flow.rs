@@ -680,6 +680,8 @@ async fn over_budget_blocks_run_with_visible_message() {
                 model: "m".into(),
                 prompt_tokens: 80,
                 completion_tokens: 30,
+                cache_hit_tokens: 0,
+                cache_write_tokens: 0,
                 cost_est: 0.0,
             },
         )
@@ -764,6 +766,8 @@ async fn over_budget_blocks_delegation() {
                 model: "m".into(),
                 prompt_tokens: 500,
                 completion_tokens: 500,
+                cache_hit_tokens: 0,
+                cache_write_tokens: 0,
                 cost_est: 0.0,
             },
         )

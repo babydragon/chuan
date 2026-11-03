@@ -488,6 +488,8 @@ impl ReadTx for EphemeralRead {
             let slot = if conv.starts_with("sub:") { &mut split.agent } else { &mut split.main };
             slot.prompt_tokens += u.prompt_tokens as u64;
             slot.completion_tokens += u.completion_tokens as u64;
+            slot.cache_hit_tokens += u.cache_hit_tokens as u64;
+            slot.cache_write_tokens += u.cache_write_tokens as u64;
             slot.cost_est += u.cost_est;
         }
         Ok(split)
@@ -499,10 +501,33 @@ impl ReadTx for EphemeralRead {
             if *at >= since {
                 t.prompt_tokens += u.prompt_tokens as u64;
                 t.completion_tokens += u.completion_tokens as u64;
+                t.cache_hit_tokens += u.cache_hit_tokens as u64;
+                t.cache_write_tokens += u.cache_write_tokens as u64;
                 t.cost_est += u.cost_est;
             }
         }
         Ok(t)
+    }
+
+    async fn usage_by_model(
+        &mut self,
+        since: Timestamp,
+    ) -> Result<Vec<(String, UsageTotal)>, StoreError> {
+        let mut by_model: HashMap<String, UsageTotal> = HashMap::new();
+        for (at, _, u) in &self.state.usage {
+            if *at < since {
+                continue;
+            }
+            let slot = by_model.entry(u.model.clone()).or_default();
+            slot.prompt_tokens += u.prompt_tokens as u64;
+            slot.completion_tokens += u.completion_tokens as u64;
+            slot.cache_hit_tokens += u.cache_hit_tokens as u64;
+            slot.cache_write_tokens += u.cache_write_tokens as u64;
+            slot.cost_est += u.cost_est;
+        }
+        let mut out: Vec<(String, UsageTotal)> = by_model.into_iter().collect();
+        out.sort_by(|a, b| b.1.tokens().cmp(&a.1.tokens()));
+        Ok(out)
     }
 
     async fn task(&mut self, id: TaskId) -> Result<Option<TaskRecord>, StoreError> {

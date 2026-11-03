@@ -151,7 +151,14 @@ pub async fn suite<S: Store>(store: &S) {
     tx.record_usage(
         conv.clone(),
         run.clone(),
-        UsageRecord { model: "m".into(), prompt_tokens: 10, completion_tokens: 5, cost_est: 0.001 },
+        UsageRecord {
+            model: "m".into(),
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            cache_hit_tokens: 6,
+            cache_write_tokens: 1,
+            cost_est: 0.001,
+        },
     )
     .await
     .unwrap();
@@ -159,7 +166,14 @@ pub async fn suite<S: Store>(store: &S) {
     tx.record_usage(
         ConversationId::from("sub:c1#1"),
         run.clone(),
-        UsageRecord { model: "m".into(), prompt_tokens: 7, completion_tokens: 3, cost_est: 0.002 },
+        UsageRecord {
+            model: "m2".into(),
+            prompt_tokens: 7,
+            completion_tokens: 3,
+            cache_hit_tokens: 0,
+            cache_write_tokens: 0,
+            cost_est: 0.002,
+        },
     )
     .await
     .unwrap();
@@ -170,11 +184,20 @@ pub async fn suite<S: Store>(store: &S) {
     assert_eq!(got.payload["printer"], "HP");
     let total = rd.usage_total(0).await.unwrap();
     assert_eq!(total.prompt_tokens, 17);
+    assert_eq!(total.cache_hit_tokens, 6, "命中 token 要汇总");
+    assert_eq!(total.cache_write_tokens, 1, "写缓存 token 要汇总");
     assert!((total.cost_est - 0.003).abs() < 1e-9);
     let split = rd.usage_split(0).await.unwrap();
     assert_eq!(split.main.prompt_tokens, 10, "主会话只算自己的");
     assert_eq!(split.agent.prompt_tokens, 7, "子 agent 的用量要单独归集");
+    assert_eq!(split.main.cache_hit_tokens, 6);
+    assert_eq!(split.agent.cache_hit_tokens, 0);
     assert_eq!(split.main.tokens() + split.agent.tokens(), total.tokens());
+    let by_model = rd.usage_by_model(0).await.unwrap();
+    assert_eq!(by_model.len(), 2, "两个模型必须分开统计");
+    assert_eq!(by_model[0].0, "m", "按总 token 降序");
+    assert_eq!(by_model[0].1.cache_hit_tokens, 6);
+    assert_eq!(by_model[1].0, "m2");
     let listed = rd.list_docs(DocQuery { scopes: vec!["family".into()], kinds: vec![], limit: 10 }).await.unwrap();
     assert_eq!(listed.len(), 1);
 }
@@ -207,7 +230,13 @@ async fn sqlite_rebuild_matches_live_state() {
         let mut rd = store.begin_read().await.unwrap();
         let total = rd.usage_total(0).await.unwrap();
         let split = rd.usage_split(0).await.unwrap();
-        (total.prompt_tokens, split.main.prompt_tokens, split.agent.prompt_tokens)
+        (
+            total.prompt_tokens,
+            split.main.prompt_tokens,
+            split.agent.prompt_tokens,
+            total.cache_hit_tokens,
+            total.cache_write_tokens,
+        )
     };
 
     store.rebuild().await.unwrap();
@@ -220,7 +249,13 @@ async fn sqlite_rebuild_matches_live_state() {
         let mut rd = store.begin_read().await.unwrap();
         let total = rd.usage_total(0).await.unwrap();
         let split = rd.usage_split(0).await.unwrap();
-        (total.prompt_tokens, split.main.prompt_tokens, split.agent.prompt_tokens)
+        (
+            total.prompt_tokens,
+            split.main.prompt_tokens,
+            split.agent.prompt_tokens,
+            total.cache_hit_tokens,
+            total.cache_write_tokens,
+        )
     };
 
     assert_eq!(before, after, "rebuild 后 tool_calls 必须一致");
@@ -285,4 +320,58 @@ async fn fts_finds_facts_and_respects_delete() {
         .await
         .unwrap();
     assert!(hits.is_empty(), "删除后不应再命中: {hits:?}");
+}
+
+/// 老库（V6）升级到 V7：新列必须出现在表里，历史行按 0 补齐，不能丢老数据。
+#[tokio::test]
+async fn sqlite_v6_db_migrates_cache_columns() {
+    use crate::schema::MIGRATIONS;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v6.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 6) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version={version}")).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO usage_rollup
+               (at, model, prompt_tokens, completion_tokens, cost_est, conv_id, run_id, agent)
+             VALUES (1, 'old-model', 100, 10, 0.0, 'c1', 'r1', 'main')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = SqliteStore::open(&path).await.unwrap();
+    let mut rd = store.begin_read().await.unwrap();
+    let old = rd.usage_total(0).await.unwrap();
+    assert_eq!(old.prompt_tokens, 100, "迁移不能丢老数据");
+    assert_eq!(old.cache_hit_tokens, 0, "历史行没有缓存数据，按 0 补齐");
+    assert_eq!(old.cache_write_tokens, 0);
+
+    let mut tx = store.begin_write().await.unwrap();
+    tx.record_usage(
+        ConversationId::from("c1"),
+        RunId::from("r2"),
+        UsageRecord {
+            model: "new-model".into(),
+            prompt_tokens: 50,
+            completion_tokens: 5,
+            cache_hit_tokens: 40,
+            cache_write_tokens: 0,
+            cost_est: 0.0,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut rd = store.begin_read().await.unwrap();
+    let total = rd.usage_total(0).await.unwrap();
+    assert_eq!(total.cache_hit_tokens, 40);
+    let by_model = rd.usage_by_model(0).await.unwrap();
+    assert_eq!(by_model.len(), 2);
+    assert!(by_model.iter().any(|(m, u)| m == "new-model" && u.cache_hit_tokens == 40));
 }

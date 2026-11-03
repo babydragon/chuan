@@ -112,7 +112,7 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `tasks` | 调度与租约（CAS） | `task.*` |
 | `approvals` | 审批状态、单次消费、**卡片 msg_ref**；V6 增 `kind`(`permission`/`confirm`) / `requester` / `entry_name` / `entry_hash` | `approval.*` |
 | `docs` | 记忆/配置/画像（含 payload 与 version） | `doc.upserted` |
-| `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出）；`cost_est` 恒 0（金额不估算，D20） | `usage.recorded` |
+| `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出；V7：`cache_hit_tokens` / `cache_write_tokens`）；`cost_est` 恒 0（金额不估算，D20） | `usage.recorded` |
 | ~~`artifacts`~~ | **无独立表**：产物是 `artifacts/` 下的文件 + `artifact.created` 事件，按 sha256 寻址 | `artifact.created` |
 | `docs_fts`（未来） | FTS5 检索 | `doc.upserted` |
 | `chunks` / `chunks_fts` / `doc_vectors`（未来） | 知识库 | ingest 管道 |
@@ -199,6 +199,8 @@ async fn messages(&mut self, conv: ConversationId, from: Seq, max_turns: u16)
   历史行按 `kind = 'confirm'` / `requester = ''` 补齐（那时确实只有"单次确认"一种）。
   `commands.d/` 是**文件**，不进 schema——它由 `command.*` 事件与文件 hash 共同兜底，
   不进 `rebuild` 的可重建集合（与 `services.d/` 同理）。
+- V7（缓存命中，D20 §6）给 `usage_rollup` 加 `cache_hit_tokens` / `cache_write_tokens`；
+  历史行记 0，表示"没采到"，不反推。命中率查询时用 `hit / prompt` 算。
 - `run.finished.status` 增加 `blocked`：旧代码读到未知状态应按 `failed` 处理，不要当成成功。
 - `rebuild` 是验收工具，不是日常路径：删投影表 → 按 `(created_at, conv_id, seq)` 折叠 → 比对结果。
 - 不支持二进制回滚（旧代码读不了新 schema）。

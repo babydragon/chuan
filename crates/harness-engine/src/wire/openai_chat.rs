@@ -13,10 +13,13 @@ impl Wire for OpenAiChat {
             .map_err(|e| EngineError::Provider(format!("bad chunk: {e}: {payload}")))?;
         let mut out = Vec::new();
         if let Some(u) = chunk.usage {
-            out.push(WireDelta::Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-            });
+            let (prompt, completion, hit, write) = u.normalized();
+            out.push(WireDelta::Usage(super::UsageDelta {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                cache_hit_tokens: hit,
+                cache_write_tokens: write,
+            }));
         }
         for choice in chunk.choices {
             if let Some(c) = choice.delta.content {
