@@ -214,8 +214,11 @@ require_approval = []
 - 坏了怎么办：单个文件解析失败**只废那一条**（其余照常），日志里有一行
   `命令条目解析失败（只废这一条）`，指名是哪个文件、为什么。
 - **墨量只能走 IPP**：`lpstat -l` 在板上实测 exit=0 但**不报** marker-levels，
-  所以默认的 `supplies` 用 `ipptool -tv ipp://localhost/printers/{printer} …`。
-  IPP 没有"默认打印机"的 URI，所以它带一个 `printer` 枚举；安装脚本首次安装时
+  所以默认的 `supplies` 用 `ipptool -t ipp://localhost/printers/{printer} /etc/chuan/ipptool/supplies.test`。
+  `/etc/chuan/ipptool/supplies.test` 是**定向查询**：状态、能力、`media-supported`（支持哪些纸型）、
+  `sides-supported`、marker-* 都查，但不含 `media-col-database` 这类几十 KB 的块。
+  要临时全量排查，仍可以用 `lan_exec`（会审批）。
+  IPP 没有"默认打印机"的 URI，所以条目带一个 `printer` 枚举；安装脚本首次安装时
   会用 `lpstat -e` 把枚举填成本机队列名（换机器就手改这一行）。
 - 模型怎么知道有条目：每轮 system 会注入**已生效条目的签名**（名字 + 参数域，
   不含命令原文），并写明"有对应条目就用它"。不注入的话它只会用 `lan_exec`（每次都要审批）。

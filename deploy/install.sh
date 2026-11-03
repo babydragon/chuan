@@ -199,6 +199,8 @@ ensure_dir "$ETC/prompts"    0750 root "$SVC_GROUP"
 ensure_dir "$ETC/services.d" 0770 root "$SVC_GROUP"
 # 命令条目（D31）：内核在主人批准后写，agent 无写路径。与 services.d 同权限。
 ensure_dir "$ETC/commands.d"  0770 root "$SVC_GROUP"
+# ipptool 的窄查询定义（耗材/墨量）：只读数据，不需要可写
+ensure_dir "$ETC/ipptool"     0755 root root
 # 角色目录：agent 的 role 工具会往里写，必须让服务用户可写（与 services.d 同理）
 ensure_dir "$ETC/roles"      0770 root "$SVC_GROUP"
 # 权限申请草稿（capability 工具只写这里，不改配置）
@@ -225,6 +227,15 @@ else
       run install -Dm0640 -o root -g "$SVC_GROUP" "$src" "$ETC/commands.d/$f.toml" || true
     fi
   done
+  # ipptool 的窄查询定义（supplies 指向它）
+  src="$(asset "ipptool/supplies.test" || true)"
+  if [[ -n $src ]]; then
+    if [[ -f "$ETC/ipptool/supplies.test" ]]; then
+      say "$ETC/ipptool/supplies.test 已存在，保持不变"
+    else
+      run install -Dm0644 -o root -g root "$src" "$ETC/ipptool/supplies.test" || true
+    fi
+  fi
   # supplies 需要打印机名（IPP 没有"默认打印机"的 URI）：首次安装按本机队列填一次枚举。
   # 只改占位 ["default"]，不覆盖已经填过的文件。
   if [[ -f "$ETC/commands.d/supplies.toml" ]] && command -v lpstat >/dev/null 2>&1; then
@@ -351,6 +362,7 @@ cat <<NEXT
   /etc/chuan/secrets        0750 root:$SVC_GROUP   （文件见上）
   /etc/chuan/services.d     0770 root:$SVC_GROUP   （运行期加的服务写这里）
   /etc/chuan/commands.d     0770 root:$SVC_GROUP   （命令条目，D31：写进表即免审批）
+  /etc/chuan/ipptool        0755 root:root         （ipptool 查询定义，如墨量）
   /etc/chuan/roles          0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
   /etc/chuan/capabilities   0770 root:$SVC_GROUP   （权限申请草稿，agent 只写这里）
   /etc/chuan/playbooks      0750 root:$SVC_GROUP

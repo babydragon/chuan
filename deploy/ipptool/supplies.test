@@ -1,0 +1,63 @@
+# 打印机属性查询（不是"只查墨量"）：状态、能力、纸型、耗材都在这里。
+#
+# 只排除 `all` 里最占地方的两块（media-col-database / media-col-ready，动辄几十 KB），
+# 其余常用属性显式列出——这样"支持哪些纸型""能不能双面"都能直接答。
+# 真遇到超大输出也不怕：工具结果超过 12k 字会落盘，只留首尾 + 路径。
+#
+# 用法（由 commands.d/supplies.toml 调用）：
+#   ipptool -t ipp://localhost/printers/<队列> /etc/chuan/ipptool/supplies.test
+{
+    NAME "printer-info"
+    OPERATION Get-Printer-Attributes
+    GROUP operation-attributes-tag
+    ATTR charset attributes-charset utf-8
+    ATTR language attributes-natural-language en
+    ATTR uri printer-uri $uri
+    ATTR keyword requested-attributes
+        printer-description
+        printer-info
+        printer-location
+        printer-make-and-model
+        printer-state
+        printer-state-reasons
+        printer-is-accepting-jobs
+        document-format-default
+        document-format-supported
+        media-default
+        media-supported
+        media-ready
+        sides-default
+        sides-supported
+        print-color-mode-default
+        print-color-mode-supported
+        print-quality-default
+        print-quality-supported
+        copies-default
+        copies-supported
+        output-bin-default
+        output-bin-supported
+        finishing-supported
+        marker-names
+        marker-levels
+        marker-colors
+    DISPLAY printer-description
+    DISPLAY printer-location
+    DISPLAY printer-make-and-model
+    DISPLAY printer-state
+    DISPLAY printer-state-reasons
+    DISPLAY printer-is-accepting-jobs
+    DISPLAY document-format-supported
+    DISPLAY media-default
+    DISPLAY media-supported
+    DISPLAY media-ready
+    DISPLAY sides-supported
+    DISPLAY print-color-mode-supported
+    DISPLAY print-quality-supported
+    DISPLAY copies-supported
+    DISPLAY output-bin-default
+    DISPLAY finishing-supported
+    DISPLAY marker-names
+    DISPLAY marker-levels
+    DISPLAY marker-colors
+    STATUS "ok"
+}

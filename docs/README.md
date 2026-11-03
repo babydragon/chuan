@@ -47,7 +47,12 @@
 > **rc.37**：修 `supplies` 读不到墨量——`lpstat -l` 不报 marker-levels（板上实测 exit=0、
 > 输出为空），默认条目改走 `ipptool -tv …/get-printer-attributes.test`；打印机枚举由安装脚本
 > 按 `lpstat -e` 自动填。顺带修 `/prompt` 的动态注入清单漏列"可用命令条目"。
-> 预发布到 `v0.1.0-rc.37`，正式版待定。
+> **rc.38**：① 工具输出超限不再闷截断——全文落 `/ws/.tool-results/<call>.txt`，
+> 上下文只留**首 6k + 尾 2k + 确切路径**（先打码再落盘，`msg.tool_result` 记 `spill`）；
+> ② `supplies` 改用定向查询 `/etc/chuan/ipptool/supplies.test`：状态、能力、
+> `media-supported`（支持纸型）、`sides-supported`、marker-* 都查，但不含
+> `media-col-database` 这类几十 KB 的块（要全量排查仍可用 `lan_exec`）。
+> 预发布到 `v0.1.0-rc.38`，正式版待定。
 
 ---
 

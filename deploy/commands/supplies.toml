@@ -1,17 +1,18 @@
-# 耗材/墨量：CUPS 的 `lpstat -l` **不报** marker-levels（板上实测：exit=0、输出为空），
-# 必须走 IPP 的 Get-Printer-Attributes。ipptool 是 CUPS 自带的，输出里带
-# marker-names / marker-levels / marker-colors。
+# 打印机属性（状态 / 能力 / 纸型 / 耗材）：`lpstat -l` 不报 marker-levels
+# （板上实测 exit=0、输出为空），必须走 IPP。
+# 查询定义见 /etc/chuan/ipptool/supplies.test：列出常用属性，但不是全量 dump；
+# 输出再大也不怕——工具结果超 12k 字会落盘，只留首尾 + 路径。
 #
-# 打印机名必须显式给（IPP 没有"默认打印机"这个 URI）。安装脚本在首次安装时
-# 会用 `lpstat -e` 把这里的枚举填成本机队列名；以后换机器就手改这一行。
+# 打印机名必须显式给（IPP 没有"默认打印机"这个 URI）。安装脚本首次安装时会用
+# `lpstat -e` 把枚举填成本机队列名；换机器就手改这一行。
 env = "lan"
 argv = [
   "/usr/bin/ipptool",
-  "-tv",
+  "-t",
   "ipp://localhost/printers/{printer}",
-  "/usr/share/cups/ipptool/get-printer-attributes.test",
+  "/etc/chuan/ipptool/supplies.test",
 ]
-timeout_ms = 20000
+timeout_ms = 15000
 who = "anyone"
 [params]
 printer = { enum = ["default"] }

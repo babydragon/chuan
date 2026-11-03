@@ -315,7 +315,8 @@
 
 - [ ] `commands.d/` 是 `0770 root:chuan`，由 systemd 起的进程仍能写（与 `services.d` 同一个坑）
 - [ ] 四条 `env = "lan"` 条目零卡执行：`printer_list` / `printer_status` / `supplies` / `print_file`
-- [ ] `supplies` 能读到墨量：`ipptool -tv ipp://localhost/printers/<队列>` 有 `marker-levels`
+- [ ] `supplies` 能读到墨量与纸型：`ipptool -t ipp://localhost/printers/<队列> /etc/chuan/ipptool/supplies.test`
+      输出含 `marker-levels` 与 `media-supported`
       （`lpstat -l` 不报墨量，板上 2026-11-03 已确认；队列名要在 `supplies.toml` 的枚举里）
 - [ ] 纸型名以本机为准（`lpoptions -p <printer> -l`）：条目里的 `A4`/`B5`/`photo_4x6` 只是占位
 - [ ] `who = "anyone"` 的条目对 member 也零卡；member 跑原始 `lan_exec` / `host` 得到 `Blocked`，
