@@ -36,5 +36,5 @@
     DISPLAY marker-names
     DISPLAY marker-levels
     DISPLAY marker-colors
-    STATUS "ok"
+    STATUS successful-ok
 }
