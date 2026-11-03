@@ -44,7 +44,10 @@
 > 用户文案集中到 `kernel/copy.rs`。**破坏性**：已有 `[identity]` 必须补 `owner = "<user-id>"`。
 > **rc.36**：修复"有条目却不用"——每轮 system 注入**可用命令条目清单**（名字 + 参数域），
 > 并明确"能命中条目就用 `lan_command`"；此前模型不知道条目存在，查打印机仍走 `lan_exec` 弹审批卡。
-> 预发布到 `v0.1.0-rc.36`，正式版待定。
+> **rc.37**：修 `supplies` 读不到墨量——`lpstat -l` 不报 marker-levels（板上实测 exit=0、
+> 输出为空），默认条目改走 `ipptool -tv …/get-printer-attributes.test`；打印机枚举由安装脚本
+> 按 `lpstat -e` 自动填。顺带修 `/prompt` 的动态注入清单漏列"可用命令条目"。
+> 预发布到 `v0.1.0-rc.37`，正式版待定。
 
 ---
 

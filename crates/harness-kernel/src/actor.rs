@@ -1106,7 +1106,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     &inb.channel.0,
                     &inb.conversation,
                     "以上是配置文件与内置核心段。\n\
-                     另有每轮动态注入（不在这里）：技能目录、MCP 工具目录、角色清单、长期记忆、时间锚点。",
+                     另有每次运行动态注入（不在这里）：技能目录、MCP 工具目录、角色清单、                     可用命令条目、长期记忆、时间锚点。",
                 )
                 .await
             }

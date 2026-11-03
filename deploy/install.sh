@@ -225,6 +225,16 @@ else
       run install -Dm0640 -o root -g "$SVC_GROUP" "$src" "$ETC/commands.d/$f.toml" || true
     fi
   done
+  # supplies 需要打印机名（IPP 没有"默认打印机"的 URI）：首次安装按本机队列填一次枚举。
+  # 只改占位 ["default"]，不覆盖已经填过的文件。
+  if [[ -f "$ETC/commands.d/supplies.toml" ]] && command -v lpstat >/dev/null 2>&1; then
+    printers="$(lpstat -e 2>/dev/null | sed 's/.*/"&"/' | paste -sd, - || true)"
+    if [[ -n ${printers:-} ]]; then
+      sed -i "s|printer = { enum = \[\"default\"\] }|printer = { enum = [$printers] }|" \
+        "$ETC/commands.d/supplies.toml" || true
+      say "supplies 的打印机枚举：$printers"
+    fi
+  fi
 fi
 
 # 4. 配置（不覆盖已有）
