@@ -52,7 +52,11 @@
 > ② `supplies` 改用定向查询 `/etc/chuan/ipptool/supplies.test`：状态、能力、
 > `media-supported`（支持纸型）、`sides-supported`、marker-* 都查，但不含
 > `media-col-database` 这类几十 KB 的块（要全量排查仍可用 `lan_exec`）。
-> 预发布到 `v0.1.0-rc.38`，正式版待定。
+> **rc.39**：修 `ipptool` 定义在 CUPS 2.4.12 上的两处解析不兼容——`requested-attributes`
+> 改**单行逗号分隔**（多行报 `Unexpected token`）、`STATUS` 用 `successful-ok`（`"ok"` 报
+> `Bad STATUS code`）；顺带去掉非标准的 `printer-description`。板上已验证能读到
+> `media-supported` / `sides-supported` / `marker-levels`。
+> 预发布到 `v0.1.0-rc.39`，正式版待定。
 
 ---
 

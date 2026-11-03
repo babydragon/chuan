@@ -213,6 +213,9 @@ require_approval = []
   删除同样是提案：`capability(action="remove_command", name="print_file")`。
 - 坏了怎么办：单个文件解析失败**只废那一条**（其余照常），日志里有一行
   `命令条目解析失败（只废这一条）`，指名是哪个文件、为什么。
+- **改 ipptool 定义时注意兼容性**：`requested-attributes` 的值必须**单行逗号分隔**，
+  `STATUS` 必须是 IPP 关键字（`successful-ok`）。板上 CUPS 2.4.12 对这两点都比开发机严格，
+  写错分别报 `Unexpected token …` / `Bad STATUS code`。
 - **墨量只能走 IPP**：`lpstat -l` 在板上实测 exit=0 但**不报** marker-levels，
   所以默认的 `supplies` 用 `ipptool -t ipp://localhost/printers/{printer} /etc/chuan/ipptool/supplies.test`。
   `/etc/chuan/ipptool/supplies.test` 是**定向查询**：状态、能力、`media-supported`（支持哪些纸型）、
