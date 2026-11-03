@@ -22,6 +22,7 @@ printf '#!/bin/sh\necho fake\n' > "$WORK/pkg/chuan"
 cp "$REPO_ROOT/deploy/chuan.toml.example" "$WORK/pkg/"
 cp "$REPO_ROOT/deploy/chuan.service" "$REPO_ROOT/deploy/chuan-backup.service" \
    "$REPO_ROOT/deploy/chuan-backup.timer" "$REPO_ROOT/deploy/chuan-hostd.service" "$WORK/pkg/"
+cp -r "$REPO_ROOT/deploy/commands" "$WORK/pkg/commands"
 chmod +x "$WORK/pkg/chuan" "$WORK/pkg/install.sh"
 tar -czf "$REL/chuan-v0.0.0-test-x86_64-linux-gnu.tar.gz" -C "$WORK/pkg" .
 cp "$REL/chuan-v0.0.0-test-x86_64-linux-gnu.tar.gz" "$REL/chuan-x86_64-linux-gnu.tar.gz"
