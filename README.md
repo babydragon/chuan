@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="chuan logo" width="260">
+</p>
+
 # chuan（川）· 家庭智能管家 Harness
 
 跑在单板机（RISC-V SBC / riscv64 / 8GB）上的个人助理。Telegram 交互，能执行命令、读写工作区、定时提醒，并支持把调试成功的脚本沉淀为技能。
