@@ -578,7 +578,10 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         let (ok, preview) = match result {
             Ok(out) => {
                 // 值不落地：工具输出在进上下文与账本之前，把像凭据的片段遮掉。
-                let (preview, hits) = crate::leak::redact(&render_preview(&out.content));
+                // **先打码再落盘**——否则 spill 会把凭据原样写到 /ws。
+                let (clean, hits) = crate::leak::redact(&render_text(&out.content));
+                let (preview, spilled) =
+                    preview_or_spill(clean, &workspace.root, &call.call.0);
                 if !hits.is_empty() {
                     tracing::warn!(kinds = ?hits, tool = %call.name, "工具输出里发现凭据形态，已打码");
                 }
@@ -594,6 +597,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                     kind: EventKind::MsgToolResult,
                     payload: serde_json::json!({
                         "call_id": call.call.0, "ok": true, "preview": preview,
+                        "spill": spilled,
                     }),
                     dedupe_key: None,
                 })
@@ -602,7 +606,8 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                 (true, preview)
             }
             Err(e) => {
-                let (preview, hits) = crate::leak::redact(&e.message);
+                let (clean, hits) = crate::leak::redact(&e.message);
+                let (preview, _spilled) = preview_or_spill(clean, &workspace.root, &call.call.0);
                 if !hits.is_empty() {
                     tracing::warn!(kinds = ?hits, tool = %call.name, "工具错误里发现凭据形态，已打码");
                 }
@@ -714,14 +719,17 @@ fn into_doc(w: DocWrite) -> Doc {
     }
 }
 
-/// 工具输出进上下文/账本的上限。
+/// 工具输出进上下文/账本的上限（按**字符**算，与上下文预算同一口径）。
 ///
-/// 这个值以前是 2000——模型**永远看不到**超过 2k 的工具输出，
-/// 大 JSON 被切在半截，于是它以为"数据被截断了"，反复重试同一个接口。
-/// 工具侧已经自己控制体积（结构摘要/正文预算），这里放宽到 12k 并在截断时明确说明。
+/// 超过就落盘：以前这里直接截断并只给一个目录名，模型既看不到尾部、也不知道去读哪个
+/// 文件（2026-11-03 板上真实事故：`ipptool` 的 marker 字段在尾部，被切掉后模型只能
+/// 去 `/ws/.tool-results/` 里猜文件名，最后又用 `lan_exec` 重查一遍并触发审批）。
 const PREVIEW_CAP: usize = 12_000;
+/// 落盘后留多少：**首尾都要**。只留头部的话，排在后面的字段（比如 marker）永远看不到。
+const SPILL_HEAD: usize = 6_000;
+const SPILL_TAIL: usize = 2_000;
 
-fn render_preview(blocks: &[crate::view::Block]) -> String {
+fn render_text(blocks: &[crate::view::Block]) -> String {
     use crate::view::Block;
     let mut s = String::new();
     for b in blocks {
@@ -736,14 +744,42 @@ fn render_preview(blocks: &[crate::view::Block]) -> String {
         }
         s.push('\n');
     }
-    if s.chars().count() > PREVIEW_CAP {
-        let cut: String = s.chars().take(PREVIEW_CAP).collect();
-        return format!(
-            "{cut}\n\n…（工具输出超过 {PREVIEW_CAP} 字，已被截断；\
-             大结果通常会落盘到 /ws/.tool-results/，用 exec 读取）"
-        );
+    s.trim_end().to_owned()
+}
+
+/// 超过上限就写 `<workspace>/.tool-results/<call_id>.txt`，只把「首部 + 尾部 + 路径」交给模型。
+///
+/// 与 `web_fetch` 的 payload 落盘同一落点、同一 GC；区别是这里对**所有工具**生效，
+/// 所以新工具不写任何代码就自动有"大输出落盘"的行为。
+fn preview_or_spill(text: String, workspace_root: &str, call_id: &str) -> (String, Option<String>) {
+    let chars = text.chars().count();
+    if chars <= PREVIEW_CAP {
+        return (text, None);
     }
-    s.trim().to_owned()
+    let safe: String = call_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let dir = std::path::Path::new(workspace_root).join(".tool-results");
+    let name = format!("{safe}.txt");
+    let sandbox_path = format!("/ws/.tool-results/{name}");
+    let write = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&name), &text));
+    let head: String = text.chars().take(SPILL_HEAD).collect();
+    let tail: String = text.chars().skip(chars - SPILL_TAIL).collect();
+    match write {
+        Ok(()) => (
+            format!(
+                "{head}\n\n…（中间省略；完整输出 {chars} 字 / {} 字节，已写入 {sandbox_path}。\
+                 用 `read` 直接读它，或用 `exec` 处理）\n\n{tail}",
+                text.len()
+            ),
+            Some(sandbox_path),
+        ),
+        Err(e) => (
+            format!("{head}\n\n…（工具输出 {chars} 字超过 {PREVIEW_CAP}，且落盘失败：{e}）"),
+            None,
+        ),
+    }
 }
 
 /// 幂等键：名字 + 规范化参数。与 call id 解耦，跨重新规划仍有效。
@@ -765,18 +801,48 @@ mod preview_tests {
     use crate::view::Block;
 
     #[test]
-    fn long_tool_output_is_capped_with_a_marker() {
-        let long = "x".repeat(PREVIEW_CAP + 500);
-        let out = render_preview(&[Block::Paragraph(long)]);
-        assert!(out.chars().count() > PREVIEW_CAP, "应保留 cap 内容再加说明");
-        assert!(out.contains("已被截断"), "截断必须有明确标记");
-        assert!(out.contains(".tool-results"), "要告诉模型去哪里找全文");
+    fn long_tool_output_spills_and_keeps_head_and_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = "HEAD-MARKER ";
+        let tail = "TAIL-MARKER";
+        let filler = "x".repeat(PREVIEW_CAP + 500);
+        let text = format!("{head}{filler}{tail}");
+        let (out, spill) = preview_or_spill(text.clone(), &dir.path().to_string_lossy(), "call_9");
+        let path = spill.expect("超过上限必须落盘");
+        assert_eq!(path, "/ws/.tool-results/call_9.txt");
+        // 头部和尾部都要在，否则"排在后面的字段"永远看不到
+        assert!(out.contains("HEAD-MARKER"), "首部丢了");
+        assert!(out.contains("TAIL-MARKER"), "尾部丢了");
+        assert!(out.contains(&path), "要给出确切路径，不能只给目录");
+        assert!(out.chars().count() < PREVIEW_CAP + 400, "内联部分要明显变小");
+        // 落盘的是完整原文
+        let on_disk = std::fs::read_to_string(dir.path().join(".tool-results/call_9.txt")).unwrap();
+        assert_eq!(on_disk, text);
     }
 
     #[test]
     fn mid_size_output_is_not_cut() {
         let body = "y".repeat(6_000);
-        let out = render_preview(&[Block::Paragraph(body)]);
+        let (out, spill) = preview_or_spill(body.clone(), "/tmp/ws", "call_1");
         assert_eq!(out.chars().count(), 6_000, "6k 的输出不该被截");
+        assert!(spill.is_none());
+    }
+
+    #[test]
+    fn spill_failure_still_marks_truncation() {
+        // 指向一个不存在的只读路径：写不进去时不能假装成功
+        let (out, spill) = preview_or_spill("z".repeat(PREVIEW_CAP + 10), "/proc/nope", "c");
+        assert!(spill.is_none());
+        assert!(out.contains("落盘失败"), "{out}");
+    }
+
+    #[test]
+    fn render_text_keeps_all_blocks() {
+        let out = render_text(&[
+            Block::Paragraph("p".into()),
+            Block::Code { lang: None, text: "c".into() },
+        ]);
+        assert_eq!(out, "p\nc");
     }
 }
+
