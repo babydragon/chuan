@@ -93,7 +93,16 @@ if [[ -z "${BIN_SRC:-}" || ! -f "${BIN_SRC:-/nonexistent}" ]]; then
     FILE="$(basename "$URL")"
     CURL=(curl -fsSL --retry 3)
     [[ -n "$PROXY" ]] && CURL+=(-x "$PROXY")
-    "${CURL[@]}" -o "$TMP/$FILE" "$URL" || die "下载失败（版本不存在或网络不通；可用 --proxy 指定代理）"
+    if ! "${CURL[@]}" -o "$TMP/$FILE" "$URL"; then
+      if [[ "$VERSION" == "latest" ]]; then
+        die "下载失败：/releases/latest/ 只指向**正式版**，而本仓库目前只有预发布（如 v0.1.0-rc.39）。
+     请显式指定版本重试：
+       V=v0.1.0-rc.39
+       curl -fsSL \"$BASE/$REPO/releases/download/\$V/install.sh\" | sudo CHUAN_VERSION=\$V bash
+     版本列表：$BASE/$REPO/releases"
+      fi
+      die "下载失败（版本不存在或网络不通；可用 --proxy 指定代理）"
+    fi
     # 校验：release 里只有一个 SHA256SUMS，里面既有带版本号的包也有稳定别名
     if "${CURL[@]}" -o "$TMP/SHA256SUMS" "$REL/SHA256SUMS" 2>/dev/null \
        && grep -q " $FILE\$" "$TMP/SHA256SUMS"; then
