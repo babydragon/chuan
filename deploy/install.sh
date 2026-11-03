@@ -95,9 +95,9 @@ if [[ -z "${BIN_SRC:-}" || ! -f "${BIN_SRC:-/nonexistent}" ]]; then
     [[ -n "$PROXY" ]] && CURL+=(-x "$PROXY")
     if ! "${CURL[@]}" -o "$TMP/$FILE" "$URL"; then
       if [[ "$VERSION" == "latest" ]]; then
-        die "下载失败：/releases/latest/ 只指向**正式版**，而本仓库目前只有预发布（如 v0.1.0-rc.39）。
+        die "下载失败：latest 解析不到资产（可能还没有正式版，或该 release 未打包）。
      请显式指定版本重试：
-       V=v0.1.0-rc.39
+       V=<tag>
        curl -fsSL \"$BASE/$REPO/releases/download/\$V/install.sh\" | sudo CHUAN_VERSION=\$V bash
      版本列表：$BASE/$REPO/releases"
       fi

@@ -8,8 +8,8 @@
 ## 1. 先确认版本（rc.7 起才有）
 
 ```bash
-curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.1.0-rc.7/install.sh \
-  | sudo CHUAN_VERSION=v0.1.0-rc.7 bash
+curl -fsSL https://github.com/babydragon/chuan/releases/download/v0.1.0/install.sh \
+  | sudo CHUAN_VERSION=v0.1.0 bash
 sudo systemctl restart chuan
 ```
 

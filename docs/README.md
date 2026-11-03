@@ -6,7 +6,7 @@
 > 当前状态：P0–P3 主体已实现；**已在 riscv64 目标板上跑通**（沙盒隔离、两条 lane、代理、
 > mDNS、定时任务含 pinned/polish、凭据不落沙盒）。打印仅到「CUPS 可见」，实际打印/耗材未验。
 > P4 已完成：车道闸门、前台委托、角色、token 预算与用量归属、后台任务与接手；金额口径不做（D20：token 记账 + 服务商窗口兜底）。
-> **P4.7（审批与身份）**：**P0–P4 已实现（开发机）**——`ActorRole`、批准人校验、`Blocked` 终态、
+> **P4.10（审批与身份）**：**已实现（开发机）**——`ActorRole`、批准人校验、`Blocked` 终态、
 > 命令条目表 + `lan_command` + 打印四条目 + 审计、`capability` 提案与内核安装、提醒按形态免审、
 > 家人 UX（无卡、无沉淀按钮、重复被挡才通知）。上板项见 `SBC-VERIFY.md §13`。
 > **P4.6（宿主执行）**：A 段已实现（`host` / `sys` / `capability` + 数据化授权）；
@@ -60,7 +60,7 @@
 > `STATUS` 用 `successful-ok`、并接受 `successful-ok-ignored-or-substituted-attributes`
 > （Brother 墨仓机对不认识的属性会这么回，数据照常给但 ipptool 会判 FAIL）；
 > README 的安装说明改为"预发布必须显式版本"（`/releases/latest` 只指向正式版）。
-> 预发布到 `v0.1.0-rc.40`，正式版待定。
+> 首个正式版：`v0.1.0`。
 
 ---
 

@@ -15,19 +15,17 @@
 
 ## 0. 安装（release）
 
-> **仓库目前只有预发布（`v0.1.0-rc.NN`）。** GitHub 的 `/releases/latest/` 只指向**正式版**，
-> 预发布不会成为 latest——所以对当前版本用 `latest` 链接会得到 **404**。
-> 请用下面第二条：显式给版本，脚本与包都从同一个 tag 取。
-
 ```bash
-# 预发布（当前）：显式版本
-V=v0.1.0-rc.39
+# 安装最新正式版
+curl -fsSL https://github.com/babydragon/chuan/releases/latest/download/install.sh | sudo bash
+
+# 固定版本（预发布、回滚、或 latest 不可用时）：脚本与包都从同一个 tag 取
+V=v0.1.0
 curl -fsSL "https://github.com/babydragon/chuan/releases/download/$V/install.sh" \
   | sudo CHUAN_VERSION="$V" bash
-
-# 正式版（发布 v0.1.0 之后才有意义）
-curl -fsSL https://github.com/babydragon/chuan/releases/latest/download/install.sh | sudo bash
 ```
+
+> `/releases/latest/` 只指向**正式版**；预发布（`v0.1.0-rc.NN`）不会成为 latest，必须显式给版本。
 
 或手动下载 `chuan-<tag>-<arch>-linux-gnu.tar.gz` 解开后 `sudo ./install.sh`。
 脚本只装文件、**不自动启动**；放密钥与启用步骤会打印在末尾。
@@ -40,9 +38,8 @@ curl -fsSL https://github.com/babydragon/chuan/releases/latest/download/install.
 
 ```bash
 P=http://127.0.0.1:7890
-V=v0.1.0-rc.39       # latest 只对正式版有效；预发布必须写版本
-curl -fsSL -x "$P" "https://github.com/babydragon/chuan/releases/download/$V/install.sh" \
-  | sudo https_proxy="$P" CHUAN_VERSION="$V" bash
+curl -fsSL -x "$P" https://github.com/babydragon/chuan/releases/latest/download/install.sh \
+  | sudo https_proxy="$P" bash
 ```
 
 - 外层 `-x "$P"`：取 install.sh 本身；
