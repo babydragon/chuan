@@ -36,5 +36,9 @@
     DISPLAY marker-names
     DISPLAY marker-levels
     DISPLAY marker-colors
+    # 有些打印机（如 Brother 墨仓机）对不认识的属性会回
+    # successful-ok-ignored-or-substituted-attributes —— 数据照常给，
+    # 只是部分请求项被忽略。两种都算成功，否则 ipptool 会判 FAIL、退出码非 0。
     STATUS successful-ok
+    STATUS successful-ok-ignored-or-substituted-attributes
 }
