@@ -56,7 +56,11 @@
 > 改**单行逗号分隔**（多行报 `Unexpected token`）、`STATUS` 用 `successful-ok`（`"ok"` 报
 > `Bad STATUS code`）；顺带去掉非标准的 `printer-description`。板上已验证能读到
 > `media-supported` / `sides-supported` / `marker-levels`。
-> 预发布到 `v0.1.0-rc.39`，正式版待定。
+> **rc.40**：把 rc.39 之后的三处修正并进安装包——`ipptool` 定义改单行逗号列表、
+> `STATUS` 用 `successful-ok`、并接受 `successful-ok-ignored-or-substituted-attributes`
+> （Brother 墨仓机对不认识的属性会这么回，数据照常给但 ipptool 会判 FAIL）；
+> README 的安装说明改为"预发布必须显式版本"（`/releases/latest` 只指向正式版）。
+> 预发布到 `v0.1.0-rc.40`，正式版待定。
 
 ---
 
