@@ -786,7 +786,7 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
 4. **扩张由 agent 提议、owner 一次批准**：新增纸型（A4/B5/相纸）、换打印机都走
    `capability(action="request", kind="command")` → 一张显示规范化条目 + **单独一行
    `env` / `who`** 的卡 → 批准后**由内核**写入 `commands.d/<name>.toml` 并热加载。
-   agent 不写盘（它拿不到该目录的写路径），也不能自批；详见 D31 §7–§8。
+   agent 不写盘（它拿不到该目录的写路径），也不能自批；详见 D31 §8–§9。
 5. **未授权 = 终态**：表外条目、参数越界、member 触到域上限，一律 `Blocked`
    （结构化：缺什么 + 已授权什么 + 下一步），kernel **真正结束该 run**，prompt 明确
    "不要换路径重试"。最坏烧一轮，不是十分钟。
@@ -867,7 +867,7 @@ P5 触发式（`host_command` / `commands.d` 权限升级 / 发现动作）。
 
    ```toml
    # commands.d/print_file.toml
-   env = "lan"                    # lan | host（install 永不进表，见 §11）
+   env = "lan"                    # lan | host（install 永不进表，见 §12）
    argv = ["/usr/bin/lp", "-d", "{printer}", "-o", "media={media}", "{file}"]
    timeout_ms = 20000
    who = "anyone"                 # owner（默认）| anyone
@@ -904,10 +904,14 @@ P5 触发式（`host_command` / `commands.d` 权限升级 / 发现动作）。
 5. **解析一次、带 hash**：gate 解析出 `ResolvedCommand { name, env, argv, hash }`，
    execute 只认它；审计记 hash。这样热加载竞态不会变成"批准 A、执行 B"。
 
-6. **审计**：每次执行写一行 `lan-access.jsonl`（条目名、解析后 argv、hash、exit、ms）；
+6. **清单注入 system**：每轮把"已生效条目的签名"（名字 + 参数域，如
+   `print_file(media: A4|B5, file: /ws 下的路径)`）追加进 system，并写明"有对应条目就用它"。
+   不注入的话模型只知道 `lan_exec`（永远要审批）——2026-11-03 板上真实事故：问打印机状态
+   依然弹审批卡，因为模型压根不知道有条目可用。签名**不暴露 argv**。
+7. **审计**：每次执行写一行 `lan-access.jsonl`（条目名、解析后 argv、hash、exit、ms）；
    `capability(list)` 显示条目来源、mtime、条数，以及**坏文件是哪一条**。
 
-7. **写入路径：agent 不写盘**。`capability(action="propose_command", command={...})` 渲染出
+8. **写入路径：agent 不写盘**。`capability(action="propose_command", command={...})` 渲染出
    **规范化条目**并先自校验，然后只写**草稿**（`<config>/capabilities/commands/<name>.toml`）；
    运行结束后内核把它转成 `approval(kind = Permission, requester, entry_name, entry_hash)`，
    并给 owner 的每个绑定发一条带 `/approve <id>` 的通知。owner 批准后由**内核**执行
@@ -919,22 +923,22 @@ P5 触发式（`host_command` / `commands.d` 权限升级 / 发现动作）。
    不显示 argv、`env`、`who` 或指纹——这些只进账本与日志。理由见 D30 的文案规则：
    不写代码的人看不懂 argv，"看懂后果"比"看到原文"更重要。
 
-8. **只增删、不改**：重名一律拒绝（否则"批准的"和"生效的"可能不是同一份内容）；
+9. **只增删、不改**：重名一律拒绝（否则"批准的"和"生效的"可能不是同一份内容）；
    删除走同一条提案路径（`capability(action="request", kind="command", remove="name")`）。
 
-9. **目录权限与 `services.d` 相同**：`0770 root:chuan`，加入强制遮蔽列表。
+10. **目录权限与 `services.d` 相同**：`0770 root:chuan`，加入强制遮蔽列表。
    信任假设写明：本设计信任 `PROTECTED` 遮蔽——若 agent 拿到任意宿主 `rw` 路径授权，
    表可被绕过写。主人已知并接受这一点；"给 `hostd` 加一个只写该目录的窄动词"是另一条路，
-   触发条件见 §11。agent 侧只有"经 `capability` 提案"这一条路。
+   触发条件见 §12。agent 侧只有"经 `capability` 提案"这一条路。
 
-10. **可预授权的判据**（一条条目能免审批的必要条件，换哪个 env 都适用）：
+11. **可预授权的判据**（一条条目能免审批的必要条件，换哪个 env 都适用）：
     ① `argv[0]` 是绝对路径（不走 PATH，否则可被同名程序替换）；
     ② 其余参数取自封闭集，或效果由构造有界（根约束下的文件、区间整数、设备/纸型枚举）；
     ③ 效果可恢复、不破坏共享状态；
     ④ 目标不是授权面自身（`commands.d` / `chuan.toml` / secrets）；
     ⑤ `pattern` 只接受封闭字符类。
 
-11. **范围与触发条件**：
+12. **范围与触发条件**：
     - `lan`：v1 做（打印四条目）。
     - `host`：`host_command`，判据同 §10，优先只读类（`journalctl -u <unit>`、`systemctl show`）。
       注意：`host` 的"任意 argv"不因为叫条目就变得安全——必须是"绝对前缀 + 封闭参数"。
@@ -946,7 +950,7 @@ P5 触发式（`host_command` / `commands.d` 权限升级 / 发现动作）。
     - `self_modify`（`publish_skill` / `role` / `service`）：不进表——它们不是 argv 形态。
       `remind` 按 D30 §7 直接从 Ask 里拿掉，也不要塞进表。
 
-12. **失败语义**：单个文件解析失败只废该条（与 `paths_error` 同款）；
+13. **失败语义**：单个文件解析失败只废该条（与 `paths_error` 同款）；
     `capability(list)` 与 `Blocked` 文案要点名是哪一条；一个文件的语法错误不影响其它文件。
 
 **理由**：免审批只能靠"构造上效果有界"，不能靠"人看过"。而"有界"这件事本身是**数据**：

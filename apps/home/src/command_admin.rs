@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use harness_capabilities::commands;
+use harness_capabilities::commands::{self, CommandTable};
 use harness_kernel::{CommandAdmin, PendingCommand};
 
 pub struct CommandFiles {
@@ -65,6 +65,13 @@ impl CommandAdmin for CommandFiles {
             }
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    fn installed(&self) -> Vec<String> {
+        let table = CommandTable::load_dir(&self.dir);
+        let mut out: Vec<String> = table.entries.values().map(|e| e.signature()).collect();
+        out.sort();
         out
     }
 

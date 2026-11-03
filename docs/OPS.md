@@ -213,6 +213,8 @@ require_approval = []
   删除同样是提案：`capability(action="remove_command", name="print_file")`。
 - 坏了怎么办：单个文件解析失败**只废那一条**（其余照常），日志里有一行
   `命令条目解析失败（只废这一条）`，指名是哪个文件、为什么。
+- 模型怎么知道有条目：每轮 system 会注入**已生效条目的签名**（名字 + 参数域，
+  不含命令原文），并写明"有对应条目就用它"。不注入的话它只会用 `lan_exec`（每次都要审批）。
 - 审计：每次执行写一行到 `[lan] log`（默认 `<data>/lan-access.jsonl`）：
   条目名、解析后 argv、指纹、exit、耗时、发起者。
 
@@ -233,7 +235,7 @@ file    = { file = ["/ws"] }
 **没有"自由字符串"**——那正是免审批的前提。要打聊天里的图片，模型会先 `cp` 到 `/ws`：
 `lan` lane 不挂 `/media`，这是故意的。
 `argv[0]` 必须绝对路径。`install`（包名是开放域）与 `host_elevated`（双真相）不进表，
-理由与触发条件见 `DECISIONS.md` D31 §11。
+理由与触发条件见 `DECISIONS.md` D31 §12。
 
 ## 视觉（图片理解）
 

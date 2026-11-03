@@ -4416,6 +4416,17 @@ async fn member_runs_a_command_entry_without_a_card() {
         Step::Done { text: "打印机在线".into(), finish: FinishReason::Stop },
     ]));
     let channel = Arc::new(FakeChannel::default());
+    let admin: std::sync::Arc<dyn harness_kernel::CommandAdmin> =
+        std::sync::Arc::new(TestCommandAdmin {
+            dir: dir.path().join("commands.d"),
+            drafts: dir.path().join("drafts"),
+        });
+    std::fs::create_dir_all(dir.path().join("commands.d")).unwrap();
+    std::fs::copy(
+        dir.path().join("printer_status.toml"),
+        dir.path().join("commands.d/printer_status.toml"),
+    )
+    .unwrap();
     let actor = Arc::new(ConversationActor::new(
         Arc::clone(&store),
         Arc::clone(&driver),
@@ -4442,7 +4453,7 @@ async fn member_runs_a_command_entry_without_a_card() {
             budget: Default::default(),
             roles: None,
             identity: Arc::new(two_people()),
-            commands: None,
+            commands: Some(std::sync::Arc::clone(&admin)),
         },
         None,
     ));
@@ -4474,6 +4485,12 @@ async fn member_runs_a_command_entry_without_a_card() {
     let sent = channel.delivered.lock().unwrap().join("\n");
     // 模型在拿到工具结果之后还能继续收尾 → 这条调用没有被当成"拒绝"
     assert!(sent.contains("打印机在线"), "{sent}");
+
+    // system 里必须列出可用条目，否则模型只会用 lan_exec（真实事故：查打印机弹审批卡）
+    let systems = driver.systems.lock().unwrap();
+    let sys = systems[0].as_deref().unwrap_or("");
+    assert!(sys.contains("可用命令条目"), "system 缺少条目清单：{sys}");
+    assert!(sys.contains("printer_status()"), "system 未列条目名：{sys}");
 
     // 审计必须落一行（条目名 + 指纹 + exit）
     let audit = std::fs::read_to_string(dir.path().join("lan-access.jsonl")).unwrap();
@@ -4625,6 +4642,13 @@ impl harness_kernel::CommandAdmin for TestCommandAdmin {
         }
         out
     }
+    fn installed(&self) -> Vec<String> {
+        let t = harness_capabilities::CommandTable::load_dir(&self.dir);
+        let mut v: Vec<String> = t.entries.values().map(|e| e.signature()).collect();
+        v.sort();
+        v
+    }
+
     fn install(&self, name: &str, body: &str) -> Result<(), String> {
         harness_capabilities::commands::install_atomic(&self.dir, name, body).map(|_| ())
     }

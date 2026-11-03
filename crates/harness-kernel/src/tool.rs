@@ -53,6 +53,12 @@ pub struct PendingCommand {
 pub trait CommandAdmin: Send + Sync {
     /// 待批准的提案（草稿目录）。运行结束后内核据此建 `Permission` 审批。
     fn pending(&self) -> Vec<PendingCommand>;
+
+    /// 已生效条目的签名（注入 system，让模型知道有哪些免审批动作可用）。
+    /// 默认空：应用不支持条目表时，模型只会看到 `lan_command` 这个工具本身。
+    fn installed(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn install(&self, name: &str, body: &str) -> Result<(), String>;
     /// 丢掉草稿（无论批准与否，处理完都要清）。
     fn discard(&self, name: &str) -> Result<(), String>;

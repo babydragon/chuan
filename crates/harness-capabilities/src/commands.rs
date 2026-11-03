@@ -82,6 +82,28 @@ pub struct CommandEntry {
     pub params: BTreeMap<String, ParamKind>,
 }
 
+impl CommandEntry {
+    /// 给模型看的签名：`printer_status()` / `print_file(media: A4|B5, file: /ws 下的路径)`。
+    ///
+    /// 只列参数域，不列 argv：模型需要知道"能传什么"，不需要知道"具体跑哪条命令"。
+    pub fn signature(&self) -> String {
+        if self.params.is_empty() {
+            return format!("{}()", self.name);
+        }
+        let mut parts = Vec::new();
+        for (k, kind) in &self.params {
+            let v = match kind {
+                ParamKind::Enum(items) => items.join("|"),
+                ParamKind::File => "/ws 下的路径".to_string(),
+                ParamKind::Int { min, max } => format!("{min}..{max}"),
+                ParamKind::Chars { min, max, .. } => format!("文本(≤{max} 字)"),
+            };
+            parts.push(format!("{k}: {v}"));
+        }
+        format!("{}({})", self.name, parts.join(", "))
+    }
+}
+
 /// 表 + 坏文件清单。`errors` 只影响对应条目。
 #[derive(Clone, Debug, Default)]
 pub struct CommandTable {
@@ -848,6 +870,16 @@ file = { file = ["/ws"] }
             "params": {"x": {"enum": []}}
         });
         assert!(render_entry(&bad).is_err());
+    }
+
+    #[test]
+    fn signature_lists_params_not_argv() {
+        let dir = tmp();
+        write(dir.path(), "print_file", PRINT);
+        let t = CommandTable::load_dir(dir.path());
+        let sig = t.get("print_file").unwrap().signature();
+        assert_eq!(sig, "print_file(file: /ws 下的路径, media: A4|B5)");
+        assert!(!sig.contains("/usr/bin/lp"), "签名不暴露 argv：{sig}");
     }
 
     #[test]

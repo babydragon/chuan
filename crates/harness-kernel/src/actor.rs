@@ -1416,6 +1416,24 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 system.push_str(hint);
             }
         }
+        // 命令条目清单：不注入的话，模型只知道 `lan_exec`（永远要审批），
+        // 于是每次"查打印机"都弹卡——这一条曾是真实事故。
+        if let Some(admin) = &self.cfg.commands {
+            let list = admin.installed();
+            if !list.is_empty() {
+                system.push_str(
+                    "\n\n可用命令条目（用 `lan_command` 直接执行，免审批；参数必须严格取所列值）：\n",
+                );
+                for line in list {
+                    system.push_str("- ");
+                    system.push_str(&line);
+                    system.push('\n');
+                }
+                system.push_str(
+                    "**有对应条目就用条目，不要用 `lan_exec` 猜**；表外的动作先说明缺什么。",
+                );
+            }
+        }
         let role_catalog = self.roles_catalog();
         if !role_catalog.is_empty() {
             system.push_str(&role_catalog);

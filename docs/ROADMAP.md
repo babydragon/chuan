@@ -7,7 +7,7 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 预发布到 `v0.1.0-rc.35`。
+> 预发布到 `v0.1.0-rc.36`。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；
 > **通知类流程 P4.7：A 由主人写 SOP（零代码），B/C 触发式暂不做**（见 D23）。
@@ -517,7 +517,7 @@ HTTP 通道、知识库入库、向量检索、多 provider 自动路由、git w
 | P2 | 审批表 V6（`kind`/`requester`/`entry_name`/`entry_hash`）+ `capability(propose_command)` + 内核安装/删除 + `command.installed/removed` 事件 | ✅ 已实现（开发机） | `proposal_is_installed_only_after_owner_approves`（提案→通知→批准→落盘→清草稿）；`install_is_atomic_and_never_overwrites`；非 owner 批准被拒（`non_owner_cannot_approve`） |
 | P3 | `remind` 去 Ask（`member_safe` + 目标自指 + 时间可解析且在将来） | ✅ 已实现（开发机） | `reminder_is_preapproved_only_for_self_and_future`（7 种输入矩阵）；`member_sets_reminder_without_a_card`（零卡、归到本人、回执带绝对时间） |
 | P4 | 家人 UX：`Blocked` 文案集中一处、家人不出「沉淀为 Skill」按钮、同形状被挡 ≥2 次/24h 才通知 owner | ✅ 已实现（开发机） | `repeated_blocks_notify_owner_once`（第 2 次通知、第 3 次不再重复）；`member_can_schedule_a_model_reminder_but_owner_is_told`（家人可建、零卡、owner 收到一次通知）；`scheduled_run_skips_approval_and_tells_owner_once`（到点遇审批：不发卡、立即通知、不重复） |
-| P5 | 触发式：`host_command`；`commands.d` 权限升级（`hostd` 窄动词）；`from = 发现动作` | 未做 | 触发条件见 D31 §11 |
+| P5 | 触发式：`host_command`；`commands.d` 权限升级（`hostd` 窄动词）；`from = 发现动作` | 未做 | 触发条件见 D31 §12 |
 
 **不做**：`install` 进条目表（包名是开放域）；异步审批与自动续跑（D30 §6）。
 
