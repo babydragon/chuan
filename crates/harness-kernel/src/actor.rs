@@ -1071,9 +1071,23 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let rest = text.trim().trim_start_matches("/agents").trim().to_owned();
                 if let Some(id) = rest.strip_prefix("retry ") {
                     let id = id.trim().to_owned();
-                    let doc = self.list_tasks().await.into_iter().find(|d| d.id.0 == id);
+                    // 两种 id 都收：任务号（task-…）或子会话（sub:…#n）。
+                    // 命令挂在 `/agents` 下面，用户拿子会话 id 来试是常态。
+                    let doc = self
+                        .list_tasks()
+                        .await
+                        .into_iter()
+                        .find(|d| d.id.0 == id || d.payload["child_conv"].as_str() == Some(id.as_str()));
                     let Some(doc) = doc else {
-                        return self.reply(&inb.channel.0, &inb.conversation, &format!("没有这个任务：{id}")).await;
+                        return self
+                            .reply(
+                                &inb.channel.0,
+                                &inb.conversation,
+                                &format!(
+                                    "没有这个任务：{id}\n用法：/agents retry <task-…> 或 /agents retry <sub:…#n>（看进度用 /agents show）"
+                                ),
+                            )
+                            .await;
                     };
                     let p = &doc.payload;
                     let spec = crate::agent::AgentSpec {

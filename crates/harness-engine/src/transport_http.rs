@@ -33,7 +33,10 @@ impl ReqwestTransport {
         // 模型调用默认**直连**，不继承 https_proxy（TG 需要代理，模型通常不需要）。
         let mut b = reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(180))
+            // **不要设总超时**：一次生成可能十几分钟，180s 会在流中途切断，
+            // 而且 reqwest 把它报成 "error decoding response body"，看起来像 provider 的锅
+            // （真实事故：每 3 分钟断一次、连断三次，任务失败）。
+            // 真正的兜底是 `next_chunk` 的空闲超时（90s 无数据才断）+ 连接超时。
             .connect_timeout(Duration::from_secs(15));
         if let Some(proxy) = proxy {
             if !proxy.trim().is_empty() {
@@ -73,7 +76,7 @@ impl SseBytes for ReqwestBytes {
         match tokio::time::timeout(Duration::from_secs(90), self.stream.chunk()).await {
             Ok(Ok(Some(bytes))) => Some(Ok(bytes.to_vec())),
             Ok(Ok(None)) => None,
-            Ok(Err(e)) => Some(Err(EngineError::Provider(e.to_string()))),
+            Ok(Err(e)) => Some(Err(EngineError::Provider(reqwest_err(&e)))),
             Err(_) => Some(Err(EngineError::Provider(
                 "SSE 空闲超过 90 秒，连接疑似被挂起".into(),
             ))),
@@ -95,7 +98,7 @@ impl SseTransport for ReqwestTransport {
             rb = rb.header(k.as_str(), v.as_str());
         }
 
-        let resp = rb.send().await.map_err(|e| EngineError::Provider(e.to_string()))?;
+        let resp = rb.send().await.map_err(|e| EngineError::Provider(reqwest_err(&e)))?;
         let status = resp.status();
         if !status.is_success() {
             let retry_after = resp
@@ -178,6 +181,21 @@ pub fn classify(status: u16, body: &str, retry_after_s: Option<u64>) -> EngineEr
         return EngineError::Quota { message: short(body), retry_after_s: retry };
     }
     EngineError::Provider(format!("http {status}: {}", short(body)))
+}
+
+/// reqwest 的 `Display` 只有一句 "error decoding response body"，看不出是**哪一层**坏的。
+/// 把 `source()` 链拼上（常见的是 `unexpected EOF` / `invalid gzip header` / `connection reset`），
+/// 否则日志里永远只有一个无信息量的错误。
+fn reqwest_err(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(s) = src {
+        out.push_str(" <- ");
+        out.push_str(&s.to_string());
+        src = s.source();
+    }
+    out
 }
 
 fn short(body: &str) -> String {
