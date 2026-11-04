@@ -191,6 +191,10 @@ pub struct AgentLimits {
     pub background_idle_s: u64,
     /// 可用角色（`[agents.roles.<name>]`）。空 = 只能用 `inherit`。
     pub roles: std::collections::HashMap<String, RoleSpec>,
+    /// 后台任务**全部**跑完后，是否叫醒父 agent 继续/汇报（默认开）。
+    ///
+    /// 不开的话，结论只作为一条消息推给人；父 agent 下次被用户叫到时才可能看到。
+    pub resume_on_done: bool,
 }
 
 impl Default for AgentLimits {
@@ -204,6 +208,7 @@ impl Default for AgentLimits {
             wall_ms: 120_000,
             background_idle_s: 5,
             roles: std::collections::HashMap::new(),
+            resume_on_done: true,
         }
     }
 }

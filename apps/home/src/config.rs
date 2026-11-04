@@ -498,6 +498,9 @@ pub struct AgentsFile {
     /// 角色：`[agents.roles.coder]`。只能收窄工具、不能扩权。
     #[serde(default)]
     pub roles: std::collections::HashMap<String, RoleFile>,
+    /// 后台任务全部跑完后叫醒父 agent（默认开）
+    #[serde(default = "default_true")]
+    pub resume_on_done: bool,
     /// 可热加载的角色目录（agent 用 `role` 工具往这里写）
     pub roles_dir: Option<String>,
 }
@@ -526,6 +529,7 @@ impl Default for AgentsFile {
             max_tokens: 20_000,
             wall_ms: 120_000,
             background_idle_s: 5,
+            resume_on_done: true,
             roles: std::collections::HashMap::new(),
             roles_dir: None,
         }
@@ -1088,6 +1092,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             max_tokens: file.agents.max_tokens,
             wall_ms: file.agents.wall_ms,
             background_idle_s: file.agents.background_idle_s,
+            resume_on_done: file.agents.resume_on_done,
         },
         distill_prompt: match file.skills.distill_prompt_file.as_deref() {
             Some(f) => std::fs::read_to_string(f)

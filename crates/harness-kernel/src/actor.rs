@@ -209,6 +209,8 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     agent_progress: Arc<Mutex<HashMap<String, String>>>,
     /// 运行中的后台任务：task_id → 取消令牌
     bg_running: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    /// 由"后台任务完成"唤醒的 run id：这些 run 再派的任务完成后不再唤醒，避免链式。
+    resume_runs: Arc<Mutex<std::collections::HashSet<String>>>,
     /// 后台任务编号
     bg_seq: Arc<Mutex<u64>>,
     /// 未授权提示的节流：`{channel}:{addr}` → 上次提示时刻（每小时最多一次）
@@ -228,6 +230,97 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     notified_scheduled_asks: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
+
+/// 从任务表里挑出"已完成但还没上报"的任务，拼一段交给父 agent 的合成消息。
+///
+/// 返回 `(要标记为已上报的 id, 消息)`；没有可上报的就 `None`。
+fn resume_brief(
+    docs: &[crate::record::Doc],
+    chat: &str,
+) -> Option<(Vec<String>, String)> {
+    fn clip(s: &str, n: usize) -> String {
+        let t: String = s.chars().take(n).collect();
+        if s.chars().count() > n { format!("{t}…") } else { t }
+    }
+    let done: Vec<&crate::record::Doc> = docs
+        .iter()
+        .filter(|d| d.payload["chat"].as_str() == Some(chat))
+        .filter(|d| d.payload["reported"] != serde_json::Value::Bool(true))
+        .filter(|d| {
+            !matches!(
+                d.payload["status"].as_str(),
+                Some("pending") | Some("running")
+            )
+        })
+        .collect();
+    if done.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "（后台任务已结束）下面这些任务是你之前派给子 agent 的，现在都跑完了。\n\
+         请对照当时的计划收尾：合并/核对产物，该继续就继续；不需要继续就向用户汇报结果。\n\
+         不要重复已完成的工作；除非确有必要，不要再派新的后台任务。\n",
+    );
+    for d in &done {
+        let id = &d.id.0;
+        let status = d.payload["status"].as_str().unwrap_or("?");
+        out.push_str(&format!("\n- {id} · {status}\n"));
+        if let Some(t) = d.payload["text"].as_str() {
+            out.push_str(&format!("  原任务：{}\n", clip(t, 300)));
+        }
+        if let Some(r) = d.payload.get("result") {
+            if let Some(s) = r["summary"].as_str() {
+                out.push_str(&format!("  结论：{}\n", clip(s, 1500)));
+            }
+            if let Some(e) = r["error"].as_str() {
+                out.push_str(&format!("  错误：{}\n", clip(e, 500)));
+            }
+            if let Some(pa) = r["pending_actions"].as_array() {
+                let items: Vec<&str> = pa.iter().filter_map(|v| v.as_str()).collect();
+                if !items.is_empty() {
+                    out.push_str("  待你执行：\n");
+                    for it in items {
+                        out.push_str(&format!("    - {it}\n"));
+                    }
+                }
+            }
+            if let Some(cc) = r["child_conv"].as_str() {
+                out.push_str(&format!("  详情：{cc}（/agents show）\n"));
+            }
+        }
+        // 一批很多任务时别把上下文撑爆：剩下的让父 agent 用 /tasks 查
+        if out.chars().count() > 8_000 {
+            out.push_str("\n……（其余任务的结论见 `/tasks`）\n");
+            break;
+        }
+    }
+    Some((done.iter().map(|d| d.id.0.clone()).collect(), out))
+}
+
+
+/// 卡住判定的窗口：模型阶段 180s，**工具执行期间放宽到 30 分钟**。
+///
+/// 工具在跑的时候模型不会吐事件；前台 `delegate` 动辄十几分钟，按 180s 判会把父 run 一起杀掉。
+/// 每个工具自己有超时（exec / http），delegate 还有子 agent 的墙钟，所以放宽不会失去兜底。
+fn stall_limit(tool_in_flight: bool) -> std::time::Duration {
+    if tool_in_flight {
+        std::time::Duration::from_secs(30 * 60)
+    } else {
+        std::time::Duration::from_secs(180)
+    }
+}
+
+/// 从任务 doc 里挑下一条要跑的：**先派的先跑**。
+///
+/// `list_docs` 按 `valid_from DESC` 返回（新建/改过的在前），直接 `find` 会变成 LIFO——
+/// 同时派两个子任务时后派的先跑，跟"派活队列"的直觉相反。这里按 `created_at` 升序；
+/// 同一毫秒用 id 兜底（id 里带毫秒与序号）。
+fn pick_pending(docs: &[crate::record::Doc]) -> Option<&crate::record::Doc> {
+    docs.iter()
+        .filter(|d| d.payload["status"] == "pending")
+        .min_by_key(|d| (d.payload["created_at"].as_i64().unwrap_or(0), d.id.0.clone()))
+}
+
 impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
     fn clone(&self) -> Self {
         Self {
@@ -245,6 +338,7 @@ impl<S: Store, D: TurnDriver> Clone for ConversationActor<S, D> {
             agent_seq: Arc::clone(&self.agent_seq),
             agent_slots: Arc::clone(&self.agent_slots),
             agents_running: Arc::clone(&self.agents_running),
+            resume_runs: Arc::clone(&self.resume_runs),
             last_active: Arc::clone(&self.last_active),
             typing: Arc::clone(&self.typing),
             agent_progress: Arc::clone(&self.agent_progress),
@@ -290,6 +384,36 @@ impl Drop for RunScope {
         self.runs.lock().unwrap().remove(&self.conversation);
         self.typing_map.lock().unwrap().remove(&self.conversation);
         // JoinHandle 直接丢弃 = detach；typing 任务会在 stop.cancelled() 处自行退出
+    }
+}
+
+/// 子 agent 的运行期登记：**Drop 时摘除**。
+///
+/// 以前在 `runner.run(..).await` 之后手动 remove。父 run 被取消（或工具 future 被丢弃）时
+/// 那一步永远走不到，`/agents` 里就留一条"跑了 24 分钟"的幽灵记录，
+/// `/agents cancel` 取消的也是一个已经没有执行者的令牌。与 `RunScope` 同理，用 Drop 兜住。
+struct AgentScope {
+    running: Arc<Mutex<HashMap<String, RunningAgent>>>,
+    progress: Arc<Mutex<HashMap<String, String>>>,
+    key: String,
+}
+
+/// "唤醒 run" 的登记：Drop 时摘除，集合不会随时间无限增长。
+struct ResumeMark {
+    set: Arc<Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for ResumeMark {
+    fn drop(&mut self) {
+        self.set.lock().unwrap().remove(&self.key);
+    }
+}
+
+impl Drop for AgentScope {
+    fn drop(&mut self) {
+        self.running.lock().unwrap().remove(&self.key);
+        self.progress.lock().unwrap().remove(&self.key);
     }
 }
 
@@ -429,6 +553,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             agent_seq: Arc::new(Mutex::new(HashMap::new())),
             agent_slots: Arc::new(Mutex::new(HashMap::new())),
             agents_running: Arc::new(Mutex::new(HashMap::new())),
+            resume_runs: Arc::new(Mutex::new(std::collections::HashSet::new())),
             last_active: Arc::new(Mutex::new(now_ms())),
             typing: Arc::new(Mutex::new(HashMap::new())),
             agent_progress: Arc::new(Mutex::new(HashMap::new())),
@@ -1447,6 +1572,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         };
         let conv = ConversationId(format!("{}:{}:{}", inb.channel.0, inb.conversation, epoch));
         let run = RunId(format!("{}-{}", conv.0, inb.dedupe_key));
+        // 这一轮是"后台任务完成唤醒"的：它派出的任务不再触发唤醒（防链）。
+        let _resume_mark = matches!(inb.kind, InboundKind::Resume).then(|| {
+            self.resume_runs.lock().unwrap().insert(run.0.clone());
+            ResumeMark { set: Arc::clone(&self.resume_runs), key: run.0.clone() }
+        });
         let caps = ch.caps();
         let mut renderer = TurnRenderer::new(caps.clone());
         let pair = EventSink::channel(256);
@@ -1572,6 +1702,14 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         );
         let conv_key = conv.0.clone();
         let budget_tokens = self.history_budget_tokens(&system);
+        // 把回合预算说清楚：模型不知道上限，就会把整本书当"简单任务"自己啃，然后半路断掉。
+        let mut system = system;
+        system.push_str(&format!(
+            "\n\n本次 run 最多 {} 个回合（一次回合 = 一次模型调用，中间可以调几个工具）。\
+             读整本资料、全量遍历、多文件对比这类活至少十几个回合——直接 delegate(background=true)，\
+             不要自己硬扛；只做「看一眼就能答」的事。",
+            self.cfg.max_turns
+        ));
         let req = RunRequest {
             conv,
             run: run.clone(),
@@ -1615,9 +1753,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         ));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // 卡住检测：180s 没有任何进展就取消（单次 LLM 50s、工具 15s，留足余量）
+        // 卡住检测：180s 没有任何进展就取消（单次 LLM 50s、工具 15s，留足余量）。
+        //
+        // 但**工具执行期间模型不会吐任何事件**：`delegate` 前台跑十分钟、`exec` 跑几分钟，
+        // 都会被误判成"卡住"然后连父 run 一起杀掉（2026-11-04 真实事故）。
+        // 所以工具在飞时把窗口放宽到 30 分钟——每个工具自己有超时，delegate 还有子 agent 墙钟。
         let mut last_progress = tokio::time::Instant::now();
-        let stall = Duration::from_secs(180);
+        let mut tool_in_flight = false;
         let mut stalled = false;
         let mut child_shown = false;
 
@@ -1627,12 +1769,17 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 res = &mut fut => break res,
                 maybe = events.recv() => {
                     if let Some(ev) = maybe {
+                        match &ev {
+                            crate::driver::StreamEvent::ToolStarted { .. } => tool_in_flight = true,
+                            crate::driver::StreamEvent::ToolFinished { .. } => tool_in_flight = false,
+                            _ => {}
+                        }
                         last_progress = tokio::time::Instant::now();
                         renderer.push(RenderEvent::Stream(ev));
                     }
                 }
                 _ = tick.tick() => {
-                    if last_progress.elapsed() > stall {
+                    if last_progress.elapsed() > stall_limit(tool_in_flight) {
                         stalled = true;
                         run_cancel.cancel();
                         break Err(crate::runner::RunnerError::Budget("stalled".into()));
@@ -2513,6 +2660,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         // 推结果要知道"发到哪个 chat"：conv 形如 `telegram:<chat>:<epoch>`，
         // 与审批卡取 chat 的规则一致。
         let chat = conv.split(':').nth(1).unwrap_or_default().to_owned();
+        // 由"完成唤醒"的 run 再派的任务不再唤醒：否则 A 完成唤醒父、父又派 B、B 完成再唤醒……无限链。
+        let notify = !self
+            .resume_runs
+            .lock()
+            .unwrap()
+            .contains(&spec.parent_run.0);
         let payload = serde_json::json!({
             "text": spec.task,
             "role": if spec.profile.name.is_empty() { "inherit".to_string() } else { spec.profile.name },
@@ -2527,6 +2680,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             "max_turns": spec.max_turns,
             "max_tokens": spec.max_tokens,
             "wall_ms": spec.wall_ms,
+            "notify": notify,
+            "reported": false,
         });
         self.put_task_doc(&id, &spec.parent_conv, payload, 1).await;
         Ok(id)
@@ -2629,7 +2784,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             return 0;
         }
         let docs = self.list_tasks().await;
-        let Some(doc) = docs.iter().find(|d| d.payload["status"] == "pending").cloned() else {
+        // FIFO：先派的先跑。`list_docs` 按 `valid_from DESC` 返回（新建/改过的在前），
+        // 直接 `find` 会变成 LIFO——同时派两个子任务时后派的先跑，跟"派活队列"的直觉相反。
+        // 这里按 `created_at` 升序取最早的一条；同一毫秒用 id 兜底（id 里带毫秒与序号）。
+        let Some(doc) = pick_pending(&docs).cloned() else {
             return 0;
         };
 
@@ -2648,6 +2806,75 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             me.run_agent_task(id, p, token).await;
         });
         1
+    }
+
+
+    /// 所有后台任务都跑完后，叫醒父 agent 收尾（`[agents] resume_on_done`，默认开）。
+    ///
+    /// 为什么值得花这一轮：子 agent 的工具面窄、它写的结论是给"接手的人"看的，
+    /// 而且父会话的上下文可能已经被别的聊天或 `/new` 冲掉——只有让父 agent 亲自看一遍，
+    /// 才会把结论落成动作或一句人话。
+    async fn maybe_wake_parent(self: &Arc<Self>, conv: &str, task_id: &str) {
+        if !self.cfg.agents.resume_on_done {
+            return;
+        }
+        let docs = self.list_tasks().await;
+        let Some(me) = docs.iter().find(|d| d.id.0 == task_id) else { return };
+        if me.payload["notify"] != serde_json::Value::Bool(true) {
+            return; // 这一批本来就是被唤醒的 run 派的：只通知，不再唤醒
+        }
+        let chat = me.payload["chat"].as_str().unwrap_or_default().to_owned();
+        if chat.is_empty() {
+            return;
+        }
+        // 同一 chat 还有没跑完的 → 等它们一起，避免 A/B 各唤醒一次
+        if docs.iter().any(|d| {
+            d.payload["chat"].as_str() == Some(chat.as_str())
+                && matches!(
+                    d.payload["status"].as_str(),
+                    Some("pending") | Some("running")
+                )
+        }) {
+            return;
+        }
+        let Some((ids, brief)) = resume_brief(&docs, &chat) else { return };
+
+        // 先标记已上报再唤醒：唤醒失败也不重复刷同一份结论
+        for id in &ids {
+            if let Some(d) = docs.iter().find(|d| &d.id.0 == id) {
+                let mut p = d.payload.clone();
+                p["reported"] = serde_json::json!(true);
+                self.put_task_doc(id, &chat, p, d.version + 1).await;
+            }
+        }
+
+        let channel = chat.split(':').next().unwrap_or_default().to_owned();
+        let addr = chat.split(':').nth(1).unwrap_or_default().to_owned();
+        if channel.is_empty() || addr.is_empty() {
+            return;
+        }
+        // `handle_run_inner` 会按 `conv.epoch:<channel>:<addr>` 重新取当前 epoch，
+        // 所以 `/new` 之后唤醒也会落到新会话（不需要在这里固化 epoch）。
+        let inb = Inbound {
+            channel: crate::ids::ChannelId(channel),
+            conversation: addr.clone(),
+            // 私聊里 chat id 就是用户 id；群聊可能退化（唤醒仍会跑，只是按 member 判）。
+            actor: addr,
+            kind: InboundKind::Resume,
+            text: Some(brief),
+            dedupe_key: format!("resume-{task_id}-{}", now_ms()),
+            callback_id: None,
+            msg: None,
+            received_at: now_ms(),
+            attachments: Vec::new(),
+        };
+        tracing::info!(task = task_id, conv = %conv, "后台任务全部结束，唤醒父 agent");
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(e) = me.handle_run(inb).await {
+                tracing::warn!(error = %e, "唤醒父 agent 失败");
+            }
+        });
     }
 
     async fn run_agent_task(self: Arc<Self>, id: String, payload: serde_json::Value, token: CancellationToken) {
@@ -2706,6 +2933,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             .unwrap_or(2);
         self.put_task_doc(&id, &conv, p, version).await;
         self.bg_running.lock().unwrap().remove(&id);
+        // 全部任务跑完时把结论交回父 agent（可关；见 `[agents] resume_on_done`）。
+        self.maybe_wake_parent(&conv, &id).await;
 
         // 结论不仅推给人，也写进父会话账本：否则主人问"刚才那个任务怎样了"，
         // 模型完全不知道（它只看到过"已排入后台任务"那条）。
@@ -3057,6 +3286,11 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             .clone()
             .or_else(|| role.and_then(|r| r.model.clone()))
             .unwrap_or_else(|| self.cfg.model.clone());
+        // 子 agent 也要知道自己的回合上限：否则会在最后一轮才发现做不完，结论里什么都没留下。
+        system.push_str(&format!(
+            "\n\n你这次最多 {max_turns} 个回合（一次回合 = 一次模型调用）。\
+             做不完就把「已完成 / 未完成 / 卡在哪」写进结论，不要撑到最后一轮还说不清。\n"
+        ));
         let budget_tokens = self.history_budget_tokens(&system);
 
         let req = RunRequest {
@@ -3140,9 +3374,12 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             },
         );
 
+        let _scope = AgentScope {
+            running: Arc::clone(&self.agents_running),
+            progress: Arc::clone(&self.agent_progress),
+            key: child_conv.clone(),
+        };
         let res = runner.run(req, pair.sink, child_cancel).await;
-        self.agents_running.lock().unwrap().remove(&child_conv);
-        self.agent_progress.lock().unwrap().remove(&child_conv);
         pump.abort();
         link.abort();
         let (status, summary) = match res {
@@ -3664,7 +3901,10 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunScope, attachment_lines, cache_suffix, model_usage_line, summarize_args, usage_line};
+    use super::{
+        AgentScope, RunScope, RunningAgent, attachment_lines, cache_suffix, model_usage_line,
+        pick_pending, resume_brief, summarize_args, usage_line,
+    };
     use crate::record::UsageTotal;
 
     /// 早退（`?` / panic）时也必须停 typing、摘掉 runs 条目，
@@ -3770,5 +4010,96 @@ mod tests {
         };
         assert!(model_usage_line("glm-5.3-flash", &a).contains("80.0%"));
         assert!(model_usage_line("deepseek-v4.1-flash", &b).contains("10.0%"));
+    }
+
+    #[test]
+    fn pending_tasks_are_picked_fifo() {
+        let doc = |id: &str, created: i64, status: &str| crate::record::Doc {
+            id: crate::ids::DocId(id.into()),
+            kind: "agent_task".into(),
+            scope: "task".into(),
+            payload: serde_json::json!({ "created_at": created, "status": status }),
+            version: 1,
+            valid_from: 0,
+            valid_to: None,
+        };
+        // list_docs 按 valid_from DESC 返回：数组里后派的在前
+        let docs = vec![
+            doc("task-200-2", 200, "pending"),
+            doc("task-100-1", 100, "pending"),
+            doc("task-50-0", 50, "done"),
+        ];
+        assert_eq!(pick_pending(&docs).unwrap().id.0, "task-100-1", "先派的要先跑");
+        assert!(pick_pending(&[]).is_none());
+        assert!(pick_pending(&[doc("task-1-1", 1, "running")]).is_none(), "只挑 pending");
+    }
+
+    #[test]
+    fn agent_scope_clears_entries_on_drop() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let running = Arc::new(Mutex::new(HashMap::new()));
+        let progress = Arc::new(Mutex::new(HashMap::new()));
+        running.lock().unwrap().insert(
+            "sub:c#1".to_owned(),
+            RunningAgent {
+                parent_conv: "c".into(),
+                task: "t".into(),
+                started_ms: 0,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+        progress.lock().unwrap().insert("sub:c#1".to_owned(), "第 1 轮".into());
+        {
+            let _scope = AgentScope {
+                running: Arc::clone(&running),
+                progress: Arc::clone(&progress),
+                key: "sub:c#1".into(),
+            };
+        }
+        assert!(running.lock().unwrap().is_empty(), "Drop 必须摘掉运行登记");
+        assert!(progress.lock().unwrap().is_empty(), "Drop 必须摘掉进度");
+    }
+
+    #[test]
+    fn resume_brief_collects_finished_unreported_tasks() {
+        fn task(id: &str, status: &str, reported: bool, chat: &str) -> crate::record::Doc {
+            crate::record::Doc {
+                id: crate::ids::DocId(id.into()),
+                kind: "agent_task".into(),
+                scope: "task".into(),
+                payload: serde_json::json!({
+                    "text": format!("{id} 的委托书"),
+                    "status": status,
+                    "chat": chat,
+                    "reported": reported,
+                    "result": { "summary": "定位完成，产出 outline.json" },
+                }),
+                version: 1,
+                valid_from: 0,
+                valid_to: None,
+            }
+        }
+        let docs = vec![
+            task("task-1-1", "done", false, "telegram:42"),
+            task("task-2-2", "done", true, "telegram:42"),   // 已上报：不重复
+            task("task-3-3", "running", false, "telegram:42"), // 还在跑：不算
+            task("task-4-4", "done", false, "telegram:99"),  // 别的 chat：不算
+        ];
+        let (ids, msg) = resume_brief(&docs, "telegram:42").expect("应有可上报任务");
+        assert_eq!(ids, vec!["task-1-1".to_string()]);
+        assert!(msg.contains("原任务：task-1-1 的委托书"), "{msg}");
+        assert!(msg.contains("结论：定位完成"), "{msg}");
+        assert!(!msg.contains("task-2-2"), "已上报的不该再出现：{msg}");
+        assert!(!msg.contains("task-4-4"), "别的会话不该混进来：{msg}");
+
+        assert!(resume_brief(&docs, "telegram:77").is_none());
+    }
+
+    #[test]
+    fn tool_execution_gets_a_much_longer_stall_window() {
+        assert_eq!(super::stall_limit(false).as_secs(), 180);
+        assert_eq!(super::stall_limit(true).as_secs(), 30 * 60);
     }
 }

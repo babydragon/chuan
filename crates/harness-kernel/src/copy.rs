@@ -40,7 +40,8 @@ pub const TOO_LONG: &str = "这一轮的内容太长，超出一次能处理的�
 
 /// 任务卡住 / 超时：不写 `wall_clock_ms` / `max_turns` 这类配置名。
 pub const STALLED: &str = "⏱ 任务卡住了：好几分钟没有任何进展，已经取消。可以换个说法再试。";
-pub const OUT_OF_TIME: &str = "⏱ 这次做的时间太长了，已经停下。把任务拆小一点再试。";
+pub const OUT_OF_TIME: &str =
+    "⏱ 这次做的时间/回合用完了，已经停下。\n下一步：把任务拆小一点，或让我分几段做——已经完成的部分还在。";
 
 /// `/usage` 的金额一栏：没配价格时别假装免费，也别甩配置键。
 pub const MONEY_UNKNOWN: &str = "金额未统计";

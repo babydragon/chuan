@@ -56,7 +56,7 @@ impl Tool for DelegateTool {
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "true = 排成后台任务，立刻返回任务号，结果之后推回本会话（适合几十秒以上的活）"
+                        "description": "true = 排成后台任务，立刻返回任务号，全部跑完后会自动叫醒你收尾。**预计超过 2 分钟、或要读整本/全量材料、或要逐个遍历时一律用 true**；前台只用于「结果决定下一步」的短任务"
                     }
                 },
                 "required": ["task"]

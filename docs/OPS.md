@@ -65,6 +65,12 @@ max_turns = 6            # 单个子 agent 的轮数上限
 max_tokens = 20000       # 单个子 agent 的 token 预算（prompt+completion）
 wall_ms = 120000         # 单个子 agent 的墙钟上限
 # 并发由 [lanes] agent 控制（默认 1）。
+# 前台 delegate 会阻塞父 run；父 run 的"卡住判定"在工具执行期间放宽到 30 分钟
+# （模型阶段仍是 180s）。更长的活请用 background=true。
+# 后台任务**全部**跑完后叫醒父 agent 收尾：消息里带原任务、子 agent 结论与待办，
+# 落到**当前** epoch（/new 之后也能收到）。同一批只唤醒一次；由唤醒产生的 run
+# 再派的任务不再唤醒，避免链式。关掉就是"只推一条完成通知，等你发话"。
+resume_on_done = true
 # 前台静默多少秒后才启动后台任务；0 = 不等（会与前台抢模型车道，首字变慢）
 # 任务 tick 是 5s 一次（提醒仍是 30s），所以最坏等待 ≈ background_idle_s + 5s
 background_idle_s = 5
