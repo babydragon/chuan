@@ -50,6 +50,10 @@ ProtectClock=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadWritePaths=/var/lib/chuan
+# agent 会改的配置子目录（自改事务，D35）：ProtectSystem=strict 下 /etc 是只读的，
+# 不显式放开就是 EROFS——本机就出过"publish_playbook 写临时文件被拒"。
+# 只放开这几个子目录；chuan.toml 与 secrets 仍只读。前缀 `-`：目录缺失时不拖垮启动。
+ReadWritePaths=-/etc/chuan/playbooks -/etc/chuan/services.d -/etc/chuan/roles -/etc/chuan/commands.d -/etc/chuan/capabilities
 # 注意：不要在这里写 ReadWritePaths=/run/user/%U —— system 单元里 %U 恒为 0
 # （它指"运行 service manager 的用户"），会变成 /run/user/0 导致 226/NAMESPACE。
 # 宿主 lane 只需要**连** /run/user/<uid>/systemd/private，只读挂载即可；

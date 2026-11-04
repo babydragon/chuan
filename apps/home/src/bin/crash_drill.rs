@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 system_prompt: None,
                 images: Vec::new(),
                 actor: "drill".into(),
-                context_budget_chars: 100_000,
+                context_budget_tokens: 100_000,
                 token_budget: None,
                 // 演练用：没有真实身份，按 owner 跑，避免把演练变成"全被 Blocked"。
                 role: harness_kernel::ActorRole::Owner,

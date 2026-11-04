@@ -18,6 +18,9 @@ pub enum EngineError {
     /// 额度用尽（5 小时/每周/每月配额、余额不足）——绝不自动重试
     #[error("quota exhausted: {message}")]
     Quota { message: String, retry_after_s: Option<u64> },
+    /// 这一轮塞的东西超过模型窗口（供应商 400）。不是配置错误，是上下文策略问题。
+    #[error("context overflow: {0}")]
+    ContextOverflow(String),
 }
 
 #[derive(Debug, Error)]

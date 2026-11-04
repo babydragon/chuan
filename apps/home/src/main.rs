@@ -622,7 +622,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             workspace_root: cfg.workspace.clone(),
             system_prompt: cfg.system_prompt.clone(),
             policy: cfg.policy.clone(),
-            context_budget_chars: cfg.context_budget_chars,
+            context_budget_tokens: cfg.context_budget_tokens,
             skill_source: Some(Arc::clone(&skills) as Arc<dyn harness_kernel::SkillSource>),
             tool_source: if mcp.is_empty() {
                 None

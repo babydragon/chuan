@@ -144,6 +144,19 @@ pub fn classify(status: u16, body: &str, retry_after_s: Option<u64>) -> EngineEr
     if status == 401 || auth_words.iter().any(|w| lower.contains(w)) {
         return EngineError::Auth(short(body));
     }
+    // 400 里"太长"这一类要单独识别：它需要换做法（把材料放文件），不是重试能解决的。
+    let overflow_words = [
+        "context_length_exceeded",
+        "maximum context length",
+        "context length",
+        "prompt is too long",
+        "input is too long",
+        "too many tokens",
+        "reduce the length",
+    ];
+    if (status == 400 || status == 413) && overflow_words.iter().any(|w| lower.contains(w)) {
+        return EngineError::ContextOverflow(short(body));
+    }
     if status == 402 || status == 429 || quota_words.iter().any(|w| lower.contains(w)) {
         let retry = retry_after_s.or_else(|| {
             // 尝试从 body 里抓 retry_after / reset 时间
@@ -188,6 +201,16 @@ mod classify_tests {
             classify(400, "{\"error\":{\"code\":\"insufficient_quota\"}}", None),
             EngineError::Quota { .. }
         ));
+    }
+
+    #[test]
+    fn maps_context_overflow() {
+        assert!(matches!(
+            classify(400, "{\"error\":{\"message\":\"maximum context length is 32768 tokens\"}}", None),
+            EngineError::ContextOverflow(_)
+        ));
+        // 普通 400 不能被误判成长度问题
+        assert!(matches!(classify(400, "bad request: unknown field", None), EngineError::Provider(_)));
     }
 
     #[test]

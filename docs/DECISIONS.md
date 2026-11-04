@@ -673,6 +673,10 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
    "_approval": { "why": "一句人话", "impact": "只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
    ```
    `why` 与 `impact` 都是 `required`。内核在**执行前剥掉** `_approval`，工具看不到它。
+   **每一个会触发审批的工具都要在 schema 里声明它**（并把 `_approval` 放进 `required`）——
+   只在系统提示里列名单会漂：2026-11-04 的 `role` / `service` / `publish_playbook` /
+   `rollback_playbook` 就是名单里没有、schema 里也没有，审批卡只能显示"模型未说明"。
+   `tests/selfmod.rs` 现在断言这四个工具都声明且必填。
 2. **卡片三段式**（顺序固定）：做什么 → 影响面 → 工具/命令（命令摘要 ≤200 字）。
    缺 `why` 时显示「（模型未说明这条要做什么）」，不假装有解释。
 3. **短码审批**：同一会话同一时刻只有一条待审批（run 持会话锁、审批门串行），
@@ -1109,9 +1113,38 @@ trigram 索引比为一个尚未验证的规模去设计投影表更划算。抽
 
 **代价**：多一层间接（读取 `selfmod`），每个工具要维护自己的备份目录；
 回收站需要主人定期清理（默认不自动删）。
+**部署约束**：落在 `<config>/` 下的可写目标，必须同时出现在 unit 的 `ReadWritePaths`
+（`ProtectSystem=strict` 下 `/etc` 只读）；目录权限用 `0770 root:<服务组>`。
+2026-11-04 实测踩过：`playbooks/` 是 `0750` 且不在 `ReadWritePaths` 里，
+`publish_playbook` 写临时文件被拒——权限看着对，实际是 `EROFS`。
 
 **验收**：
 1. 服务：add → 改 → rollback 回到旧 base → remove 后文件进 `.trash/`，四步各有一条账；
 2. 角色：add → 改模型 → rollback 同时恢复 toml 与提示词（同一代），remove 两个文件都进回收站；
 3. 技能/规范：覆盖留备份且最多 5 份，rollback 可再回滚；
 4. 断电（`kill -9` 在写盘中途）不会留下半截 TOML。
+
+---
+
+## D36 · 上下文预算按 token 算，并把 system 与工具说明扣掉
+
+**背景**：`context_budget_tokens=24000` 以前被换算成 `字符数 = token × 3`（英文经验），
+而且只用于裁剪历史——system 指令、25 个工具的 JSON schema、当前消息都不占这笔账。
+中文实际是"1 字 ≈ 1 token"，于是一边高估容量（3 倍）、一边漏算固定开销，
+长对话很容易顶到模型窗口，表现为供应商返回 **HTTP 400 context length exceeded**。
+
+**决定**：
+1. `context::select` 改成按 token 估算裁剪；`estimate_tokens` 采用 CJK 感知的粗估
+   （CJK 1 字 ≈ 1 token，其它 ~4 字符 ≈ 1 token）。不引真分词器：这里只决定"裁多少"，宁可保守。
+2. `context_budget_tokens` 语义改为**一轮的总预算**：历史预算 = 总预算 − system − 工具 schema −
+   1024 预留（当前消息与输出），下限 1000。
+3. 供应商 400/413 中属于"太长"的那一类单独识别为 `EngineError::ContextOverflow`，
+   回一句可操作的提示（把长材料放文件、按文件读），不再把裸 400 甩给用户。
+
+**非目标**：不做精确分词（要维护各家的 tokenizer）；不自动压缩历史（那是另一件事，ROADMAP 另有条目）；
+不加 `[engine] context_window`（模型窗口仍由配置的预算兜住，需要时再加）。
+
+**验收**：
+1. 纯中文长对话不再因为"看起来没超"而撞 400；
+2. 系统指令与工具 schema 变大时，历史预算相应减少；
+3. 供应商报"context length"时，用户看到的是"把材料放进文件"的下一步，而不是 `http 400`。

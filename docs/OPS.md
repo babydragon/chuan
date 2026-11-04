@@ -41,6 +41,7 @@ wall_clock_ms = 0
 # workspace 清理：/ws 是草稿区，不是档案库；0 = 该维度不设限
 workspace_keep_days = 7
 workspace_max_mb = 256
+# 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）；中文按 1 字≈1 token 估算
 context_budget_tokens = 24000
 workspace = "~/.local/share/chuan/workspaces"
 
@@ -56,7 +57,9 @@ agent = 1       # 子 agent 派生（P4.1 起生效）
 # 子 agent 闸门（DECISIONS.md D19/D20）。enabled = false 时 delegate 一律拒绝。
 enabled = true
 max_per_run = 2          # 单个 run 最多派几个子 agent
-# tools = ["read", "write", "exec", "playbook", "web_fetch", "keep", "files"]
+# tools = ["read", "write", "exec", "playbook", "web_fetch", "keep", "files",
+#          "kb_ingest", "kb_search", "kb_read", "kb_list", "kb_select",
+#          "kb_outline", "kb_outline_set", "kb_file"]   # 默认值（不含 kb_forget）
 #   子 agent 能看到的工具。默认只给免审批域；放宽这里不等于放宽权限（审批域仍会拦）。
 max_turns = 6            # 单个子 agent 的轮数上限
 max_tokens = 20000       # 单个子 agent 的 token 预算（prompt+completion）
@@ -338,7 +341,7 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 | 微信凭据 | `<weixin.credential_file>`（`chuan weixin-login` 写，0640，**归属跟随目录**），`accounts` 数组，每项一个 bot（bot_token / bot_id / 主人 id） | 扫码登录 |
 | 主配置 | `<config>/chuan.toml` | 主人 |
 | 运行期新增服务 | `<config>/services.d/<name>.toml`（目录 `0770 root:chuan`） | agent 通过 `service` 工具写；安装脚本预建，缺了会导致"本进程可用、重启丢失" |
-| playbook（SOP/API 说明） | `<config>/playbooks/<topic>.md` | agent 或主人 |
+| playbook（SOP/API 说明） | `<config>/playbooks/<topic>.md`（目录 `0770 root:chuan`） | agent 通过 `publish_playbook`；主人也可手写 |
 | 技能 | `<skills>/<name>/` | agent 通过 `publish_skill` |
 | 文件库（长期） | `<library>/<digest>/<name>` | agent 通过 `keep` |
 | 聊天附件 | `<media>/<digest>.<ext>` | 通道自动落盘（30 天） |
@@ -355,7 +358,11 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 - 凭据内容只由宿主在发请求时读取，**不进上下文、不进日志、不进技能**；
 - 带签名的 webhook（钉钉/飞书）用 `sign` 在宿主侧算 HMAC-SHA256，见 README「带签名的 webhook」；
 - 工具输出在进上下文与账本前会过一遍泄漏检测（`harness_kernel::leak`），命中打码并记 `warn`；
-- 这些路径会按实际配置注入 system prompt，所以可以直接问 agent「key 该放哪」。
+- 这些路径会按实际配置注入 system prompt，所以可以直接问 agent「key 该放哪」；
+- **可写目录必须同时在 unit 的 `ReadWritePaths` 里**：`ProtectSystem=strict` 下 `/etc` 整体只读，
+  只改目录权限不够。agent 会写的四个子目录（`playbooks` / `services.d` / `roles` / `commands.d` /
+  `capabilities`）已写进 `deploy/chuan.service`；遗漏的表现是"目录权限看着没问题，但工具报
+  `Read-only file system`/写临时文件被拒"。`scripts/check-install.sh` 会断言这一条。
 
 `<config>` 默认 `~/.config/chuan`，`<skills>/<library>/<media>` 默认在 `~/.local/share/chuan/` 下。
 

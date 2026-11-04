@@ -30,19 +30,21 @@ impl Tool for DelegateTool {
                 不适合：一两步就能答的、需要用户确认的、需要发消息/打印/改配置的（子 agent 没有审批权）。
 \
                 有专门角色时用 role 指定（如写代码用 coder），它决定提示词、模型与可用工具。\n\
-                子 agent 看不到本会话历史，所以 task 里必须把前提写全；要它看文件就放进 inputs。"
+                子 agent 看不到本会话历史，所以前提要写全——但**别全塞进 task**：\
+                超过几百字的委托书先 `write` 到 /ws（如 /ws/<任务>/brief.md），task 只写目标与验收标准，\
+                路径放 inputs；它自己会 read。task 超过 4000 字会被拒，而且长 task 会把本轮上下文顶爆。"
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "要它做什么 + 期望的输出格式（它看不到本会话历史）"
+                        "description": "目标 + 验收标准（几百字以内）。详细背景写进 /ws 的说明文件，路径放 inputs"
                     },
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "/ws 下已有的文件路径（只传路径，不搬内容）"
+                        "description": "/ws 下已有的文件路径（只传路径，不搬内容）。长委托书、原始材料都走这里"
                     },
                     "role": {
                         "type": "string",

@@ -147,7 +147,7 @@ pub struct ActorConfig {
     /// 审批策略：按执行域判定，`extra_tools` 可额外加严
     pub policy: crate::policy::ApprovalPolicy,
     /// 上下文预算（估算字符数）
-    pub context_budget_chars: usize,
+    pub context_budget_tokens: usize,
     /// 并发车道（D11）。所有 run 共享同一组信号量。
     pub lanes: crate::lanes::Lanes,
     /// 子 agent 闸门与默认预算（D19/D20）
@@ -330,6 +330,25 @@ const FINAL_ATTEMPTS: usize = 3;
 const FINAL_WAIT_CAP_MS: u64 = 60_000;
 
 impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
+    /// 历史预算 = 总预算 − system − 工具 schema − 输出/当前消息预留。
+    ///
+    /// 以前只扣历史、不扣 system 与工具定义，长对话很容易顶到模型窗口；
+    /// 中文按"1 字 ≈ 1 token"计（见 `context::estimate_tokens`），不再按英文的 3 字符折算。
+    fn history_budget_tokens(&self, system: &str) -> usize {
+        let tools: usize = self
+            .tools
+            .specs()
+            .iter()
+            .map(|s| {
+                crate::context::estimate_tokens(&s.description)
+                    + crate::context::estimate_tokens(&s.parameters.to_string())
+                    + 4
+            })
+            .sum();
+        let reserve = crate::context::estimate_tokens(system) + tools + 1024;
+        self.cfg.context_budget_tokens.saturating_sub(reserve).max(1_000)
+    }
+
     /// 终稿必须尽量送达：被限流就按 retry_after 等窗口再发，而不是丢掉。
     async fn apply_final(
         &self,
@@ -1552,6 +1571,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             attachment_lines(&inb.attachments)
         );
         let conv_key = conv.0.clone();
+        let budget_tokens = self.history_budget_tokens(&system);
         let req = RunRequest {
             conv,
             run: run.clone(),
@@ -1563,7 +1583,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             actor: inb.actor.clone(),
             images,
             workspace: Workspace { run: run.clone(), root: self.cfg.workspace_root.clone() },
-            context_budget_chars: self.cfg.context_budget_chars,
+            context_budget_tokens: budget_tokens,
             token_budget: None,
             role,
             // 定时任务触发的那一轮：没有人在场（见 `InboundKind::Scheduled`）。
@@ -1719,6 +1739,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                             tracing::warn!(detail = %m, "模型鉴权失败");
                             crate::copy::AUTH_FAILED.to_owned()
                         }
+                    }
+                    crate::runner::RunnerError::Engine(
+                        crate::error::EngineError::ContextOverflow(detail),
+                    ) => {
+                        tracing::warn!(detail = %detail, "上下文超出模型窗口");
+                        crate::copy::TOO_LONG.to_owned()
                     }
                     crate::runner::RunnerError::Blocked { hint, .. } => crate::copy::blocked(&hint),
                     crate::runner::RunnerError::Budget(what) if what == "stalled" => {
@@ -3031,6 +3057,7 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             .clone()
             .or_else(|| role.and_then(|r| r.model.clone()))
             .unwrap_or_else(|| self.cfg.model.clone());
+        let budget_tokens = self.history_budget_tokens(&system);
 
         let req = RunRequest {
             conv: ConversationId(child_conv.clone()),
@@ -3043,7 +3070,7 @@ impl<S: Store, D: TurnDriver> crate::agent::AgentSpawner for ConversationActor<S
             actor: "agent".into(),
             images: Vec::new(),
             workspace: Workspace { run: child_run.clone(), root: self.cfg.workspace_root.clone() },
-            context_budget_chars: self.cfg.context_budget_chars,
+            context_budget_tokens: budget_tokens,
             token_budget: Some(max_tokens),
             // 子 agent 没有通道：按最严格的一档判定，且它本来就不能走 Ask（D19）。
             role: ActorRole::Member,

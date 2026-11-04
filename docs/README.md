@@ -64,7 +64,13 @@
 > **0.2.0-rc.1**：知识库（`kb_ingest` / `kb_search` / `kb_read` / `kb_select` / `kb_outline*` /
 > `kb_file` / `kb_list` / `kb_forget`）、`publish_playbook` 与 `rollback_playbook`、
 > 自改事务统一（原子写 / 备份 / 回滚 / 回收站 / 记账）、`docs_fts` 改 trigram、
-> `http(save_to)` 支持大文件落盘。预发布到 `v0.2.0-rc.1`。
+> `http(save_to)` 支持大文件落盘。
+> **0.2.0-rc.2**（修复）：子 agent 默认工具含 8 个 `kb_*`（不含 `kb_forget`）；
+> `playbooks/` 改为 `0770` 并把五个可写子目录写进 unit 的 `ReadWritePaths`（此前是 EROFS）；
+> `role` / `service` / `publish_playbook` / `rollback_playbook` 补 `_approval` 且必填；
+> 上下文预算改按 token 计（CJK 1 字≈1 token）并扣掉 system 与工具说明；
+> 供应商 400"太长"回可操作提示；`delegate` 引导长委托书写进 `/ws`。
+> 预发布到 `v0.2.0-rc.2`。
 
 ---
 

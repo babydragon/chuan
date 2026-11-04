@@ -99,7 +99,7 @@ if sudo -n true 2>/dev/null; then
   expect "配置目录"   /etc/chuan                  "750 root:$G"
   expect "secrets"    /etc/chuan/secrets          "750 root:$G"
   expect "services.d" /etc/chuan/services.d       "770 root:$G"
-  expect "playbooks"  /etc/chuan/playbooks        "750 root:$G"
+  expect "playbooks"  /etc/chuan/playbooks        "770 root:$G"
   expect "prompts"    /etc/chuan/prompts          "750 root:$G"
   expect "状态目录"   /var/lib/chuan              "750 $U:$G"
   expect "配置(已有)" /etc/chuan/chuan.toml       "640 root:$G"
@@ -113,6 +113,13 @@ if sudo -n true 2>/dev/null; then
   [[ -f $hostd ]] || fail "chuan-hostd.service 没被安装"
   grep -q "@CHUAN_UID@" "$hostd" && fail "chuan-hostd.service 的 uid 占位符没替换"
   grep -qE -- "--allow-uid [0-9]+" "$hostd" || fail "chuan-hostd.service 缺 --allow-uid"
+
+  # unit 必须把 agent 会写的配置子目录放开：ProtectSystem=strict 下 /etc 只读，
+  # 漏一个就是"装好了但工具写不进去"（publish_playbook 就这么失败过）。
+  unit="$ROOT/etc/systemd/system/chuan.service"
+  for d in playbooks services.d roles commands.d capabilities; do
+    grep -q -- "/etc/chuan/$d" "$unit" || fail "unit 的 ReadWritePaths 缺少 /etc/chuan/$d"
+  done
 
   # 幂等：第二次跑不应该再报任何"校正"（stat 的 750 vs 配置的 0750 必须按数值比）
   sudo env CHUAN_ROOT="$ROOT" CHUAN_USER="$U" CHUAN_GROUP="$G" \

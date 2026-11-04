@@ -423,6 +423,8 @@ pub struct ActorFile {
     pub workspace: Option<String>,
     /// 用户投递目录（只读挂到沙盒 /inbox）
     pub inbox: Option<String>,
+    /// 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）。
+    /// 中文按 1 字 ≈ 1 token 估算，不再按英文的 3 字符折算。
     #[serde(default = "default_ctx_tokens")]
     pub context_budget_tokens: usize,
     /// workspace 清理：超过这么多天的文件删掉（0 = 不按时间删）
@@ -652,7 +654,7 @@ pub struct Config {
     pub policy: ApprovalPolicy,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
-    pub context_budget_chars: usize,
+    pub context_budget_tokens: usize,
     pub skills_dir: String,
     pub distill_prompt: String,
     pub playbooks_dir: String,
@@ -1023,7 +1025,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         max_retries: file.engine.max_retries,
         retry_backoff_ms: file.engine.retry_backoff_ms,
         // 粗估：中英混排约 3 字符/token
-        context_budget_chars: file.actor.context_budget_tokens.saturating_mul(3),
+        context_budget_tokens: file.actor.context_budget_tokens,
         skills_dir: file
             .skills
             .dir

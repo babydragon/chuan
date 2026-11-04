@@ -274,11 +274,20 @@ impl Tool for PublishPlaybookTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "_approval": {
+                        "type": "object",
+                        "description": "审批卡上给非程序员看的解释；装/覆盖规范一定会触发审批，所以必填",
+                        "properties": {
+                            "why": { "type": "string", "description": "一句人话：这份规范解决什么问题" },
+                            "impact": { "type": "string", "description": "影响面：只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
+                        },
+                        "required": ["why", "impact"]
+                    },
                     "topic": { "type": "string", "description": "规范名：小写字母/数字/-/_，≤40" },
                     "path": { "type": "string", "description": "草稿路径（/ws 下的 .md 文件）" },
                     "override": { "type": "boolean", "description": "覆盖内置规范时必须为 true" }
                 },
-                "required": ["topic", "path"]
+                "required": ["topic", "path", "_approval"]
             }),
         }
     }
@@ -523,9 +532,18 @@ impl Tool for RollbackPlaybookTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "_approval": {
+                        "type": "object",
+                        "description": "审批卡上给非程序员看的解释；回滚一定会触发审批，所以必填",
+                        "properties": {
+                            "why": { "type": "string", "description": "一句人话：为什么要退回上一版" },
+                            "impact": { "type": "string", "description": "影响面：只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
+                        },
+                        "required": ["why", "impact"]
+                    },
                     "topic": { "type": "string", "description": "规范名" }
                 },
-                "required": ["topic"]
+                "required": ["topic", "_approval"]
             }),
         }
     }

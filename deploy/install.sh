@@ -202,7 +202,8 @@ run install -Dm755 -o root -g root "$BIN_SRC" "$BIN"
 ensure_dir "$ETC"            0750 root "$SVC_GROUP"
 # secrets 目录要让服务用户"进得去"（x 位）；文件权限见第 5 步
 ensure_dir "$SECRETS"        0750 root "$SVC_GROUP"
-ensure_dir "$ETC/playbooks"  0750 root "$SVC_GROUP"
+# agent 通过 publish_playbook 写这里（D23/D35），必须让服务用户可写
+ensure_dir "$ETC/playbooks"  0770 root "$SVC_GROUP"
 ensure_dir "$ETC/prompts"    0750 root "$SVC_GROUP"
 # 运行期新增的服务写这里；必须让服务用户可写，否则重启就丢
 ensure_dir "$ETC/services.d" 0770 root "$SVC_GROUP"
@@ -374,7 +375,7 @@ cat <<NEXT
   /etc/chuan/ipptool        0755 root:root         （ipptool 查询定义，如墨量）
   /etc/chuan/roles          0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
   /etc/chuan/capabilities   0770 root:$SVC_GROUP   （权限申请草稿，agent 只写这里）
-  /etc/chuan/playbooks      0750 root:$SVC_GROUP
+  /etc/chuan/playbooks      0770 root:$SVC_GROUP   （agent 沉淀的规范，可写、热加载）
   /var/lib/chuan            0750 $SVC_USER:$SVC_GROUP
   /var/lib/chuan/timers     0750 $SVC_USER:$SVC_GROUP  （宿主 lane 的监控脚本；[host.path] 已授权）
 

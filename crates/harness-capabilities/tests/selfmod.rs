@@ -159,3 +159,33 @@ async fn role_add_update_rollback_remove() {
         "toml 与 md 都进回收站"
     );
 }
+
+/// 会触发审批的工具必须在 schema 里声明 `_approval`：模型靠它知道"要写原因"。
+/// 之前 `role` / `service` / 两个 playbook 工具漏了，审批卡上就只能显示"模型未说明"。
+#[test]
+fn self_modify_tools_declare_approval_slot() {
+    use harness_capabilities::{PublishPlaybookTool, RollbackPlaybookTool};
+
+    let dir = tempfile::tempdir().unwrap();
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(RoleTool::new(dir.path().join("roles"))),
+        PublishPlaybookTool::new(dir.path().join("pb"), vec![]),
+        RollbackPlaybookTool::new(dir.path().join("pb")),
+        service_tool(&dir),
+    ];
+    for t in tools {
+        let spec = t.spec();
+        assert!(
+            spec.parameters["properties"]["_approval"].is_object(),
+            "{} 的参数里缺 _approval（审批卡会显示「模型未说明」）",
+            spec.name
+        );
+        assert!(
+            spec.parameters["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|v| v == "_approval")),
+            "{} 必须把 _approval 标成必填，否则模型仍可能省略",
+            spec.name
+        );
+    }
+}

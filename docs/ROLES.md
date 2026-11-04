@@ -28,7 +28,7 @@ sudo systemctl restart chuan
 [agents]
 enabled = true
 # 子 agent 能用的工具总白名单（角色只能在这个范围内再收窄）
-# 默认就是 read/write/exec/playbook/web_fetch/keep/files，一般不用改
+# 默认就是 read/write/exec/playbook/web_fetch/keep/files + 八个 kb_*（不含 kb_forget），一般不用改
 max_per_run = 2          # 一次对话最多派几个
 background_idle_s = 5    # 前台静默多久才启动后台任务（tick 另有 5s）
 roles_dir = "~/.config/chuan/roles"
@@ -173,7 +173,7 @@ wall_ms = 180000
 | 想加的工具 | 能不能成 |
 |---|---|
 `web_fetch`（宿主代取网页） | ✅ 在默认白名单里。沙盒仍然没网，取网页由宿主代做、逐次审计 |
-`read/write/exec/playbook/keep/files` | ✅ 默认白名单 |
+`read/write/exec/playbook/keep/files` + `kb_*`（不含 `kb_forget`） | ✅ 默认白名单 |
 `http` / `mcp` / `service` / `lan_exec` / `install_deps` / 技能发布 | ❌ 角色里写了也**不会生效**——它们不在 `[agents] tools` 白名单（现在会明确提示）。要放开必须你改主配置，那是根信任，agent 改不了 |
 
 所以"让 coder 能联网查资料"的正确做法是给它 `web_fetch`；真需要内网直连（`lan_exec`）才去动主配置。

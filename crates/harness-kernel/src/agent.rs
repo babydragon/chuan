@@ -29,6 +29,10 @@ pub const PENDING_MARKER: &str = "[待父执行]";
 /// 子 agent 都拿不到。要在某个部署里放宽，改 `[agents] tools`——但审核域仍会拦。
 pub const DEFAULT_CHILD_TOOLS: &[&str] = &[
     "read", "write", "exec", "playbook", "web_fetch", "keep", "files",
+    // 资料库：后台慢慢处理一本书是典型用法（抽取用 exec，入库/查询用这些）。
+    // `kb_forget` 不在里面——删除是不可逆的外部副作用，留给主会话。
+    "kb_ingest", "kb_search", "kb_read", "kb_list", "kb_select",
+    "kb_outline", "kb_outline_set", "kb_file",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

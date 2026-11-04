@@ -228,6 +228,15 @@ impl Tool for ServiceTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "_approval": {
+                        "type": "object",
+                        "description": "审批卡上给非程序员看的解释；改自身配置一定会触发审批，所以必填",
+                        "properties": {
+                            "why": { "type": "string", "description": "一句人话：接哪个服务、为什么需要" },
+                            "impact": { "type": "string", "description": "影响面：只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
+                        },
+                        "required": ["why", "impact"]
+                    },
                     "action": { "type": "string", "enum": ["list", "add", "remove", "rollback"] },
                     "name": { "type": "string", "description": "服务名（小写字母/数字/-/_）" },
                     "kind": { "type": "string", "enum": ["http", "mcp"], "description": "默认 http" },
@@ -263,7 +272,7 @@ impl Tool for ServiceTool {
                     },
                     "catalog": { "type": "string", "enum": ["names", "full", "summary"] }
                 },
-                "required": ["action"]
+                "required": ["action", "_approval"]
             }),
         }
     }

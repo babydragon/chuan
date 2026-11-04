@@ -34,6 +34,10 @@ pub fn quota_exhausted(wait: &str, detail: &str) -> String {
 /// 服务商没通过验证（key 失效/过期）。
 pub const AUTH_FAILED: &str = "🔑 服务商那边没有通过验证（登录信息可能过期了），已停止。";
 
+/// 一轮的内容超过模型一次能处理的量：给出"放文件里"的下一步，不甩 400。
+pub const TOO_LONG: &str = "这一轮的内容太长，超出一次能处理的量，已经停下了。\n\
+下一步：把长材料放进工作区，让我按文件去读，而不是整段贴进来。";
+
 /// 任务卡住 / 超时：不写 `wall_clock_ms` / `max_turns` 这类配置名。
 pub const STALLED: &str = "⏱ 任务卡住了：好几分钟没有任何进展，已经取消。可以换个说法再试。";
 pub const OUT_OF_TIME: &str = "⏱ 这次做的时间太长了，已经停下。把任务拆小一点再试。";

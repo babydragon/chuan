@@ -37,7 +37,8 @@ pub struct RunRequest {
     /// 当轮附带的图片（走多模态；不进历史）
     pub images: Vec<crate::driver::ImagePart>,
     /// 历史裁剪预算（估算字符数）；超出后按"轮"整组丢弃旧内容
-    pub context_budget_chars: usize,
+    /// 整轮上下文的 token 预算（system + 工具 + 历史 + 当前消息）
+    pub context_budget_tokens: usize,
     /// 发起者的主体角色（D30）。审批门据此决定"发卡"还是"直接 Blocked"。
     pub role: crate::identity::ActorRole,
     /// 这一轮是定时任务触发的（D30 §7）：**没有人在场**，所以不能发卡等人点。
@@ -179,7 +180,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             let mut rd = self.store.begin_read().await?;
             rd.messages(conv.clone(), 0, 50).await?.msgs
         };
-        let (history, trimmed) = crate::context::select(&history, req.context_budget_chars);
+        let (history, trimmed) = crate::context::select(&history, req.context_budget_tokens);
         if trimmed > 0 {
             tracing::info!(trimmed, "context trimmed to budget");
         }

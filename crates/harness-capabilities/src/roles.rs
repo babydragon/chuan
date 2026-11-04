@@ -178,6 +178,15 @@ impl Tool for RoleTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "_approval": {
+                        "type": "object",
+                        "description": "审批卡上给非程序员看的解释；改自身配置一定会触发审批，所以必填",
+                        "properties": {
+                            "why": { "type": "string", "description": "一句人话：这个角色/改动是干什么用的" },
+                            "impact": { "type": "string", "description": "影响面：只读 / 写文件 / 装软件 / 向设备发指令 / 改自身配置" }
+                        },
+                        "required": ["why", "impact"]
+                    },
                     "action": { "type": "string", "enum": ["list", "add", "remove", "rollback"] },
                     "name": { "type": "string", "description": "小写字母/数字/-/_，≤32 字符" },
                     "description": { "type": "string", "description": "一句话说明（会显示给主模型和你我）" },
@@ -191,7 +200,7 @@ impl Tool for RoleTool {
                     "max_tokens": { "type": "integer" },
                     "wall_ms": { "type": "integer" }
                 },
-                "required": ["action"]
+                "required": ["action", "_approval"]
             }),
         }
     }
