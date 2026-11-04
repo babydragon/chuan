@@ -1700,6 +1700,29 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             inb.text.clone().unwrap_or_default(),
             attachment_lines(&inb.attachments)
         );
+        // 正在跑的后台任务：不注入的话模型看不见，用户每说一句它就再派一遍同样的活。
+        let active: Vec<crate::record::Doc> = self
+            .list_tasks()
+            .await
+            .into_iter()
+            .filter(|d| {
+                matches!(
+                    d.payload["status"].as_str(),
+                    Some("pending") | Some("running")
+                )
+            })
+            .collect();
+        if !active.is_empty() {
+            system.push_str("\n\n正在跑的后台任务（这些已经在做，**不要重复派**；要掐掉用 `task` 工具或 /tasks）：\n");
+            for d in active.iter().take(10) {
+                let text: String = d.payload["text"].as_str().unwrap_or("").chars().take(200).collect();
+                system.push_str(&format!(
+                    "- {} · {} · {text}\n",
+                    d.id.0,
+                    d.payload["status"].as_str().unwrap_or("?")
+                ));
+            }
+        }
         let conv_key = conv.0.clone();
         let budget_tokens = self.history_budget_tokens(&system);
         // 把回合预算说清楚：模型不知道上限，就会把整本书当"简单任务"自己啃，然后半路断掉。

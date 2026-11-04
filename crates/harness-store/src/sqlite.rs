@@ -959,13 +959,29 @@ fn rebuild(conn: &Connection) -> Result<(), StoreError> {
 #[async_trait]
 impl Store for SqliteStore {
     async fn begin_write(&self) -> Result<Box<dyn Tx>, StoreError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd
-            .send(Cmd::Begin(tx))
-            .await
-            .map_err(|_| StoreError::Unavailable("writer gone".into()))?;
-        rx.await.map_err(|_| StoreError::Unavailable("writer gone".into()))??;
-        Ok(Box::new(SqliteTx { cmd: self.cmd.clone(), open: true }))
+        // 单写者：同一时刻只允许一个事务。撞车时**退避重试**，不要把 Busy 直接抛上去——
+        // 那会让一次子任务仅因为"别人正在提交"就失败（真实事故：26 课对比跑到一半
+        // 报 `busy, retry after 50ms`，父 agent 以为任务坏了又重派一遍）。
+        let mut wait_ms = 20u64;
+        for attempt in 0..20u32 {
+            let (tx, rx) = oneshot::channel();
+            self.cmd
+                .send(Cmd::Begin(tx))
+                .await
+                .map_err(|_| StoreError::Unavailable("writer gone".into()))?;
+            match rx.await.map_err(|_| StoreError::Unavailable("writer gone".into()))? {
+                Ok(()) => return Ok(Box::new(SqliteTx { cmd: self.cmd.clone(), open: true })),
+                Err(StoreError::Busy { retry_after_ms }) if attempt < 19 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        wait_ms.max(retry_after_ms as u64),
+                    ))
+                    .await;
+                    wait_ms = (wait_ms * 2).min(500);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(StoreError::Busy { retry_after_ms: 500 })
     }
 
     async fn begin_read(&self) -> Result<Box<dyn ReadTx>, StoreError> {
