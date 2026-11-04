@@ -14,6 +14,7 @@ pub mod grants;
 pub mod host;
 pub mod hostd;
 pub mod install;
+pub mod kb;
 pub mod library;
 pub mod mcp;
 pub mod net;
@@ -24,6 +25,7 @@ pub mod spill;
 pub mod proxy;
 pub mod sandbox;
 pub mod roles;
+pub mod selfmod;
 pub mod skills;
 pub mod tools;
 
@@ -32,6 +34,10 @@ pub use grants::{Approval, ArgvGrant, Grants, GrantsCache, Mode, PathGrant};
 pub use elevated::ElevatedClient;
 pub use host::HostEnv;
 pub use install::InstallTool;
+pub use kb::{
+    KbFileTool, KbForgetTool, KbIngestTool, KbListTool, KbOutlineSetTool, KbOutlineTool,
+    KbReadTool, KbSearchTool, KbSelectTool,
+};
 pub use library::{FilesTool, KeepTool};
 pub use mcp::{McpCallTool, McpHub, McpServer};
 pub use net::{NetLogTool, WebFetchTool};
@@ -41,7 +47,7 @@ pub use tools::lan_command::LanCommandTool;
 pub use tools::remind::{RemindersTool, RemindTool};
 pub use tools::send::SendFileTool;
 pub use tools::task::TaskTool;
-pub use playbook::PlaybookTool;
+pub use playbook::{PlaybookTool, PublishPlaybookTool, RollbackPlaybookTool};
 pub use services::{HttpServiceTool, Service};
 pub use proxy::{Mode as ProxyMode, ProxyConfig};
 pub use sandbox::{BwrapEnv, Mount, SandboxProfile, validate_mount};

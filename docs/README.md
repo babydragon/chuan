@@ -61,6 +61,10 @@
 > （Brother 墨仓机对不认识的属性会这么回，数据照常给但 ipptool 会判 FAIL）；
 > README 的安装说明改为"预发布必须显式版本"（`/releases/latest` 只指向正式版）。
 > 首个正式版：`v0.1.0`。
+> **0.2.0-rc.1**：知识库（`kb_ingest` / `kb_search` / `kb_read` / `kb_select` / `kb_outline*` /
+> `kb_file` / `kb_list` / `kb_forget`）、`publish_playbook` 与 `rollback_playbook`、
+> 自改事务统一（原子写 / 备份 / 回滚 / 回收站 / 记账）、`docs_fts` 改 trigram、
+> `http(save_to)` 支持大文件落盘。预发布到 `v0.2.0-rc.1`。
 
 ---
 

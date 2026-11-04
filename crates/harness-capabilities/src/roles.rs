@@ -178,7 +178,7 @@ impl Tool for RoleTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "add", "remove"] },
+                    "action": { "type": "string", "enum": ["list", "add", "remove", "rollback"] },
                     "name": { "type": "string", "description": "小写字母/数字/-/_，≤32 字符" },
                     "description": { "type": "string", "description": "一句话说明（会显示给主模型和你我）" },
                     "prompt": { "type": "string", "description": "角色提示词（写进 <name>.md，≤8000 字）" },
@@ -239,28 +239,29 @@ impl Tool for RoleTool {
         args: serde_json::Value,
         _ctx: &ToolCtx<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        let text = match args["action"].as_str().unwrap_or("") {
-            "list" => self.list(),
+        let (text, docs) = match args["action"].as_str().unwrap_or("") {
+            "list" => (self.list(), Vec::new()),
             "add" => self.add(&args)?,
             "remove" => self.remove(&args)?,
+            "rollback" => self.rollback(&args)?,
             other => {
                 return Err(ToolError::new(
                     ErrorCode::InvalidArgs,
-                    format!("action 只能是 list/add/remove，收到 {other}"),
+                    format!("action 只能是 list/add/remove/rollback，收到 {other}"),
                     false,
                 ))
             }
         };
         Ok(ToolOutput {
             content: vec![Block::Paragraph(text)],
-            doc_writes: Vec::new(),
+            doc_writes: docs,
             artifacts: Vec::new(),
         })
     }
 }
 
 impl RoleTool {
-    fn add(&self, args: &serde_json::Value) -> Result<String, ToolError> {
+    fn add(&self, args: &serde_json::Value) -> Result<(String, Vec<harness_kernel::DocWrite>), ToolError> {
         let name = args["name"].as_str().unwrap_or("").trim();
         if !valid_name(name) {
             return Err(ToolError::new(
@@ -315,13 +316,20 @@ impl RoleTool {
 
         // 先写提示词，再写 toml：反过来会出现"角色存在但没提示词"的短暂状态。
         // prompt 没给就保留原来的（只想改工具时不必重贴提示词）。
+        let backup_dir = self.dir.join(crate::selfmod::BACKUP_DIR);
+        let md_path = self.dir.join(format!("{name}.md"));
+        let path = self.dir.join(format!("{name}.toml"));
+        // 覆盖前各留一份旧版；写入走原子替换（断电不留半截 TOML）
+        crate::selfmod::backup_file(&path, &backup_dir)
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
         if !prompt.is_empty() {
-            std::fs::write(self.dir.join(format!("{name}.md")), format!("{prompt}\n")).map_err(
+            crate::selfmod::backup_file(&md_path, &backup_dir)
+                .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+            crate::selfmod::write_atomic(&md_path, format!("{prompt}\n").as_bytes()).map_err(
                 |e| ToolError::new(ErrorCode::Unavailable, format!("写 {name}.md 失败: {e}"), false),
             )?;
         }
-        let path = self.dir.join(format!("{name}.toml"));
-        std::fs::write(&path, render_toml(&file)).map_err(|e| {
+        crate::selfmod::write_atomic(&path, render_toml(&file).as_bytes()).map_err(|e| {
             ToolError::new(ErrorCode::Unavailable, format!("写 {} 失败: {e}", path.display()), false)
         })?;
 
@@ -358,10 +366,24 @@ impl RoleTool {
         out.push_str(&format!(
             "下一次 delegate(role=\"{name}\") 即可用，不需要重启；`/prompt` 里的角色清单会同步更新。"
         ));
-        Ok(out)
+        let body = std::fs::read(&path).unwrap_or_default();
+        Ok((
+            out,
+            vec![crate::selfmod::record(
+                "role",
+                name,
+                if existed.is_some() { "update" } else { "add" },
+                &body,
+                serde_json::json!({
+                    "tools": tools,
+                    "model": file.model,
+                    "prompt_chars": prompt.chars().count(),
+                }),
+            )],
+        ))
     }
 
-    fn remove(&self, args: &serde_json::Value) -> Result<String, ToolError> {
+    fn remove(&self, args: &serde_json::Value) -> Result<(String, Vec<harness_kernel::DocWrite>), ToolError> {
         let name = args["name"].as_str().unwrap_or("").trim();
         if !valid_name(name) {
             return Err(ToolError::new(ErrorCode::InvalidArgs, "name 不合法", false));
@@ -375,11 +397,70 @@ impl RoleTool {
                 false,
             ));
         }
-        std::fs::remove_file(&toml_path)
-            .map_err(|e| ToolError::new(ErrorCode::Unavailable, format!("删除失败: {e}"), false))?;
-        let _ = std::fs::remove_file(&md_path);
-        Ok(format!("已删除角色 `{name}`。"))
+        // 软删除：两个文件都进回收站，并说清楚怎么捞回来
+        let trash_dir = self.dir.join(crate::selfmod::TRASH_DIR);
+        let a = crate::selfmod::trash(&toml_path, &trash_dir)
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+        crate::selfmod::trash(&md_path, &trash_dir)
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+        let where_ = a
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "（无）".into());
+        Ok((
+            format!("已删除角色 `{name}`。\n原文件在 {where_}，需要恢复就移回 roles/。"),
+            vec![crate::selfmod::record(
+                "role",
+                name,
+                "remove",
+                b"",
+                serde_json::json!({}),
+            )],
+        ))
     }
+
+    fn rollback(&self, args: &serde_json::Value) -> Result<(String, Vec<harness_kernel::DocWrite>), ToolError> {
+        let name = args["name"].as_str().unwrap_or("").trim();
+        if !valid_name(name) {
+            return Err(ToolError::new(ErrorCode::InvalidArgs, "name 不合法", false));
+        }
+        let backup_dir = self.dir.join(crate::selfmod::BACKUP_DIR);
+        let toml_name = format!("{name}.toml");
+        let Some((ts, bak)) = crate::selfmod::newest_backup(&backup_dir, &toml_name) else {
+            return Err(ToolError::new(
+                ErrorCode::NotFound,
+                format!("角色 `{name}` 没有历史版本可回滚"),
+                false,
+            ));
+        };
+        let body = std::fs::read(&bak)
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, format!("读备份失败：{e}"), false))?;
+        let path = self.dir.join(&toml_name);
+        crate::selfmod::backup_file(&path, &backup_dir)
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+        crate::selfmod::write_atomic(&path, &body)
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+        // 提示词有历史版本就一起回滚，避免 toml 与 md 来自不同代
+        let md_name = format!("{name}.md");
+        if let Some((_, md_bak)) = crate::selfmod::newest_backup(&backup_dir, &md_name) {
+            let md_path = self.dir.join(&md_name);
+            let md_body = std::fs::read(&md_bak).unwrap_or_default();
+            crate::selfmod::backup_file(&md_path, &backup_dir)
+                .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+            crate::selfmod::write_atomic(&md_path, &md_body)
+                .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+        }
+        Ok((
+            format!("角色 `{name}` 已回滚到 {ts} 那一版；下一次 delegate 立即生效。"),
+            vec![crate::selfmod::record(
+                "role",
+                name,
+                "rollback",
+                &body,
+                serde_json::json!({ "to": ts }),
+            )],
+        ))
+    }
+
 }
 
 /// 把合并后的结构写回 TOML。只写有值的字段。

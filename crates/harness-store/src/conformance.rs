@@ -322,6 +322,137 @@ async fn fts_finds_facts_and_respects_delete() {
     assert!(hits.is_empty(), "删除后不应再命中: {hits:?}");
 }
 
+/// 中文子串检索：V8 之前 `docs_fts` 是 unicode61，整段中文是**一个** token，
+/// "田字格" 命中不了 "第一单元田字格生字表"。trigram 下任意 ≥3 字子串可命中，
+/// <3 字退回 LIKE。
+#[tokio::test]
+async fn fts_matches_cjk_substring() {
+    use crate::{Fts5Retriever, SqliteStore};
+    use harness_kernel::{Query, Retriever};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(SqliteStore::open(dir.path().join("t.db")).await.unwrap());
+    let mut tx = store.begin_write().await.unwrap();
+    tx.upsert_doc(
+        ConversationId::from("c1"),
+        RunId::from("r1"),
+        Doc {
+            id: DocId("kb-1".into()),
+            kind: "fact".into(),
+            scope: "family".into(),
+            payload: serde_json::json!({
+                "subject": "语文",
+                "predicate": "内容",
+                "value": "第一单元田字格生字表"
+            }),
+            version: 1,
+            valid_from: 0,
+            valid_to: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let search = |text: &str| {
+        let r = Fts5Retriever::new(std::sync::Arc::clone(&store));
+        let text = text.to_owned();
+        async move {
+            r.search(Query { text, scopes: vec![], kinds: vec![], k: 5 })
+                .await
+                .unwrap()
+        }
+    };
+
+    assert_eq!(search("田字格").await.len(), 1, "3 字子串必须命中");
+    assert_eq!(search("字格生").await.len(), 1, "词中间的 3 字子串也要命中");
+    assert_eq!(search("生字").await.len(), 1, "2 字词退回 LIKE 也要命中");
+    assert!(search("背诵").await.is_empty(), "无关词不应命中");
+}
+/// 重建投影后检索结果必须一致：以前 rebuild 用 payload 原文回填，
+/// 与 upsert 的 `doc_fts_text` 不同源，重建后索引里多出 JSON 括号与键名。
+#[tokio::test]
+async fn fts_rebuild_keeps_hits_stable() {
+    use crate::{Fts5Retriever, SqliteStore};
+    use harness_kernel::{Query, Retriever};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(SqliteStore::open(dir.path().join("t.db")).await.unwrap());
+    let mut tx = store.begin_write().await.unwrap();
+    tx.upsert_doc(
+        ConversationId::from("c1"),
+        RunId::from("r1"),
+        Doc {
+            id: DocId("kb-1".into()),
+            kind: "fact".into(),
+            scope: "family".into(),
+            payload: serde_json::json!({"subject": "语文", "value": "第一单元田字格生字表"}),
+            version: 1,
+            valid_from: 0,
+            valid_to: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let r = Fts5Retriever::new(std::sync::Arc::clone(&store));
+    let q = || Query { text: "田字格".into(), scopes: vec![], kinds: vec![], k: 5 };
+    let before = r.search(q()).await.unwrap();
+
+    store.rebuild().await.unwrap();
+    let after = r.search(q()).await.unwrap();
+
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before.iter().map(|h| h.doc_id.0.clone()).collect::<Vec<_>>(),
+        after.iter().map(|h| h.doc_id.0.clone()).collect::<Vec<_>>(),
+        "重建前后命中集合必须一致"
+    );
+}
+
+/// 老库（V7，unicode61）升级到 V8：新分词器生效，历史 doc 仍可检索。
+#[tokio::test]
+async fn sqlite_v7_db_migrates_fts_tokenizer() {
+    use crate::schema::MIGRATIONS;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v7.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= 7) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version={version}")).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO docs (id, kind, scope, payload, version, valid_from, valid_to)
+             VALUES ('kb-1', 'fact', 'family', '{\"value\":\"第一单元田字格生字表\"}', 1, 0, NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO docs_fts (doc_id, scope, kind, text)
+             VALUES ('kb-1', 'family', 'fact', 'fact family 第一单元田字格生字表')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = SqliteStore::open(&path).await.unwrap();
+    let r = crate::Fts5Retriever::new(std::sync::Arc::new(store));
+    use harness_kernel::Retriever;
+    let hits = r
+        .search(harness_kernel::Query {
+            text: "田字格".into(),
+            scopes: vec![],
+            kinds: vec![],
+            k: 5,
+        })
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1, "迁移后历史 doc 必须能按子串命中: {hits:?}");
+}
+
 /// 老库（V6）升级到 V7：新列必须出现在表里，历史行按 0 补齐，不能丢老数据。
 #[tokio::test]
 async fn sqlite_v6_db_migrates_cache_columns() {

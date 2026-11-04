@@ -18,6 +18,8 @@ use harness_capabilities::{
     CapabilityTool, DelegateTool, DiskRoles, ExecTool, FilesTool, GrantsCache, LanCommandTool,
     ElevatedClient, ElevatedTool, HostEnv, HostTool,
     HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
+    KbFileTool, KbForgetTool, KbIngestTool, KbListTool, KbOutlineSetTool, KbOutlineTool,
+    KbReadTool, KbSearchTool, KbSelectTool, PublishPlaybookTool, RollbackPlaybookTool,
     NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
     RoleTool,
     RollbackSkillTool, RunSkillTool, SandboxProfile, SendFileTool, ServiceTool, SkillCatalog, SysTool, TaskTool,
@@ -40,6 +42,18 @@ use tokio_util::sync::CancellationToken;
 fn die_config(msg: impl std::fmt::Display) -> ! {
     eprintln!("配置错误: {msg}");
     std::process::exit(2);
+}
+
+/// 回收站目录：自改（服务/角色/规范）与被删资料的原件。
+/// 统一按 `[trash] keep_days` 过期清理，避免"删了但永远占盘"。
+fn trash_dirs(cfg: &config::Config) -> Vec<std::path::PathBuf> {
+    let c = std::path::PathBuf::from(&cfg.config_dir);
+    vec![
+        std::path::PathBuf::from(&cfg.library_dir).join(".trash"),
+        c.join("services.d/.trash"),
+        c.join("roles/.trash"),
+        c.join("playbooks/.trash"),
+    ]
 }
 
 #[tokio::main]
@@ -321,6 +335,18 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         cfg.media_keep_days,
         0,
     );
+    // 回收站：自改（service/role/playbook）与被删资料的原件，过期才真删
+    let trash_dirs = trash_dirs(&cfg);
+    let mut trash_files = 0usize;
+    for d in &trash_dirs {
+        trash_files += workspace_gc::sweep_now(d, cfg.trash_keep_days, 0).removed_files;
+    }
+    if trash_files > 0 {
+        println!(
+            "trash gc: 彻底删除 {} 个过期文件（保留 {} 天）",
+            trash_files, cfg.trash_keep_days
+        );
+    }
     if mgc.removed_files > 0 {
         println!("media gc: 删除 {} 个附件", mgc.removed_files);
     }
@@ -388,6 +414,9 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         cfg.sandbox_mounts.clone(),
         &cfg.runtime_dir,
     );
+    // KB 与记忆用同一个检索端口：工具在构造期拿到它，内核不需要认识 KB（不变量 15）
+    let retriever: Arc<dyn harness_kernel::Retriever> =
+        Arc::new(harness_store::Fts5Retriever::new(Arc::clone(&store)));
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
@@ -414,6 +443,16 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     tools.register(Arc::new(SendFileTool));
     tools.register(KeepTool::new(&cfg.library_dir));
     tools.register(FilesTool::new(&cfg.library_dir));
+    // 资料库：原件入库 → 按页检索 → 取原页图
+    tools.register(KbIngestTool::new(&cfg.library_dir, &cfg.media_dir));
+    tools.register(KbSearchTool::new(Arc::clone(&retriever)));
+    tools.register(Arc::new(KbReadTool));
+    tools.register(KbFileTool::new(&cfg.library_dir));
+    tools.register(Arc::new(KbListTool));
+    tools.register(KbForgetTool::new(&cfg.library_dir));
+    tools.register(Arc::new(KbOutlineSetTool));
+    tools.register(Arc::new(KbOutlineTool));
+    tools.register(Arc::new(KbSelectTool));
     tools.register(Arc::new(
         RemindTool::new(cfg.tz_offset_min)
             .with_skills(Arc::clone(&skills))
@@ -448,17 +487,18 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         .with_proxy(cfg.proxy.clone()),
     );
     tools.register(NetLogTool::new(&cfg.net_log));
-    tools.register(PlaybookTool::new(
-        &cfg.playbooks_dir,
-        vec![
-            ("import-skill", crate::system_prompt::IMPORT),
-            ("distill", crate::system_prompt::DISTILL),
-            ("schedule-job", crate::system_prompt::SCHEDULE_JOB),
-            ("webhook", crate::system_prompt::WEBHOOK),
-            ("capability", crate::system_prompt::CAPABILITY),
-            ("timer", crate::system_prompt::TIMER),
-        ],
-    ));
+    let playbook_builtins = vec![
+        ("import-skill", crate::system_prompt::IMPORT),
+        ("distill", crate::system_prompt::DISTILL),
+        ("schedule-job", crate::system_prompt::SCHEDULE_JOB),
+        ("webhook", crate::system_prompt::WEBHOOK),
+        ("capability", crate::system_prompt::CAPABILITY),
+        ("timer", crate::system_prompt::TIMER),
+    ];
+    let playbook_topics: Vec<&'static str> = playbook_builtins.iter().map(|(k, _)| *k).collect();
+    tools.register(PlaybookTool::new(&cfg.playbooks_dir, playbook_builtins));
+    tools.register(PublishPlaybookTool::new(&cfg.playbooks_dir, playbook_topics));
+    tools.register(RollbackPlaybookTool::new(&cfg.playbooks_dir));
     let skill_net_env: Arc<dyn harness_kernel::ExecutionEnv> =
         Arc::new(sandbox.skill_net(
             &cfg.workspace,
@@ -622,7 +662,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
                 ws = cfg.workspace,
             )),
         },
-        Some(Arc::new(harness_store::Fts5Retriever::new(Arc::clone(&store)))),
+        Some(Arc::clone(&retriever)),
     ));
 
     for ch in &channels {
@@ -640,6 +680,8 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         let media = std::path::PathBuf::from(&cfg.media_dir);
         let media_keep = cfg.media_keep_days;
         let keep_days = cfg.workspace_keep_days;
+        let trash_keep = cfg.trash_keep_days;
+        let trash_dirs = trash_dirs.clone();
         let max_mb = cfg.workspace_max_mb;
         let stop = cancel.clone();
         tokio::spawn(async move {
@@ -651,6 +693,12 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
                         let m = workspace_gc::sweep_now(&media, media_keep, 0);
                         if m.removed_files > 0 {
                             tracing::info!(files = m.removed_files, "media gc");
+                        }
+                        for d in &trash_dirs {
+                            let t = workspace_gc::sweep_now(d, trash_keep, 0);
+                            if t.removed_files > 0 {
+                                tracing::info!(files = t.removed_files, "trash gc");
+                            }
                         }
                         let r = workspace_gc::sweep_now(&dir, keep_days, max_mb);
                         if r.removed_files > 0 {

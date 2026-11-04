@@ -445,3 +445,152 @@ async fn duplicate_base_and_path_is_rejected() {
     assert!(err.message.contains("路径重复"), "{}", err.message);
     assert!(err.message.contains("只到域名"), "{}", err.message);
 }
+
+/// 302 到白名单主机：宿主侧跳一次、流式落盘、返回 sha256，且签名 URL 不进结果。
+#[tokio::test]
+async fn save_to_follows_allowed_redirect_and_hashes() {
+    let payload = b"%PDF-1.4\nfake textbook bytes\n";
+    let (file_base, _seen) = binary_server(payload).await;
+    let (redir_base, _seen2) = redirect_server(&format!("{file_base}/file?sign=SECRET-SIGN")).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service {
+        name: "storage".into(),
+        base: redir_base,
+        redirect_hosts: vec!["127.0.0.1".into()],
+        ..Default::default()
+    };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let out = tool
+        .execute(
+            serde_json::json!({"service":"storage","method":"GET","path":"/file/book.pdf","save_to":"book.pdf"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let text = match &out.content[0] {
+        harness_kernel::Block::Paragraph(t) => t.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(!text.contains("SECRET-SIGN"), "签名 URL 不能出现在结果里: {text}");
+    let path = dir.path().join("book.pdf");
+    assert_eq!(std::fs::read(&path).unwrap(), payload, "落盘内容必须与响应体一致");
+    // sha256(payload) 前 8 位，防止只写了个空文件
+    assert!(text.contains("sha256"), "{text}");
+    assert!(!dir.path().join(".book.pdf.part").exists(), "临时文件必须被重命名掉");
+}
+
+/// 目标主机不在 `redirect_hosts` 里 → 拒绝，且不落盘。
+#[tokio::test]
+async fn save_to_refuses_unlisted_redirect_host() {
+    let (redir_base, _seen) = redirect_server("http://127.0.0.1:1/x").await;
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service {
+        name: "storage".into(),
+        base: redir_base,
+        redirect_hosts: vec!["*.aliyundrive.com".into()],
+        ..Default::default()
+    };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let err = tool
+        .execute(
+            serde_json::json!({"service":"storage","method":"GET","path":"/file/x","save_to":"x.pdf"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, harness_kernel::ErrorCode::NotPermitted, "{}", err.message);
+    assert!(err.message.contains("redirect_hosts"), "{}", err.message);
+    assert!(!dir.path().join("x.pdf").exists(), "被拒时不能留下文件");
+}
+
+/// JSON 接口误加 `save_to` → 明确报错，不把接口结果悄悄写进文件。
+#[tokio::test]
+async fn save_to_rejects_json_response() {
+    let (base, _seen) = echo_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service { name: "demo".into(), base, ..Default::default() };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let err = tool
+        .execute(
+            serde_json::json!({"service":"demo","method":"GET","path":"/api","save_to":"x.json"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("不是文件"), "{}", err.message);
+    assert!(!dir.path().join("x.json").exists());
+}
+
+/// 只应答一次、返回固定字节的服务。
+async fn binary_server(payload: &'static [u8]) -> (String, Arc<Mutex<String>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = Arc::clone(&seen);
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = sock.read(&mut buf).await.unwrap_or(0);
+        *seen2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/pdf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            payload.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+        let _ = sock.write_all(payload).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// 只应答一次、回 302 的服务。
+async fn redirect_server(location: &str) -> (String, Arc<Mutex<String>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = Arc::clone(&seen);
+    let location = location.to_owned();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = sock.read(&mut buf).await.unwrap_or(0);
+        *seen2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+        let resp = format!(
+            "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// `save_to` 只配 GET：POST 加它会把接口调用变成写文件，难排查。
+#[tokio::test]
+async fn save_to_requires_get() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service { name: "demo".into(), base: "http://127.0.0.1:1".into(), ..Default::default() };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let err = tool
+        .execute(
+            serde_json::json!({"service":"demo","method":"POST","path":"/x","save_to":"x.bin"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("只支持 GET"), "{}", err.message);
+}

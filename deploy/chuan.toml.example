@@ -222,6 +222,11 @@ keep_days = 30
 [library]
 dir = "/var/lib/chuan/files"
 
+[trash]
+# 删除的东西先留这里（资料原件、被删的服务/角色/规范配置），过期才真删。
+# 0 = 永不清理；默认 30 天。
+keep_days = 30
+
 [sandbox]
 # 显式授权给沙盒的宿主挂载（默认空）。例：打印技能要用 CUPS
 # mounts = [{ src = "/run/cups", dst = "/run/cups", ro = true }]

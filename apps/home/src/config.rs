@@ -103,6 +103,9 @@ pub struct FileConfig {
     pub sandbox: SandboxFile,
     #[serde(default)]
     pub library: LibraryFile,
+    /// 回收站（自改与被删资料）保留多久
+    #[serde(default)]
+    pub trash: TrashFile,
     /// 命名 HTTP 服务：`http(service, …)` 用
     #[serde(default)]
     pub services: std::collections::HashMap<String, ServiceFile>,
@@ -135,6 +138,9 @@ pub struct ServiceFile {
     pub body: std::collections::BTreeMap<String, String>,
     /// HMAC-SHA256 签名
     pub sign: Option<SignFile>,
+    /// `http(save_to)` 允许跟随的重定向主机（`["*.aliyundrive.com"]`）；空 = 不跟随
+    #[serde(default)]
+    pub redirect_hosts: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -552,6 +558,22 @@ fn default_lane_one() -> usize {
     1
 }
 
+/// `[trash]`：删除的东西先留这里，过期再真删（0 = 永不清理）。
+#[derive(Clone, Debug, Deserialize)]
+pub struct TrashFile {
+    #[serde(default = "default_trash_keep_days")]
+    pub keep_days: u64,
+}
+impl Default for TrashFile {
+    fn default() -> Self {
+        Self { keep_days: default_trash_keep_days() }
+    }
+}
+fn default_trash_keep_days() -> u64 {
+    // 30 天：够覆盖"当时觉得没用、过两周要用"，又不至于长期占盘
+    30
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct StorageFile {
     pub db: Option<String>,
@@ -643,6 +665,8 @@ pub struct Config {
     pub commands_dir: std::path::PathBuf,
     pub media_dir: String,
     pub media_keep_days: u64,
+    /// 回收站保留天数（0 = 永不清理）
+    pub trash_keep_days: u64,
     pub sandbox_mounts: Vec<harness_capabilities::Mount>,
     pub vision: bool,
     pub proxy: harness_capabilities::ProxyConfig,
@@ -1098,6 +1122,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .dir
             .unwrap_or_else(|| format!("{home}/.local/share/chuan/media")),
         media_keep_days: file.media.keep_days.unwrap_or(30),
+        trash_keep_days: file.trash.keep_days,
         config_dir,
         config_path: path.clone(),
         mcp_servers: file
@@ -1152,6 +1177,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
                         g.encode.as_deref().unwrap_or("base64"),
                     ),
                 }),
+                redirect_hosts: s.redirect_hosts.clone(),
             })
             .collect(),
         library_dir: file

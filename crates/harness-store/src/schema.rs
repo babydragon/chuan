@@ -1,6 +1,6 @@
 //! Schema 与迁移。只前向，靠 `PRAGMA user_version` 记录版本。
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub const V1: &str = r#"
 CREATE TABLE journal (
@@ -126,5 +126,20 @@ ALTER TABLE usage_rollup ADD COLUMN cache_hit_tokens   INTEGER NOT NULL DEFAULT 
 ALTER TABLE usage_rollup ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
 "#;
 
+pub const V8: &str = r#"
+-- V4 建表漏了 tokenize，实际用的是 unicode61：中文只有"整段连续字"能命中，
+-- 句子里的一个词搜不出来（"打印机" 命中不了 "打印机型号"）。
+-- trigram 让任意 ≥3 字子串可检索；<3 字由 `fts.rs` 走 LIKE。
+-- 表只能重建：旧索引由 `sqlite.rs::backfill_fts` 在迁移后按 `doc_fts_text` 重灌。
+DROP TABLE docs_fts;
+CREATE VIRTUAL TABLE docs_fts USING fts5(
+  doc_id UNINDEXED,
+  scope UNINDEXED,
+  kind UNINDEXED,
+  text,
+  tokenize='trigram'
+);
+"#;
+
 pub const MIGRATIONS: &[(i64, &str)] =
-    &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7)];
+    &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6), (7, V7), (8, V8)];

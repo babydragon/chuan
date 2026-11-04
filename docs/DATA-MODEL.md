@@ -114,7 +114,7 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `docs` | 记忆/配置/画像（含 payload 与 version） | `doc.upserted` |
 | `usage_rollup` | 用量与归属（V5：`conv_id` / `run_id` / `agent`，`agent` 由会话前缀推出；V7：`cache_hit_tokens` / `cache_write_tokens`）；`cost_est` 恒 0（金额不估算，D20） | `usage.recorded` |
 | ~~`artifacts`~~ | **无独立表**：产物是 `artifacts/` 下的文件 + `artifact.created` 事件，按 sha256 寻址 | `artifact.created` |
-| `docs_fts`（未来） | FTS5 检索 | `doc.upserted` |
+| `docs_fts` | FTS5 检索（V8 起 `tokenize='trigram'`：≥3 字子串可命中，<3 字走 LIKE） | `doc.upserted` |
 | `chunks` / `chunks_fts` / `doc_vectors`（未来） | 知识库 | ingest 管道 |
 
 **判断标准**：删掉全部投影表后 `rebuild`，状态完全恢复。做不到就是 journal 缺字段。
@@ -126,6 +126,13 @@ VALUES (?1, (SELECT COALESCE(MAX(seq),0)+1 FROM journal WHERE conv_id=?1), ...);
 | `fact` | `user:<id>` / `family` | 长期记忆 |
 | `reminder` | — | 定时提醒（`next_at` 等） |
 | `agent_task` | `task` | 后台任务队列（status / child_conv / continue_from / result） |
+| `kb.source` | `kb` | 资料库来源（标题 / 页数 / 正文来源 `text_from`；原件在 `files/<sha>/`） |
+| `kb.page` | `kb` | 资料库的一页正文（`payload.text` 进 `docs_fts`，检索单元） |
+| `kb.outline` | `kb` | 资料的结构索引（节点数组，`type` 开放，见 D34） |
+| `playbook` | `config` | 已装规范索引（topic / action / sha256 / 字数；正文在 `playbooks/<topic>.md`） |
+| `skill` | `config` | 已装技能索引（name / action / manifest 摘要） |
+| `service` | `config` | 服务接入索引（name / action / base / kind） |
+| `role` | `config` | 角色索引（name / action / 工具集 / 模型 / 提示词字数） |
 
 ---
 

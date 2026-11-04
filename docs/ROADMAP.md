@@ -7,7 +7,7 @@
 > 板上待验（`SBC-VERIFY.md §11`）**；目标板（riscv64）已跑通沙盒与两条 lane、代理、
 > mDNS、定时任务（含 pinned/polish）、凭据不落沙盒。**打印只验证到「CUPS 可见 + 队列可查」，
 > 实际打印与耗材查询未验**。逐条实测值以 `SBC-VERIFY.md` 为准（口径冲突时也以它为准）；
-> 首个正式版：`v0.1.0`。
+> 首个正式版：`v0.1.0`；预发布到 `v0.2.0-rc.1`（知识库 + 自改事务统一）。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；
 > **通知类流程 P4.7：A 由主人写 SOP（零代码），B/C 触发式暂不做**（见 D23）。
@@ -118,6 +118,11 @@
 - 服务接入：`http`（命名服务 + token 宿主注入）/ `mcp`（Streamable HTTP）/ `service`（运行期热加，写 `services.d/`）✅
 - 媒体与视觉：`/media` 落盘 + 多模态图片注入（`[vision] enabled`）✅
 - 文件库（KB）：`keep` / `files`（内容寻址、可检索、可导出）✅
+- 资料入库 v1：`kb_ingest`（收已抽好的按页文本）/ `kb_search` / `kb_read` / `kb_file`（取原件）✅
+- 结构索引 v1：`kb_outline_set` / `kb_outline` / `kb_select`（按结构取集合，跨来源并/交）
+  + `publish_playbook`（agent 自己沉淀"怎么抽"，主人确认）✅
+- 自改事务统一：原子写 / 备份保留 5 版 / 回滚 / 回收站 / 每变更落账（skill·service·role·playbook）✅
+- 资料库管理：`kb_list`（库里有啥）、`kb_forget`（撤掉入库、原件进回收站）、按归类过滤 ✅
 
 **验收**：
 

@@ -661,9 +661,22 @@ impl Tool for PublishSkillTool {
         }
         text_out.push_str("已热加载，无需重启。");
 
+        let manifest_bytes = std::fs::read(self.catalog.dir().join(&name).join("skill.json"))
+            .unwrap_or_default();
         Ok(ToolOutput {
             content: vec![Block::Code { lang: None, text: text_out }],
-            doc_writes: Vec::new(),
+            doc_writes: vec![crate::selfmod::record(
+                "skill",
+                &name,
+                if backup.is_some() { "update" } else { "add" },
+                &manifest_bytes,
+                serde_json::json!({
+                    "entry": manifest.entry,
+                    "interpreter": manifest.interpreter,
+                    "examples": n,
+                    "network": manifest.network,
+                }),
+            )],
             artifacts: Vec::new(),
         })
     }
@@ -745,12 +758,20 @@ impl Tool for RollbackSkillTool {
             .map_err(|e| ToolError::new(ErrorCode::Internal, e.to_string(), false))?;
         self.catalog.invalidate();
 
+        let manifest_bytes =
+            std::fs::read(skills.join(name).join("skill.json")).unwrap_or_default();
         Ok(ToolOutput {
             content: vec![Block::Code {
                 lang: None,
                 text: format!("已把 {name} 回滚到上一个版本，当前版本已另存备份。"),
             }],
-            doc_writes: Vec::new(),
+            doc_writes: vec![crate::selfmod::record(
+                "skill",
+                name,
+                "rollback",
+                &manifest_bytes,
+                serde_json::json!({}),
+            )],
             artifacts: Vec::new(),
         })
     }

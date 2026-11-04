@@ -209,7 +209,9 @@ fn write_fragment(
         s.push_str(&format!("catalog = \"{c}\"\n"));
     }
     let path = dir.join(format!("{name}.toml"));
-    std::fs::write(&path, s).map_err(|e| e.to_string())?;
+    // 覆盖前备份（保留 5 版），写入走原子替换：断电不留半截 TOML
+    crate::selfmod::backup_file(&path, &dir.join(crate::selfmod::BACKUP_DIR))?;
+    crate::selfmod::write_atomic(&path, s.as_bytes())?;
     Ok(path)
 }
 
@@ -226,7 +228,7 @@ impl Tool for ServiceTool {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "add", "remove"] },
+                    "action": { "type": "string", "enum": ["list", "add", "remove", "rollback"] },
                     "name": { "type": "string", "description": "服务名（小写字母/数字/-/_）" },
                     "kind": { "type": "string", "enum": ["http", "mcp"], "description": "默认 http" },
                     "base": { "type": "string", "description": "服务根地址，如 https://mcp.dida365.com" },
@@ -297,14 +299,65 @@ impl Tool for ServiceTool {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 name", false))?;
                 let file = self.fragment(name);
-                let _ = std::fs::remove_file(&file);
+                // 软删除：进回收站，说清楚怎么捞回来
+                let moved = crate::selfmod::trash(&file, &self.dir.join(crate::selfmod::TRASH_DIR))
+                    .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
                 let m = self.hub.remove(name);
                 let h = self.http.remove(name);
                 Ok(ToolOutput {
+                    content: vec![Block::Paragraph(match moved {
+                        Some(p) => format!(
+                            "{name}：配置已删除（mcp={m}, http={h}）。重启后不会再加载。\n\
+                             原文件已移到 {}，需要恢复就把它移回 services.d/。",
+                            p.display()
+                        ),
+                        None => format!("{name}：本来就没有配置文件（内存里 mcp={m}, http={h}）。"),
+                    })],
+                    doc_writes: vec![crate::selfmod::record(
+                        "service",
+                        name,
+                        "remove",
+                        b"",
+                        serde_json::json!({ "mcp": m, "http": h }),
+                    )],
+                    artifacts: Vec::new(),
+                })
+            }
+            "rollback" => {
+                let name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 name", false))?;
+                let backup_dir = self.dir.join(crate::selfmod::BACKUP_DIR);
+                let file_name = format!("{name}.toml");
+                let Some((ts, backup)) = crate::selfmod::newest_backup(&backup_dir, &file_name)
+                else {
+                    return Err(ToolError::new(
+                        ErrorCode::NotFound,
+                        format!("`{name}` 没有历史版本可回滚"),
+                        false,
+                    ));
+                };
+                let body = std::fs::read(&backup).map_err(|e| {
+                    ToolError::new(ErrorCode::Unavailable, format!("读备份失败：{e}"), false)
+                })?;
+                let path = self.fragment(name);
+                crate::selfmod::backup_file(&path, &backup_dir)
+                    .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+                crate::selfmod::write_atomic(&path, &body)
+                    .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+                Ok(ToolOutput {
                     content: vec![Block::Paragraph(format!(
-                        "{name}：配置已删除（mcp={m}, http={h}）。重启后也不会再加载。"
+                        "`{name}` 已回滚到 {ts} 那一版。\n\
+                         **当前进程仍用旧配置**：services.d/ 只在启动时加载，重启后生效。"
                     ))],
-                    doc_writes: Vec::new(),
+                    doc_writes: vec![crate::selfmod::record(
+                        "service",
+                        name,
+                        "rollback",
+                        &body,
+                        serde_json::json!({ "to": ts }),
+                    )],
                     artifacts: Vec::new(),
                 })
             }
@@ -443,6 +496,7 @@ impl Tool for ServiceTool {
                             query: query.clone(),
                             body: body.clone(),
                             sign: sign.clone(),
+                            redirect_hosts: Vec::new(),
                         };
                         // 探活：至少证明 DNS/TLS/端点能通（不看状态码，API 常对 HEAD/根路径回 404）
                         let probe = self.http.probe(&svc).await;
@@ -467,13 +521,23 @@ impl Tool for ServiceTool {
                                 sign: sign.as_ref(),
                             },
                         );
+                        let body = match &saved {
+                            Ok(p) => std::fs::read(p).unwrap_or_default(),
+                            Err(_) => Vec::new(),
+                        };
                         Ok(ToolOutput {
                             content: vec![Block::Paragraph(format!(
                                 "已接入 HTTP 服务 `{name}`：{probe}；{}\n调用：`http(service=\"{name}\", method=\"GET\", path=\"/…\")`\n\
                                  如果接口文档还没写，把 API 说明整理成 playbook，下次就能直接查。",
                                 save_line(&saved)
                             ))],
-                            doc_writes: Vec::new(),
+                            doc_writes: vec![crate::selfmod::record(
+                                "service",
+                                &name,
+                                "add",
+                                &body,
+                                serde_json::json!({ "base": base, "kind": kind }),
+                            )],
                             artifacts: Vec::new(),
                         })
                     }

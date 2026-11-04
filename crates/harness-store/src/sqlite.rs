@@ -84,6 +84,11 @@ impl SqliteStore {
             eprintln!("pre-migrate backup: {}", bak.display());
         }
         let version = migrate(&conn)?;
+        // V8 换了分词器（trigram），索引必须按 `doc_fts_text` 重灌——
+        // 迁移是纯 SQL，重灌要用 Rust 侧的取字段逻辑，所以放在这里。
+        if before < 8 {
+            backfill_fts(&conn)?;
+        }
         let (cmd, rx) = mpsc::channel(64);
         let mut writer = conn;
         std::thread::Builder::new()
@@ -646,6 +651,48 @@ fn doc_fts_text(doc: &Doc) -> String {
     format!("{} {} {}", doc.kind, doc.scope, parts.join(" "))
 }
 
+/// 按 `doc_fts_text` 重灌 `docs_fts`。
+///
+/// `upsert_doc`、`rebuild`、迁移后回填必须走同一份取文本逻辑，否则
+/// "删掉投影能重建" 只是口号（重建后索引里会多出 JSON 括号与键名）。
+fn backfill_fts(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute("DELETE FROM docs_fts", []).map_err(map_err)?;
+    let docs = {
+        let mut stmt = conn
+            .prepare("SELECT id, kind, scope, payload FROM docs")
+            .map_err(map_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(map_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_err)?
+    };
+    for (id, kind, scope, payload) in docs {
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let doc = Doc {
+            id: DocId(id),
+            kind,
+            scope,
+            payload,
+            version: 0,
+            valid_from: 0,
+            valid_to: None,
+        };
+        conn.execute(
+            "INSERT INTO docs_fts (doc_id, scope, kind, text) VALUES (?1,?2,?3,?4)",
+            params![doc.id.0, doc.scope, doc.kind, doc_fts_text(&doc)],
+        )
+        .map_err(map_err)?;
+    }
+    Ok(())
+}
+
 fn effect_str(e: &harness_kernel::EffectClass) -> String {
     match e {
         harness_kernel::EffectClass::Pure => "pure".into(),
@@ -904,14 +951,8 @@ fn rebuild(conn: &Connection) -> Result<(), StoreError> {
             _ => {}
         }
     }
-    // 重建 FTS 投影
-    conn.execute("DELETE FROM docs_fts", []).map_err(map_err)?;
-    conn.execute(
-        "INSERT INTO docs_fts (doc_id, scope, kind, text)
-         SELECT id, scope, kind, payload FROM docs",
-        [],
-    )
-    .map_err(map_err)?;
+    // 重建 FTS 投影（与 upsert 走同一份取文本逻辑）
+    backfill_fts(conn)?;
     Ok(())
 }
 

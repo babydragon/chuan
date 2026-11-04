@@ -23,6 +23,8 @@
 - [x] `python3 -m venv` 可用（**2026-10-27 实测**：默认未装，`apt install python3-venv` 后可用）
 - [x] 沙盒冷启动耗时（**2026-10-27 实测**：`exec ls /home` 工具侧 39ms，含 `ls` 本身；开发机约 30ms）
 - [ ] （可选）`node` / `npm` 在 `/usr/bin` 下；否则 `install_deps(npm)` 会明确报"找不到"
+- [ ] KB 不依赖任何预装解析/渲染器：正文抽取与出图都由 agent 自己选工具
+      （pip 装的走 `install_deps` 逐条审批，系统包走 `apt`）。只需确认沙盒里能跑它装的东西。
 
 ## 1. Python 运行时
 

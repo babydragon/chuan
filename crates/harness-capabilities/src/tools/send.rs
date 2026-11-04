@@ -1,6 +1,7 @@
 //! `send_file`：把工作区里的文件/图片发到当前会话。
 //!
-//! 只允许发 `/ws`、`/media` 下的文件——避免模型把宿主上的任意文件（密钥、日志）贴出去。
+//! 只允许发 `/ws` 下的文件——避免模型把宿主上的任意文件（密钥、日志）贴出去。
+//! `/media` 是只读的入站目录，不能当出口：要发就先 `cp` 到 `/ws`。
 //! 通道侧按 mime 决定用 `sendPhoto` 还是 `sendDocument`；没有文件的通道降级成文本。
 
 use async_trait::async_trait;
@@ -37,8 +38,9 @@ impl Tool for SendFileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "send_file".into(),
-            description: "把 `/ws` 或 `/media` 里的文件发给用户（图片按图片发，其余按文档发）。\
-用于把生成的 PDF/表格/脚本交给用户，或打印前给用户预览。单文件上限 50MB。"
+            description: "把 `/ws` 里的文件发给用户（图片按图片发，其余按文档发）。\
+用于把生成的 PDF/表格/脚本交给用户，或打印前给用户预览。单文件上限 50MB。\
+`/media` 里的入站文件不能直接发，先 `cp` 到 `/ws`。"
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",

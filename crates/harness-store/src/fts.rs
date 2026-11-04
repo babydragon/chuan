@@ -1,4 +1,8 @@
 //! FTS5 检索实现（trigram 分词，支持中文子串）。
+//!
+//! 索引侧：`docs_fts` 自 V8 起显式 `tokenize='trigram'`，任意 ≥3 字子串可命中。
+//! 查询侧：按空白切成多个词组，用 `AND` 连接（整句当一个 phrase 会因为空格而不命中）；
+//! 任一词组 <3 字时 trigram 无法索引，退回 `LIKE`（trigram 下仍走索引优化）。
 
 use std::sync::Arc;
 
@@ -35,13 +39,31 @@ impl Retriever for Fts5Retriever {
         let mut sql = String::new();
         let mut args: Vec<String> = Vec::new();
 
-        if text.chars().count() >= 3 {
+        let tokens: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
+        let long_enough =
+            !tokens.is_empty() && tokens.iter().all(|t| t.chars().count() >= 3);
+        let mut ranked = false;
+
+        if long_enough {
+            // trigram 分词下按词组做 phrase 查询：`"打印机" AND "型号"`。
+            // 不能把整句塞进一个 phrase——中间的空格会成为字面量，必然不命中。
+            let phrase = tokens
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', " ")))
+                .collect::<Vec<_>>()
+                .join(" AND ");
             sql.push_str("SELECT doc_id, bm25(docs_fts) FROM docs_fts WHERE docs_fts MATCH ?");
-            // trigram 分词下，把整句作为一个短语查询
-            args.push(format!("\"{}\"", text.replace('"', " ")));
-        } else if !text.is_empty() {
-            sql.push_str("SELECT doc_id, 0.0 FROM docs_fts WHERE text LIKE ?");
-            args.push(format!("%{text}%"));
+            args.push(phrase);
+            ranked = true;
+        } else if !tokens.is_empty() {
+            sql.push_str("SELECT doc_id, 0.0 FROM docs_fts WHERE ");
+            for (i, t) in tokens.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(" AND ");
+                }
+                sql.push_str("text LIKE ?");
+                args.push(format!("%{t}%"));
+            }
         } else {
             sql.push_str("SELECT doc_id, 0.0 FROM docs_fts WHERE 1=1");
         }
@@ -55,6 +77,10 @@ impl Retriever for Fts5Retriever {
             let placeholders = vec!["?"; q.kinds.len()].join(",");
             sql.push_str(&format!(" AND kind IN ({placeholders})"));
             args.extend(q.kinds.iter().cloned());
+        }
+        if ranked {
+            // bm25 越小越相关；以前只取了分数没排序，等于按扫描顺序返回。
+            sql.push_str(" ORDER BY bm25(docs_fts)");
         }
         sql.push_str(&format!(" LIMIT {overfetch}"));
 

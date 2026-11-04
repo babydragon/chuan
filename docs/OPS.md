@@ -164,6 +164,14 @@ require_approval = []
 # base = "https://mcp.dida365.com"
 # token_file = "~/.config/chuan/secrets/dida_token"
 # tools = ["create_task", "list_undone_tasks_by_time_query"]
+
+# 取文件本体（`http(service=…, path=…, save_to="file.bin")`）。
+# 端点是 3xx 时，宿主只跟随**白名单里的主机**，且第二跳不带 token；
+# 临时凭证与响应体都不进上下文、不进日志。不配 redirect_hosts 就一律不跟随（默认最严）。
+# [services.storage]
+# base = "https://storage.example.com"
+# token_file = "~/.config/chuan/secrets/storage_token"
+# redirect_hosts = ["*.cdn.example.com"]
 ```
 
 ## 定时任务（提醒）的三种形态
@@ -356,6 +364,11 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 # 文件库：keep 存下来的产物（永久）
 dir = "~/.local/share/chuan/files"
 
+[trash]
+# 回收站：被删的资料原件（files/.trash）与被删的服务/角色/规范配置
+# （<config>/services.d/.trash 等）。过期才真删；0 = 永不清理。
+keep_days = 30
+
 [sandbox]
 # 显式授权给沙盒的宿主挂载（默认空）。例：让技能能用 CUPS
 # mounts = [{ src = "/run/cups", dst = "/run/cups", ro = true }]
@@ -481,6 +494,8 @@ max = 8             # 单次调用最多带几条临时挂载（只读）
 |---|---|
 | `/etc/chuan/secrets` | token 就是 chuan 自己读的（`0440 root:chuan`），不遮等于白做 D18 |
 | `/etc/chuan/services.d` | 里面写着 `token_file` 的宿主路径 |
+| `<config>/*/.backup/` | 自改前的历史版本（保留 5 份），回滚用；不要手工清理正在用的那份 |
+| `<config>/*/.trash/` | 被删除的配置（软删除），确认不需要再清理 |
 | `/etc/chuan/commands.d` | 命令条目表就是授权面：能写一条等于能造一条免审批动作（D31） |
 | `/etc/chuan/chuan.toml` | 完整策略与身份绑定（`[identity]`） |
 

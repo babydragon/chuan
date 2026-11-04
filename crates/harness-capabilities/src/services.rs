@@ -7,7 +7,7 @@
 //! 3. 每次调用写审计日志（服务名、方法、路径、状态、耗时），**不记 header、不记 body**。
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -15,9 +15,13 @@ use async_trait::async_trait;
 use harness_kernel::{
     Block, EffectClass, ErrorCode, Tool, ToolCtx, ToolError, ToolOutput, ToolSpec,
 };
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 
 const MAX_RESP_BYTES: usize = 2 * 1024 * 1024;
+/// `save_to` 落盘上限：够放一本教材，又不至于把 8GB 单板机的盘写满。
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -42,6 +46,9 @@ pub struct Service {
     pub body: BTreeMap<String, String>,
     /// HMAC-SHA256 签名（钉钉/飞书等 webhook）
     pub sign: Option<crate::auth::SignConfig>,
+    /// `save_to` 允许跟随的重定向主机（`*.aliyundrive.com` 这类通配）。
+    /// 空 = 不跟随任何重定向（默认最严）。
+    pub redirect_hosts: Vec<String>,
 }
 
 impl Default for Service {
@@ -56,6 +63,7 @@ impl Default for Service {
             query: BTreeMap::new(),
             body: BTreeMap::new(),
             sign: None,
+            redirect_hosts: Vec::new(),
         }
     }
 }
@@ -239,6 +247,148 @@ impl HttpServiceTool {
         });
         crate::net::append_log(&self.log, &rec.to_string());
     }
+
+    /// 把响应体流式落到 `/ws`，返回路径与 sha256；签名 URL 与 body 都不进上下文。
+    async fn save_body(
+        &self,
+        svc: &Service,
+        log_path: &str,
+        mut resp: reqwest::Response,
+        rel: &str,
+        workspace: &str,
+        started: Instant,
+    ) -> Result<ToolOutput, ToolError> {
+        let status = resp.status();
+        let final_path = Path::new(workspace).join(rel);
+        if let Some(dir) = final_path.parent() {
+            tokio::fs::create_dir_all(dir).await.map_err(|e| {
+                ToolError::new(ErrorCode::Unavailable, format!("建目录失败：{e}"), false)
+            })?;
+        }
+        let tmp = final_path.with_file_name(format!(
+            ".{}.part",
+            final_path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "download".into())
+        ));
+        let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| {
+            ToolError::new(ErrorCode::Unavailable, format!("写文件失败：{e}"), false)
+        })?;
+        let mut hasher = Sha256::new();
+        let mut total: u64 = 0;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    total += chunk.len() as u64;
+                    if total > MAX_DOWNLOAD_BYTES {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        let note = format!("save_to 超过 {} MB 上限", MAX_DOWNLOAD_BYTES / 1024 / 1024);
+                        self.log_line(&svc.name, "GET", log_path, Some(status.as_u16()), 0, started.elapsed().as_millis() as i64, &note);
+                        return Err(ToolError::new(ErrorCode::InvalidArgs, note, false));
+                    }
+                    hasher.update(&chunk);
+                    if let Err(e) = file.write_all(&chunk).await {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        return Err(ToolError::new(
+                            ErrorCode::Unavailable,
+                            format!("写文件失败：{e}"),
+                            false,
+                        ));
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    let note = format!("下载中断：{e}");
+                    self.log_line(&svc.name, "GET", log_path, Some(status.as_u16()), total as usize, started.elapsed().as_millis() as i64, &note);
+                    return Err(ToolError::new(ErrorCode::Unavailable, svc.redact(&note), false));
+                }
+            }
+        }
+        if let Err(e) = file.flush().await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(ToolError::new(ErrorCode::Unavailable, format!("写文件失败：{e}"), false));
+        }
+        drop(file);
+        if let Err(e) = tokio::fs::rename(&tmp, &final_path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(ToolError::new(ErrorCode::Unavailable, format!("落盘失败：{e}"), false));
+        }
+        let digest = hex(hasher.finalize());
+        self.log_line(
+            &svc.name,
+            "GET",
+            log_path,
+            Some(status.as_u16()),
+            total as usize,
+            started.elapsed().as_millis() as i64,
+            &format!("save_to={rel} sha256={digest}"),
+        );
+        Ok(ToolOutput {
+            content: vec![Block::Paragraph(format!(
+                "已保存 /ws/{rel}（{} KB，sha256 {digest}）",
+                total / 1024
+            ))],
+            doc_writes: Vec::new(),
+            artifacts: Vec::new(),
+        })
+    }
+}
+
+/// `save_to` 只允许 `/ws` 下的相对路径（与 `body_file` 同一条边界）。
+fn check_save_path(rel: &str) -> Result<(), String> {
+    if rel.starts_with('/') || rel.starts_with('\\') || rel.contains("..") {
+        return Err("save_to 必须是 /ws 下的相对路径：不能以 / 开头，不能含 ..".into());
+    }
+    Ok(())
+}
+
+/// JSON/文本响应不该落盘：误加 `save_to` 会把接口结果悄悄写进文件。
+fn looks_binary(ctype: Option<&str>) -> bool {
+    let Some(ct) = ctype else { return true };
+    let c = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    if c.is_empty() {
+        return true;
+    }
+    !(c.starts_with("text/")
+        || c == "application/json"
+        || c == "application/xml"
+        || c.ends_with("+json")
+        || c.ends_with("+xml"))
+}
+
+/// 相对 Location 按 base 解析；只接受 http(s)。
+fn resolve_target(base: &str, location: &str) -> Option<String> {
+    let base = reqwest::Url::parse(base).ok()?;
+    let url = base.join(location).ok()?;
+    match url.scheme() {
+        "http" | "https" => Some(url.to_string()),
+        _ => None,
+    }
+}
+
+/// 主机白名单：`*.aliyundrive.com` 匹配子域与本身，其它按完整主机名精确匹配。
+fn host_allowed(url: &str, allow: &[String]) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else { return false };
+    let Some(host) = u.host_str() else { return false };
+    let host = host.to_ascii_lowercase();
+    allow.iter().any(|p| {
+        let p = p.trim().to_ascii_lowercase();
+        match p.strip_prefix("*.") {
+            Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
+            None => host == p,
+        }
+    })
+}
+
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.as_ref().len() * 2);
+    for b in bytes.as_ref() {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 #[async_trait]
@@ -251,6 +401,8 @@ impl Tool for HttpServiceTool {
 可用服务：{}。\n**如果存在 `<服务名>-api` 的 playbook，先取它**（取不到就跳过，别反复试）；\
 这类服务通常只有一个入口路径（例如 `/api/agent/gateway`）+ 请求体内指定 `api_name`，\
 不要凭直觉拼 REST 路径（会 404）。只给 path，不要自己拼域名。\
+取**文件本体**（二进制）用 `save_to`：宿主负责跟随已授权的重定向并流式落盘，\
+临时凭证不会进上下文；也不要用 `lan_exec` + curl 自己拼。\
 注意：`kind = \"mcp\"` 的服务要用 `mcp(server=…, tool=…)`，不是这个工具。",
                 if self.names().is_empty() { "（未配置）".to_owned() } else { self.names().join("、") }
             ),
@@ -261,7 +413,8 @@ impl Tool for HttpServiceTool {
                     "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
                     "path": { "type": "string", "description": "以 / 开头的路径，可带 query" },
                     "body": { "type": "object", "description": "JSON 请求体（可选）" },
-                    "body_file": { "type": "string", "description": "从 /ws 下的文件读请求体（脚本生成内容、宿主负责发；仅 JSON）" }
+                    "body_file": { "type": "string", "description": "从 /ws 下的文件读请求体（脚本生成内容、宿主负责发；仅 JSON）" },
+                    "save_to": { "type": "string", "description": "把**文件本体**流式存到 /ws 下的相对路径。响应是 3xx 时由宿主跟随一次已授权的重定向，临时凭证不会交给你；上限 512MB。只用于二进制响应，JSON/文本接口不要加这个参数" }
                 },
                 "required": ["service", "method", "path"]
             }),
@@ -306,6 +459,23 @@ impl Tool for HttpServiceTool {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 path", false))?;
+        let save_to = args
+            .get("save_to")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if let Some(rel) = &save_to {
+            check_save_path(rel).map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
+            // 取文件本体只有 GET 一种形态；POST 加 save_to 会把"接口调用"变成"写文件"，难排查。
+            if method != "GET" {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "save_to 只支持 GET（取文件本体；接口调用不要加这个参数）",
+                    false,
+                ));
+            }
+        }
         if path.contains("://") {
             return Err(ToolError::new(
                 ErrorCode::InvalidArgs,
@@ -455,9 +625,91 @@ impl Tool for HttpServiceTool {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if status.is_redirection() {
-            let note = format!("服务返回 {} 重定向（不跟随）", status.as_u16());
-            self.log_line(&svc.name, &method, &log_path, Some(status.as_u16()), 0, started.elapsed().as_millis() as i64, &note);
-            return Err(ToolError::new(ErrorCode::Unavailable, note, false));
+            let Some(rel) = save_to.clone() else {
+                let note = format!("服务返回 {} 重定向（不跟随）", status.as_u16());
+                self.log_line(&svc.name, &method, &log_path, Some(status.as_u16()), 0, started.elapsed().as_millis() as i64, &note);
+                return Err(ToolError::new(ErrorCode::Unavailable, note, false));
+            };
+            // `save_to` 时在宿主侧跳一次：目标主机必须在服务白名单里，
+            // 第二跳**不带任何鉴权头**（签名 URL 自带凭证），也永不回显。
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let Some(location) = location else {
+                return Err(ToolError::new(
+                    ErrorCode::Unavailable,
+                    format!("服务返回 {} 重定向，但没有 Location，取不到文件", status.as_u16()),
+                    false,
+                ));
+            };
+            let Some(target) = resolve_target(&svc.base, &location) else {
+                return Err(ToolError::new(
+                    ErrorCode::Unavailable,
+                    "重定向目标不是合法的 http(s) 地址",
+                    false,
+                ));
+            };
+            if !host_allowed(&target, &svc.redirect_hosts) {
+                let host = reqwest::Url::parse(&target)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+                    .unwrap_or_default();
+                return Err(ToolError::new(
+                    ErrorCode::NotPermitted,
+                    format!(
+                        "重定向目标未授权（主机 {host}）。在服务 `{}` 的配置里加 \
+                         redirect_hosts = [\"*.example.com\"] 才允许跟随。",
+                        svc.name
+                    ),
+                    false,
+                ));
+            }
+            let resp = match self.client.get(&target).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.log_line(&svc.name, &method, &log_path, None, 0, started.elapsed().as_millis() as i64, "重定向后请求失败");
+                    return Err(ToolError::new(
+                        ErrorCode::Unavailable,
+                        svc.redact(&format!("重定向后请求失败：{e}")),
+                        false,
+                    ));
+                }
+            };
+            if resp.status().is_redirection() {
+                return Err(ToolError::new(
+                    ErrorCode::Unavailable,
+                    "重定向链超过一跳，不跟随",
+                    false,
+                ));
+            }
+            if !resp.status().is_success() {
+                return Err(ToolError::new(
+                    ErrorCode::Unavailable,
+                    format!("重定向目标返回 HTTP {}", resp.status().as_u16()),
+                    false,
+                ));
+            }
+            return self
+                .save_body(svc, &log_path, resp, &rel, &_ctx.workspace.root, started)
+                .await;
+        }
+
+        if let Some(rel) = save_to.clone() {
+            if !looks_binary(ctype.as_deref()) {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    format!(
+                        "响应不是文件（content-type: {}）；JSON/文本接口不要加 save_to",
+                        ctype.as_deref().unwrap_or("(未知)")
+                    ),
+                    false,
+                ));
+            }
+            return self
+                .save_body(svc, &log_path, resp, &rel, &_ctx.workspace.root, started)
+                .await;
         }
 
         let mut body = Vec::new();
