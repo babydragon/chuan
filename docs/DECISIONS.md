@@ -1201,3 +1201,63 @@ trigram 索引比为一个尚未验证的规模去设计投影表更划算。抽
 1. 前台 `delegate` 跑 10 分钟不再被 180s 判死；
 2. 模型侧真卡住（无 delta、无工具）仍在 180s 收口；
 3. 工具卡死最迟 30 分钟收口，并给出"卡住了"的说明。
+
+---
+
+## D39 · 多 provider：按 agent 选提供方，但只由主人配置（设计已定，未实现）
+
+**背景**：`[engine]` 只能配一个提供方，主 agent 与所有子 agent 共用。换模型只能全局换，
+而不同环节的诉求不一样（规划要强模型、批量抽取要便宜/长上下文的模型）。
+2026-11-05 zai 的 coding 端点在 18k 级 prompt 上频繁首字超时/挂起，需要按角色分流。
+
+**决定**：
+
+1. **配置形态**：
+
+   ```toml
+   [engine]
+   provider = "zai"              # 主 agent 的默认
+
+   [providers.zai]
+   kind = "zai"                  # 预设名：决定 base_url 与协议
+   model = "glm-5.3-flash"
+   api_key_file = "~/.config/chuan/secrets/zai_key"
+
+   [providers.ocgo]
+   kind = "opencode-go"
+   model = "deepseek-v4.1-flash"
+   api_key_file = "~/.config/chuan/secrets/opencode_go_key"
+   ```
+
+   旧写法（只有 `[engine] provider/model/base_url/api_key_file`）在加载时**自动合成**一个
+   同 id 的 provider，老配置无需改动。
+
+2. **解析顺序**（主与子一致）：`profile → 角色（[agents.roles.<name>] / roles/<name>.toml）→ [engine].provider`。
+   子 agent 想换提供方，就在角色里写 `provider` + `model`。
+
+3. **只读可见**：`role list` / `role show` 会列出可用 provider 的 `id · kind · 默认 model`——
+   **不含路径、不含密钥**。`role add provider="<id>"` 校验 id 是否存在，不存在就报错并列出可选项。
+   这样父 agent 在创建/编辑子 agent 时"看得到能选什么"，但改不了 provider 本身。
+
+4. **provider 只能由主人配置**：agent（含 `role` 工具）不能新增、修改或删除 provider。
+   这与 `service` 的"运行时热加"**明确不同**——provider 是带凭据的出网通道，能加就等于能开新出口。
+
+5. **密钥**：每个 provider 一个文件（`0440 root:chuan`），由服务进程直接读取；
+   不进上下文、不进日志、不写进角色文件（角色里只存 provider id）。沙盒永远看不到 secrets。
+
+6. **切换是手工的**：改 `[engine].provider` 或角色的 `provider` 后重启/热加载角色；
+   v1 **不做**运行期 `/provider` 切换命令。
+
+7. **记账**：`usage.recorded` 增加 `provider` 字段；`usage_rollup.model` 存 `provider/model`，
+   便于按提供方拆账。
+
+**非目标（v1）**：运行期切换；agent 自建 provider；每个 provider 独立的超时/重试
+（先沿用全局 `[engine] max_retries` 与首字/空闲超时）；非 OpenAI 兼容协议（新增厂商仍需加预设代码）。
+
+**验收**：
+
+1. 只有 `[engine]` 的老配置无需改动即可启动，行为不变；
+2. `[agents.roles.coder] provider = "ocgo"` 后，coder 的请求确实走另一家（`usage_rollup` 可见）；
+3. `role list` 输出包含可用 provider 且不含任何密钥路径；`role add provider="nope"` 报错并列出可选项；
+4. 未知 provider 在**启动时**报配置错误（退出码 2），不是等到第一次调用；
+5. secrets 路径不出现在 system prompt、工具输出、日志中。

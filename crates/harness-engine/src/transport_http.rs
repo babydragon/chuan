@@ -63,6 +63,13 @@ pub fn normalize_url(base: &str) -> String {
 struct ReqwestBytes {
     stream: reqwest::Response,
     cancel: CancellationToken,
+    /// 是否已经收到过第一个数据块。
+    ///
+    /// 用来区分两种"沉默"：**等首字节**（大 prompt + 服务端排队，几十秒很正常）
+    /// 和**流到一半卡住**（真挂住）。前者给 300s，后者 90s——用同一个阈值两头都错。
+    got_first: bool,
+    /// 请求发出时刻：首字超过 20s 记一条 info，方便判断"慢在模型还是慢在网络"。
+    started: std::time::Instant,
 }
 
 #[async_trait]
@@ -71,15 +78,33 @@ impl SseBytes for ReqwestBytes {
         if self.cancel.is_cancelled() {
             return None;
         }
-        // 空闲超时：provider 有时会把连接吊住（socket 还在、一个字节都不来），
-        // 这种情况下总超时可能不触发，表现为"永远正在输入"。90s 没数据就断。
-        match tokio::time::timeout(Duration::from_secs(90), self.stream.chunk()).await {
-            Ok(Ok(Some(bytes))) => Some(Ok(bytes.to_vec())),
+        // 空闲超时：provider 有时会把连接吊住（socket 还在、一个字节都不来）。
+        // 但"等第一个字"和"流到一半卡住"不是一回事：
+        //   - 首字节：大 prompt + 服务端排队，300s 都可能是正常的；
+        //   - 中途：90s 没有新数据基本就是挂住了。
+        let limit = if self.got_first {
+            Duration::from_secs(90)
+        } else {
+            Duration::from_secs(300)
+        };
+        match tokio::time::timeout(limit, self.stream.chunk()).await {
+            Ok(Ok(Some(bytes))) => {
+                if !self.got_first {
+                    self.got_first = true;
+                    let ttft = self.started.elapsed();
+                    if ttft > Duration::from_secs(20) {
+                        tracing::info!(ttft_ms = ttft.as_millis() as u64, "首字很慢（模型排队或 prompt 太大）");
+                    }
+                }
+                Some(Ok(bytes.to_vec()))
+            }
             Ok(Ok(None)) => None,
             Ok(Err(e)) => Some(Err(EngineError::Provider(reqwest_err(&e)))),
-            Err(_) => Some(Err(EngineError::Provider(
-                "SSE 空闲超过 90 秒，连接疑似被挂起".into(),
-            ))),
+            Err(_) => Some(Err(EngineError::Provider(if self.got_first {
+                "生成中途 90 秒没有新数据，连接疑似被挂起".into()
+            } else {
+                "等了 300 秒还没有第一个字（首字超时）".into()
+            }))),
         }
     }
 }
@@ -98,7 +123,19 @@ impl SseTransport for ReqwestTransport {
             rb = rb.header(k.as_str(), v.as_str());
         }
 
-        let resp = rb.send().await.map_err(|e| EngineError::Provider(reqwest_err(&e)))?;
+        // 等响应头也要有上限：`connect_timeout` 只管 TCP 建连，
+        // 对端接了连接却一直不回响应头时，`send()` 会**永远挂着**——
+        // 没有日志、没有空闲计时器（它们都在拿到响应头之后才开始），连取消也打不断。
+        // 真实事故：rc.5 之后一个子 agent 就是这么无声卡住的。
+        let resp = match tokio::time::timeout(Duration::from_secs(300), rb.send()).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(EngineError::Provider(reqwest_err(&e))),
+            Err(_) => {
+                return Err(EngineError::Provider(
+                    "等待响应头超过 300 秒（服务端接了连接但没有回应）".into(),
+                ))
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let retry_after = resp
@@ -110,7 +147,13 @@ impl SseTransport for ReqwestTransport {
             return Err(classify(status.as_u16(), &body, retry_after));
         }
 
-        Ok(Box::new(ReqwestBytes { stream: resp, cancel: CancellationToken::new() }))
+        let started = std::time::Instant::now();
+        Ok(Box::new(ReqwestBytes {
+            stream: resp,
+            cancel: CancellationToken::new(),
+            got_first: false,
+            started,
+        }))
     }
 }
 
