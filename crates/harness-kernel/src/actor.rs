@@ -1741,7 +1741,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         } else {
             Vec::new()
         };
-        let stamped = format!(
+        let mut stamped = format!(
             "（现在：{}）\n\n{}{}",
             crate::schedule::now_line(now_ms(), self.cfg.tz_offset_min),
             inb.text.clone().unwrap_or_default(),
@@ -1763,6 +1763,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         });
 
         // 正在跑的后台任务：不注入的话模型看不见，用户每说一句它就再派一遍同样的活。
+        //
+        // **放在消息末尾，不放 system**：这段内容每完成一个任务就变一次，
+        // 放进 system 会让整段前缀（system + 工具 schema，通常 6–10k token）缓存作废。
+        // 放在尾部只影响这一条消息本身，前面的前缀照样命中。
         let active: Vec<crate::record::Doc> = self
             .list_tasks()
             .await
@@ -1775,10 +1779,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             })
             .collect();
         if !active.is_empty() {
-            system.push_str("\n\n正在跑的后台任务（这些已经在做，**不要重复派**；要掐掉用 `task` 工具或 /tasks）：\n");
+            stamped.push_str("\n\n【正在跑的后台任务】（这些已经在做，**不要重复派**；要掐掉用 `task` 工具或 /tasks）\n");
             for d in active.iter().take(10) {
                 let text: String = d.payload["text"].as_str().unwrap_or("").chars().take(200).collect();
-                system.push_str(&format!(
+                stamped.push_str(&format!(
                     "- {} · {} · {text}\n",
                     d.id.0,
                     d.payload["status"].as_str().unwrap_or("?")
