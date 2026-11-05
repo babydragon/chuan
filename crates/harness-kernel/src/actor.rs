@@ -274,6 +274,10 @@ fn resume_brief(
             }
             if let Some(e) = r["error"].as_str() {
                 out.push_str(&format!("  错误：{}\n", clip(e, 500)));
+                out.push_str(
+                    "  处理建议：先判断是资源不足（轮次 / token）、超时、还是数据问题；\
+                     **不要原样重派**。资源问题就拆小、或让它用脚本处理数据、只回结论。\n",
+                );
             }
             if let Some(pa) = r["pending_actions"].as_array() {
                 let items: Vec<&str> = pa.iter().filter_map(|v| v.as_str()).collect();
@@ -308,6 +312,21 @@ fn stall_limit(tool_in_flight: bool) -> std::time::Duration {
     } else {
         std::time::Duration::from_secs(180)
     }
+}
+
+/// 还能不能唤醒：同一 chat 有排队的（pending）或**真在跑**（在 `running` 集合里）就不唤醒。
+///
+/// 注意不能用 doc 的 `status == "running"` 判断——进程被杀后那条 doc 会永远停在 running，
+/// 把之后所有的唤醒都堵住。
+fn wake_blocked(
+    docs: &[crate::record::Doc],
+    running: &std::collections::HashSet<String>,
+    chat: &str,
+) -> bool {
+    docs.iter().any(|d| {
+        d.payload["chat"].as_str() == Some(chat)
+            && (d.payload["status"].as_str() == Some("pending") || running.contains(&d.id.0))
+    })
 }
 
 /// 从任务 doc 里挑下一条要跑的：**先派的先跑**。
@@ -1714,6 +1733,21 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             inb.text.clone().unwrap_or_default(),
             attachment_lines(&inb.attachments)
         );
+        // 当前对话者是谁，直接决定"哪些动作连试都不用试"。
+        // 不注入的话，成员会先撞一次 host/lan_exec 的 Blocked 才知道自己不行（真实事故）。
+        system.push_str(match role {
+            ActorRole::Owner => {
+                "\n\n当前对话者是**主人**：需要审批的动作会给你发确认卡，等对方点一下即可。"
+            }
+            ActorRole::Member => {
+                "\n\n当前对话者是**成员**（不是主人）。你能做的是：沙盒内执行（exec）、\
+                 已授权的命令条目（lan_command）、出网取资料（http / web_fetch）、读写工作区。\
+                 这些做不到，**不要尝试、也不要换写法重试**：host、lan_exec、装依赖、\
+                 改自身配置（skills / 服务 / 角色 / 规范）、需要审批的任何动作。\
+                 确实需要主人才能做时，把要求说清楚并请对方转告，不要自己绕。"
+            }
+        });
+
         // 正在跑的后台任务：不注入的话模型看不见，用户每说一句它就再派一遍同样的活。
         let active: Vec<crate::record::Doc> = self
             .list_tasks()
@@ -2864,14 +2898,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         if chat.is_empty() {
             return;
         }
-        // 同一 chat 还有没跑完的 → 等它们一起，避免 A/B 各唤醒一次
-        if docs.iter().any(|d| {
-            d.payload["chat"].as_str() == Some(chat.as_str())
-                && matches!(
-                    d.payload["status"].as_str(),
-                    Some("pending") | Some("running")
-                )
-        }) {
+        // 同一 chat 还有没跑完的 → 等它们一起，避免 A/B 各唤醒一次。
+        // "在跑"以内存里的 `bg_running` 为准：doc 的 status 可能因进程被杀永远停在
+        // running（真实事故：一条僵尸任务把后续所有唤醒都堵死）。
+        let running: std::collections::HashSet<String> =
+            self.bg_running.lock().unwrap().keys().cloned().collect();
+        if wake_blocked(&docs, &running, &chat) {
             return;
         }
         let Some((ids, brief)) = resume_brief(&docs, &chat) else { return };
@@ -3940,7 +3972,7 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
 mod tests {
     use super::{
         AgentScope, RunScope, RunningAgent, attachment_lines, cache_suffix, model_usage_line,
-        pick_pending, resume_brief, summarize_args, usage_line,
+        pick_pending, resume_brief, summarize_args, usage_line, wake_blocked,
     };
     use crate::record::UsageTotal;
 
@@ -4138,5 +4170,57 @@ mod tests {
     fn tool_execution_gets_a_much_longer_stall_window() {
         assert_eq!(super::stall_limit(false).as_secs(), 180);
         assert_eq!(super::stall_limit(true).as_secs(), 30 * 60);
+    }
+
+    #[test]
+    fn wake_waits_for_pending_or_really_running_tasks() {
+        use std::collections::HashSet;
+        fn task(id: &str, status: &str, chat: &str) -> crate::record::Doc {
+            crate::record::Doc {
+                id: crate::ids::DocId(id.into()),
+                kind: "agent_task".into(),
+                scope: "task".into(),
+                payload: serde_json::json!({ "status": status, "chat": chat }),
+                version: 1,
+                valid_from: 0,
+                valid_to: None,
+            }
+        }
+        let docs = vec![
+            task("task-1-1", "running", "telegram:42"), // 僵尸：doc 说 running，实际没在跑
+            task("task-2-2", "done", "telegram:42"),
+        ];
+        let none = HashSet::new();
+        assert!(!wake_blocked(&docs, &none, "telegram:42"), "僵尸不应阻塞唤醒");
+
+        let mut running = HashSet::new();
+        running.insert("task-1-1".to_string());
+        assert!(wake_blocked(&docs, &running, "telegram:42"), "真在跑要等");
+
+        let pending = vec![task("task-3-3", "pending", "telegram:42")];
+        assert!(wake_blocked(&pending, &none, "telegram:42"), "排队的要等");
+        assert!(!wake_blocked(&pending, &none, "telegram:99"), "别的会话不阻塞");
+    }
+
+    #[test]
+    fn resume_brief_includes_failure_advice() {
+        let d = crate::record::Doc {
+            id: crate::ids::DocId("task-9-9".into()),
+            kind: "agent_task".into(),
+            scope: "task".into(),
+            payload: serde_json::json!({
+                "text": "写报告",
+                "status": "budget",
+                "chat": "telegram:42",
+                "reported": false,
+                "result": { "error": "tokens 1033191/1000000" },
+            }),
+            version: 1,
+            valid_from: 0,
+            valid_to: None,
+        };
+        let (_, msg) = resume_brief(&[d], "telegram:42").unwrap();
+        assert!(msg.contains("tokens 1033191/1000000"), "{msg}");
+        assert!(msg.contains("不要原样重派"), "失败任务要给处理建议：{msg}");
     }
 }

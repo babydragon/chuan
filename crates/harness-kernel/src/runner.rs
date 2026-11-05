@@ -219,6 +219,9 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
 
         let mut turn_no: u32 = 0;
         let mut recorded_usage: usize = 0;
+        // token 预算只提醒两档，避免每轮都唠叨
+        let mut warned_half = false;
+        let mut warned_near = false;
 
         loop {
             if cancel.is_cancelled() {
@@ -288,6 +291,21 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                 if used > limit {
                     self.finish_interrupted(&conv, &run, turn_no, "token_budget").await?;
                     return Err(RunnerError::Budget(format!("tokens {used}/{limit}")));
+                }
+                // 预算预警：到 1M 才发现就只剩"失败"这一种收尾方式（真实事故：1.03M/1M）。
+                if !warned_near && used * 10 >= limit * 9 {
+                    warned_near = true;
+                    turn.notice(&format!(
+                        "（系统提醒）本次任务的 token 预算快用完了（已用 {used}/{limit}）。\
+                         现在开始收尾：不要再读大文件，把已完成写清楚、未完成列出来。"
+                    ));
+                } else if !warned_half && used * 2 >= limit {
+                    warned_half = true;
+                    turn.notice(&format!(
+                        "（系统提醒）本次任务已用掉一半预算（{used}/{limit}）。\
+                         后面优先让脚本处理数据，不要再把大文件读进上下文——\
+                         每一轮都会把历史重发一遍，读一次就是好几万 token。"
+                    ));
                 }
             }
 

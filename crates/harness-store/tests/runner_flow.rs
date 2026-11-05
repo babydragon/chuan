@@ -4495,6 +4495,8 @@ async fn member_runs_a_command_entry_without_a_card() {
     let sys = systems[0].as_deref().unwrap_or("");
     assert!(sys.contains("可用命令条目"), "system 缺少条目清单：{sys}");
     assert!(sys.contains("printer_status()"), "system 未列条目名：{sys}");
+    // 成员身份必须提前告知：否则它会先撞一次 host/lan_exec 的 Blocked 才知道自己不行
+    assert!(sys.contains("当前对话者是**成员**"), "system 未标注成员身份：{sys}");
 
     // 审计必须落一行（条目名 + 指纹 + exit）
     let audit = std::fs::read_to_string(dir.path().join("lan-access.jsonl")).unwrap();
