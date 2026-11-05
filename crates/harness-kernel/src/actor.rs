@@ -314,6 +314,20 @@ fn stall_limit(tool_in_flight: bool) -> std::time::Duration {
     }
 }
 
+/// 唤醒的目标：`(channel, addr)`。
+///
+/// 注意 `task.payload.chat` 只存**地址**（`81865154`），不带通道前缀；
+/// 通道要从未截断的 `conv`（`telegram:81865154:22`）里取。
+/// 早期把它当成 `channel:addr` 解析，导致 addr 永远为空、唤醒静默不触发。
+fn wake_target(chat: &str, conv: &str) -> Option<(String, String)> {
+    let channel = conv.split(':').next().unwrap_or_default().trim();
+    let addr = chat.trim();
+    if channel.is_empty() || addr.is_empty() {
+        return None;
+    }
+    Some((channel.to_owned(), addr.to_owned()))
+}
+
 /// 还能不能唤醒：同一 chat 有排队的（pending）或**真在跑**（在 `running` 集合里）就不唤醒。
 ///
 /// 注意不能用 doc 的 `status == "running"` 判断——进程被杀后那条 doc 会永远停在 running，
@@ -2908,19 +2922,20 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         }
         let Some((ids, brief)) = resume_brief(&docs, &chat) else { return };
 
-        // 先标记已上报再唤醒：唤醒失败也不重复刷同一份结论
+        // 先确认唤醒目标合法，**再**标记已上报——
+        // 顺序反了就会"标记成已上报，却什么都没发"（真实 bug：chat 只有地址，解析出空通道）。
+        let Some((channel, addr)) = wake_target(&chat, conv) else {
+            tracing::warn!(task = task_id, chat = %chat, conv = %conv, "唤醒目标不完整，跳过");
+            return;
+        };
+
+        // 标记已上报：唤醒失败也不重复刷同一份结论
         for id in &ids {
             if let Some(d) = docs.iter().find(|d| &d.id.0 == id) {
                 let mut p = d.payload.clone();
                 p["reported"] = serde_json::json!(true);
-                self.put_task_doc(id, &chat, p, d.version + 1).await;
+                self.put_task_doc(id, conv, p, d.version + 1).await;
             }
-        }
-
-        let channel = chat.split(':').next().unwrap_or_default().to_owned();
-        let addr = chat.split(':').nth(1).unwrap_or_default().to_owned();
-        if channel.is_empty() || addr.is_empty() {
-            return;
         }
         // `handle_run_inner` 会按 `conv.epoch:<channel>:<addr>` 重新取当前 epoch，
         // 所以 `/new` 之后唤醒也会落到新会话（不需要在这里固化 epoch）。
@@ -3002,8 +3017,6 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             .unwrap_or(2);
         self.put_task_doc(&id, &conv, p, version).await;
         self.bg_running.lock().unwrap().remove(&id);
-        // 全部任务跑完时把结论交回父 agent（可关；见 `[agents] resume_on_done`）。
-        self.maybe_wake_parent(&conv, &id).await;
 
         // 结论不仅推给人，也写进父会话账本：否则主人问"刚才那个任务怎样了"，
         // 模型完全不知道（它只看到过"已排入后台任务"那条）。
@@ -3044,6 +3057,9 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             Err(e) => format!("⚠️ 后台任务失败 · {first}\n{e}"),
         };
         let _ = self.reply(&chan, &chat, &msg).await;
+        // 最后再唤醒父 agent：先让结论落进父会话账本，也避免和唤醒那一轮抢写事务
+        // （抢输时 `begin_write` 失败会被静默跳过，synthetic 就丢了）。
+        self.maybe_wake_parent(&conv, &id).await;
     }
 }
 
@@ -3972,7 +3988,7 @@ impl<S: Store, D: TurnDriver> ApprovalGate for ConversationActor<S, D> {
 mod tests {
     use super::{
         AgentScope, RunScope, RunningAgent, attachment_lines, cache_suffix, model_usage_line,
-        pick_pending, resume_brief, summarize_args, usage_line, wake_blocked,
+        pick_pending, resume_brief, summarize_args, usage_line, wake_blocked, wake_target,
     };
     use crate::record::UsageTotal;
 
@@ -4222,5 +4238,16 @@ mod tests {
         let (_, msg) = resume_brief(&[d], "telegram:42").unwrap();
         assert!(msg.contains("tokens 1033191/1000000"), "{msg}");
         assert!(msg.contains("不要原样重派"), "失败任务要给处理建议：{msg}");
+    }
+
+    #[test]
+    fn wake_target_takes_channel_from_conv_and_addr_from_chat() {
+        // 真实形状：chat 只有地址，conv 才是 telegram:<addr>:<epoch>
+        let (ch, addr) = wake_target("81865154", "telegram:81865154:22").unwrap();
+        assert_eq!(ch, "telegram");
+        assert_eq!(addr, "81865154");
+
+        assert!(wake_target("", "telegram:81865154:22").is_none());
+        assert!(wake_target("81865154", "").is_none());
     }
 }
