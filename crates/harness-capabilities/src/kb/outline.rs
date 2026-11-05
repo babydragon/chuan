@@ -241,7 +241,8 @@ impl Tool for KbOutlineSetTool {
             description: "把一份资料的**结构**写进索引（整体替换这一份的结构）。\
 节点是扁平列表：`{id, type, label?, parent?, page?, attrs?}`，用 parent 串成树；\
 type 由你自己定（章节/单元/生字/条款…），系统不预设。写完之后用 `kb_select` 按结构取集合。\
-同一份资料重复写只会覆盖。"
+同一份资料重复写只会覆盖。\
+结构大（几百个节点以上）时**不要用 nodes 内联**：让脚本生成 JSON 文件，用 path 传路径。"
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -265,19 +266,41 @@ type 由你自己定（章节/单元/生字/条款…），系统不预设。写
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolCtx<'_>,
+        ctx: &ToolCtx<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let sid = normalize_source(
             args.get("source")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 source", false))?,
         );
-        let arr = args
-            .get("nodes")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 nodes 数组", false))?;
+        let inline = args.get("nodes").and_then(|v| v.as_array()).cloned();
+        let file = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let arr: Vec<serde_json::Value> = match (inline, file) {
+            (Some(_), Some(_)) => {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "nodes 与 path 只能给一个：大结构用 path（脚本生成 JSON），小结构才内联",
+                    false,
+                ))
+            }
+            (Some(a), None) => a,
+            (None, Some(p)) => read_nodes_file(&ctx.workspace.root, &p)
+                .map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?,
+            (None, None) => {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "需要 nodes 数组或 path（/ws 下的 JSON 文件）",
+                    false,
+                ))
+            }
+        };
         let mut nodes = Vec::with_capacity(arr.len());
-        for v in arr {
+        for v in &arr {
             nodes.push(Node::from_json(v).map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?);
         }
         let (by_id, _) = index_nodes(nodes.clone()).map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
@@ -342,6 +365,30 @@ type 由你自己定（章节/单元/生字/条款…），系统不预设。写
             artifacts: Vec::new(),
         })
     }
+}
+
+/// 从 `/ws`（或相对路径）读节点数组；也接受 `{"nodes": [...]}`。
+///
+/// 大结构必须走这条路：让模型内联几万 token 的 JSON 是不可行的（生成端会超时/超回合）。
+fn read_nodes_file(root: &str, raw: &str) -> Result<Vec<serde_json::Value>, String> {
+    let rel = if raw == "/ws" { "" } else { raw.strip_prefix("/ws/").unwrap_or(raw) };
+    if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
+        return Err("path 必须是 /ws 下或相对工作区的路径".into());
+    }
+    let path = std::path::Path::new(root).join(rel);
+    let bytes = std::fs::read(&path).map_err(|e| format!("读不到 {raw}：{e}"))?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err(format!("{raw} 超过 8MB，结构太大"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{raw} 不是合法 JSON：{e}"))?;
+    if let Some(a) = v.as_array() {
+        return Ok(a.clone());
+    }
+    if let Some(a) = v.get("nodes").and_then(|n| n.as_array()) {
+        return Ok(a.clone());
+    }
+    Err(format!("{raw} 必须是节点数组，或 {{\"nodes\": [...]}}"))
 }
 
 // ---------------------------------------------------------------- read
@@ -797,5 +844,50 @@ mod tests {
             Block::Paragraph(t) => t.clone(),
             other => format!("{other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn outline_can_be_loaded_from_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_root = dir.path().join("ws");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        std::fs::write(
+            ws_root.join("outline.json"),
+            serde_json::json!({ "nodes": [
+                {"id": "u1", "type": "unit", "label": "第一单元"},
+                {"id": "u1.l1", "type": "课", "label": "第1课", "parent": "u1"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+
+        let ws = Workspace { run: RunId("r".into()), root: ws_root.to_string_lossy().into() };
+        let docs = MapDocs::default();
+        let env = crate::NullEnv;
+        let c = ctx(&ws, &docs, &env);
+
+        let out = KbOutlineSetTool
+            .execute(
+                serde_json::json!({"source": "kb:book", "path": "/ws/outline.json"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.doc_writes.len(), 1);
+        assert_eq!(out.doc_writes[0].payload["count"], 2);
+
+        // 二选一：两个都给要拒绝
+        let err = KbOutlineSetTool
+            .execute(
+                serde_json::json!({
+                    "source": "kb:book",
+                    "path": "/ws/outline.json",
+                    "nodes": [{"id": "a", "type": "x"}]
+                }),
+                &c,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("只能给一个"), "{}", err.message);
     }
 }

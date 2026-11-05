@@ -34,6 +34,9 @@ pub trait WireConversation: Send {
     fn encode(&mut self, model: &str, tools: &[ToolSpec]) -> Vec<u8>;
     fn on_assistant(&mut self, text: &str, calls: &[ToolCallRequest]);
     fn on_tool_result(&mut self, call: &CallId, ok: bool, preview: &str);
+
+    /// 运行中插一条提醒给模型（不是给用户看的）。默认忽略，只有真实协议实现。
+    fn push_notice(&mut self, _text: &str) {}
 }
 
 /// 一家协议 = 一个 `decode` + 一个 `conversation`。

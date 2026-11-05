@@ -166,6 +166,10 @@ impl<T: SseTransport + 'static> Turn for WireTurn<T> {
         self.turn_id.clone()
     }
 
+    fn notice(&mut self, text: &str) {
+        self.convo.push_notice(text);
+    }
+
     fn attempts(&self) -> u32 {
         self.attempts
     }

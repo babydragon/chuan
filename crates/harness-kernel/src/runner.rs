@@ -232,10 +232,27 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             }
             if turn_no >= req.max_turns {
                 self.finish_interrupted(&conv, &run, turn_no, "max_turns").await?;
-                return Err(RunnerError::Budget("max turns".into()));
+                return Err(RunnerError::Budget(format!("max turns ({})", req.max_turns)));
             }
             turn_no += 1;
             let turn_id = TurnId(format!("{}-t{turn_no}", run.0));
+
+            // 最后两轮开始收尾：模型看不见自己的回合上限，硬撑到最后一轮被掐时
+            // 往往什么也没留下（真实事故：子任务跑到 max turns，结论只有一句"中止"）。
+            let remaining = req.max_turns.saturating_sub(turn_no);
+            if remaining == 3 {
+                // 早一点让它做判断：8 轮的任务到剩 2 轮才收尾，往往来不及调整。
+                turn.notice(
+                    "（系统提醒）本次 run 还剩 3 个回合。现在评估：按当前进度能做完吗？\
+                     做不完就先收尾——已完成的写进文件，未完成写清楚要交给谁。",
+                );
+            } else if remaining <= 1 {
+                turn.notice(
+                    "（系统提醒）这是最后一轮，必须给出结论：\
+                     「已完成 / 未完成 / 卡在哪」，未完成部分要足以让接手的 agent 继续。\
+                     不要再开新的探索步骤。",
+                );
+            }
 
             // turn.started
             let mut tx = self.store.begin_write().await?;

@@ -109,6 +109,11 @@ impl WireConversation for OpenAiConversation {
     fn on_tool_result(&mut self, call: &CallId, _ok: bool, preview: &str) {
         self.messages.push(Msg::tool(call.0.clone(), preview));
     }
+
+    fn push_notice(&mut self, text: &str) {
+        // 用 user 角色：多数 OpenAI 兼容实现只允许 system 出现在最前面。
+        self.messages.push(Msg::user(text));
+    }
 }
 
 /// 折叠后的消息 → OpenAI 消息数组。协议相关，因此留在这里。

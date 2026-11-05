@@ -126,4 +126,8 @@ pub trait Turn: Send {
         0
     }
     fn turn_id(&self) -> TurnId;
+
+    /// 运行中给模型补一句提醒（例如"只剩两轮，开始收尾"）。
+    /// 默认忽略：桩实现不需要关心。
+    fn notice(&mut self, _text: &str) {}
 }

@@ -1060,10 +1060,12 @@ trigram 索引比为一个尚未验证的规模去设计投影表更划算。抽
 1. 结构存成一条 `kb.outline` doc（id `kb:<sha>:outline`），内容是**扁平节点数组**：
    `{id, type, label?, parent?, page?, attrs?}`。`type` 完全开放（单元/课/栏目/条款…），
    由 agent 自己定义并在 playbook 里写清楚含义。
-2. `kb_select` 只做确定性运算：`match{type,label,label_contains,attrs,under[]}` 过滤，
+2. 结构输入有两条路：小结构直接给 `nodes`；**几百个节点以上必须给 `path`（`/ws` 下的 JSON 文件）**——
+   让模型内联几万 token 的 JSON 是不可行的（生成端会超时或烧光回合，2026-11-05 实测：908 节点 / 84KB 从未写成功）。
+3. `kb_select` 只做确定性运算：`match{type,label,label_contains,attrs,under[]}` 过滤，
    `field` 投影，跨来源 `union` / `intersect`，每来源内部去重、保序。
    `under` 是**有序祖先条件**（在祖先链里按序匹配，允许中间还有别的层级）。
-3. **不做声明式 profile（TOML/JSON Schema）**：「这一类资料有哪些字段、怎么找」是领域知识，
+4. **不做声明式 profile（TOML/JSON Schema）**：「这一类资料有哪些字段、怎么找」是领域知识，
    写成 schema 就等于把领域逻辑挪回 Rust。它的载体是 **playbook**（D23）：给未来自己看的文字，
    agent 写、主人确认、覆盖留备份。
 
