@@ -141,6 +141,9 @@ pub struct ActorConfig {
     pub model: String,
     /// 每轮注入的 system 指令（身份/语言/工具规矩）。
     pub system_prompt: String,
+    /// 长期记忆最多注入多少条（默认 1000；超限时按"最近 N 条"截断，
+    /// 更聪明的筛选见 docs/MEMORY-RANK.md，暂未实现）。
+    pub memory_inject_limit: usize,
     pub max_turns: u32,
     pub wall_clock_ms: u64,
     pub workspace_root: String,
@@ -191,6 +194,9 @@ pub struct ConversationActor<S: Store, D: TurnDriver> {
     /// 找不到通道时的兜底（老提醒里可能写着已下线的通道）
     pub default_channel: String,
     pub cfg: ActorConfig,
+    /// 检索端口（D9）。facts 现在全量注入，这里暂时闲置；
+    /// 留给知识库检索复用（KB 的工具层目前各自持有 retriever）。
+    #[allow(dead_code)]
     retriever: Option<Arc<dyn crate::retriever::Retriever>>,
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     approvals: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
@@ -977,7 +983,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 if docs.is_empty() {
                     return self.reply(&inb.channel.0, &inb.conversation, "还没有记住任何事实。").await;
                 }
-                let mut out = String::from("长期记忆：\n");
+                let mut out = format!("长期记忆（共 {} 条）：\n", docs.len());
                 for d in &docs {
                     out.push_str(&format!(
                         "- [{}] {} · {} = {}\n",
@@ -988,7 +994,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                     ));
                 }
                 out.push_str("\n用 `/forget <id>` 删除。");
-                self.reply(&inb.channel.0, &inb.conversation, &out).await
+                // 记忆多到超过单条消息上限时，整条发不出去（真实事故：/facts 毫无反应，
+                // 日志里只有 "message is too long"）。按通道上限分片。
+                for part in shard_text(&out, 3_000) {
+                    self.reply(&inb.channel.0, &inb.conversation, &part).await?;
+                }
+                Ok(())
             }
             "forget" => {
                 let prefix = text.trim().split_whitespace().nth(1).unwrap_or("");
@@ -1689,24 +1700,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             let q = crate::record::DocQuery {
                 scopes: vec!["family".into(), format!("user:{user_id}")],
                 kinds: vec!["fact".into()],
-                limit: 50,
+                // 全量注入：几条、几十条对 1M 上下文的模型来说可以忽略，
+                // 而且 system 是稳定前缀，provider 侧缓存命中后每轮几乎不花钱。
+                // 以前"超过 30 条就只看检索命中的"会让普通问题直接失忆。
+                limit: self.cfg.memory_inject_limit.max(1),
             };
-            if let Ok(mut docs) = rd.list_docs(q).await {
-                if docs.len() > 30 {
-                    if let Some(r) = &self.retriever {
-                        let query = crate::retriever::Query {
-                            text: inb.text.clone().unwrap_or_default(),
-                            scopes: vec!["family".into(), format!("user:{user_id}")],
-                            kinds: vec!["fact".into()],
-                            k: 10,
-                        };
-                        if let Ok(hits) = r.search(query).await {
-                            let ids: std::collections::HashSet<String> =
-                                hits.into_iter().map(|h| h.doc_id.0).collect();
-                            docs.retain(|d| ids.contains(&d.id.0));
-                        }
-                    }
-                }
+            if let Ok(docs) = rd.list_docs(q).await {
                 if !docs.is_empty() {
                     system.push_str("\n\n已知事实（长期记忆，可直接使用，不必再问用户）：\n");
                     for d in &docs {
@@ -1714,6 +1713,9 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         let pred = d.payload["predicate"].as_str().unwrap_or("?");
                         let val = d.payload["value"].as_str().unwrap_or("?");
                         system.push_str(&format!("- {subj} · {pred} = {val}\n"));
+                    }
+                    if docs.len() >= self.cfg.memory_inject_limit.max(1) {
+                        system.push_str("（还有更多，用 `/facts` 查看或 `/forget` 清理）\n");
                     }
                 }
             }
@@ -2003,7 +2005,8 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             let q = crate::record::DocQuery {
                 scopes: vec!["family".into(), format!("user:{actor}")],
                 kinds: vec!["fact".into()],
-                limit: 50,
+                // 50 太小：记忆一多，/facts 与 /forget 就看不全（注入预算另算）
+                limit: 200,
             };
             if let Ok(docs) = rd.list_docs(q).await {
                 out = docs;

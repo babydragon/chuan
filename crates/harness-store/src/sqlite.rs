@@ -48,6 +48,12 @@ enum Op {
     ResolveApproval(ApprovalId, bool, String),
     ExpireApprovals(i64),
     DeleteDoc(DocId),
+    /// 事务内删除：事件记到调用方的 conv/run（而不是 `__docs__`）
+    DeleteDocInTx {
+        conv: ConversationId,
+        run: RunId,
+        id: DocId,
+    },
     PutTask(TaskRecord, String),
     OpenRuns,
     ClaimDue(i64, u32),
@@ -433,25 +439,12 @@ fn apply(conn: &Connection, op: Op) -> Result<OpResult, StoreError> {
             Ok(OpResult::Resolved(Resolve::Applied))
         }
         Op::DeleteDoc(id) => {
-            let n = conn
-                .execute("DELETE FROM docs WHERE id=?1", params![id.0])
-                .map_err(map_err)?;
-            conn.execute("DELETE FROM docs_fts WHERE doc_id=?1", params![id.0])
-                .map_err(map_err)?;
-            if n > 0 {
-                append(
-                    conn,
-                    &NewEvent {
-                        conv: ConversationId("__docs__".into()),
-                        run: RunId("__docs__".into()),
-                        turn: None,
-                        kind: EventKind::DocUpserted,
-                        payload: serde_json::json!({ "id": id.0, "op": "expire" }),
-                        dedupe_key: None,
-                    },
-                )?;
-            }
-            Ok(OpResult::Count(n as u32))
+            let n = delete_doc_row(conn, &ConversationId("__docs__".into()), &RunId("__docs__".into()), &id)?;
+            Ok(OpResult::Count(n))
+        }
+        Op::DeleteDocInTx { conv, run, id } => {
+            let n = delete_doc_row(conn, &conv, &run, &id)?;
+            Ok(OpResult::Count(n))
         }
         Op::ExpireApprovals(now) => {
             let n = conn
@@ -636,6 +629,34 @@ fn run_of_call(conn: &Connection, call: &CallId) -> Option<RunId> {
     .ok()
     .flatten()
     .map(RunId)
+}
+
+/// 删 doc 行 + FTS 行，并补一条 `op:"expire"` 事件（重建认得它）。
+fn delete_doc_row(
+    conn: &Connection,
+    conv: &ConversationId,
+    run: &RunId,
+    id: &DocId,
+) -> Result<u32, StoreError> {
+    let n = conn
+        .execute("DELETE FROM docs WHERE id=?1", params![id.0])
+        .map_err(map_err)?;
+    conn.execute("DELETE FROM docs_fts WHERE doc_id=?1", params![id.0])
+        .map_err(map_err)?;
+    if n > 0 {
+        append(
+            conn,
+            &NewEvent {
+                conv: conv.clone(),
+                run: run.clone(),
+                turn: None,
+                kind: EventKind::DocUpserted,
+                payload: serde_json::json!({ "id": id.0, "op": "expire" }),
+                dedupe_key: None,
+            },
+        )?;
+    }
+    Ok(n as u32)
 }
 
 fn doc_fts_text(doc: &Doc) -> String {
@@ -1164,7 +1185,26 @@ impl Drop for SqliteTx {
 }
 
 #[async_trait]
+#[async_trait]
 impl Tx for SqliteTx {
+    async fn delete_doc(
+        &mut self,
+        conv: ConversationId,
+        run: RunId,
+        id: DocId,
+    ) -> Result<bool, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::Op(Op::DeleteDocInTx { conv, run, id }, tx))
+            .await
+            .map_err(|_| StoreError::Unavailable("writer gone".into()))?;
+        match rx.await.map_err(|_| StoreError::Unavailable("writer gone".into()))?? {
+            OpResult::Count(n) => Ok(n > 0),
+            _ => Err(StoreError::Conflict),
+        }
+    }
+
+
     async fn append(&mut self, ev: NewEvent) -> Result<Seq, StoreError> {
         let (tx, rx) = oneshot::channel();
         self.cmd
@@ -1373,19 +1413,32 @@ impl ReadTx for SqliteRead {
     }
 
     async fn list_docs(&mut self, q: DocQuery) -> Result<Vec<Doc>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, kind, scope, payload, version, valid_from, valid_to FROM docs
-                 WHERE (?1='' OR scope=?1) AND (?2='' OR kind=?2)
-                 ORDER BY valid_from DESC LIMIT ?3",
-            )
-            .map_err(map_err)?;
-        let scope = q.scopes.first().cloned().unwrap_or_default();
-        let kind = q.kinds.first().cloned().unwrap_or_default();
-        let limit = if q.limit == 0 { -1 } else { q.limit as i64 };
+        // 支持**多个 scope / kind**：以前只取 `first()`，调用方传 ["family", "user:<id>"]
+        // 时个人记忆永远查不出来（真实事故：用户以为长期记忆丢了）。
+        use rusqlite::types::Value;
+        let mut sql = String::from(
+            "SELECT id, kind, scope, payload, version, valid_from, valid_to FROM docs WHERE 1=1",
+        );
+        let mut args: Vec<Value> = Vec::new();
+        if !q.scopes.is_empty() {
+            sql.push_str(&format!(
+                " AND scope IN ({})",
+                vec!["?"; q.scopes.len()].join(",")
+            ));
+            args.extend(q.scopes.iter().cloned().map(Value::Text));
+        }
+        if !q.kinds.is_empty() {
+            sql.push_str(&format!(
+                " AND kind IN ({})",
+                vec!["?"; q.kinds.len()].join(",")
+            ));
+            args.extend(q.kinds.iter().cloned().map(Value::Text));
+        }
+        sql.push_str(" ORDER BY valid_from DESC LIMIT ?");
+        args.push(Value::Integer(if q.limit == 0 { -1 } else { q.limit as i64 }));
+        let mut stmt = self.conn.prepare(&sql).map_err(map_err)?;
         let docs = stmt
-            .query_map(params![scope, kind, limit], |r| {
+            .query_map(rusqlite::params_from_iter(args), |r| {
                 Ok(Doc {
                     id: DocId(r.get(0)?),
                     kind: r.get(1)?,

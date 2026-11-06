@@ -785,7 +785,9 @@ pub enum ToolState { Running, Ok, Failed }
 pub struct DocWrite { pub id: DocId, pub kind: DocKind, pub scope: Scope,
                       pub payload: serde_json::Value, pub version: u64,
                       pub target: Option<DocId>, pub op: DocOp }
-pub enum DocOp { Upsert, Supersede, Expire }
+pub enum DocOp { Upsert, Supersede, Delete, Expire }
+// `op = Delete` 在同一 tx3 里删除该 doc（连同 FTS 行），账本记 `op:"expire"`，可重放。
+// 工具要"删旧 + 写新"原子完成时用它；不要改走 `Store::delete_doc`（那是独立事务）。
 
 pub struct ArtifactRef { pub path: String, pub bytes: u64, pub sha256: String }
 

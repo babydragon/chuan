@@ -373,6 +373,15 @@ impl Tx for EphemeralTx {
         Ok(())
     }
 
+    async fn delete_doc(
+        &mut self,
+        _conv: ConversationId,
+        _run: harness_kernel::RunId,
+        id: harness_kernel::DocId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.state.docs.remove(&id.0).is_some())
+    }
+
     async fn record_usage(&mut self, conv: ConversationId, _run: harness_kernel::RunId, u: UsageRecord) -> Result<(), StoreError> {
         self.state.usage.push((now_ms(), conv.0, u));
         Ok(())

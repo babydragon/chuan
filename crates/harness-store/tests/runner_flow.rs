@@ -487,7 +487,7 @@ async fn actor_turns_inbound_into_reply() {
         Arc::new(registry),
         Arc::new(env),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -558,7 +558,7 @@ async fn final_message_is_retried_after_rate_limit_window() {
         Arc::new(registry),
         Arc::new(env),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -627,7 +627,7 @@ async fn actor_answers_slash_status() {
         Arc::new(registry),
         Arc::new(env),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 1_000,
@@ -716,7 +716,7 @@ async fn over_budget_blocks_run_with_visible_message() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -807,7 +807,7 @@ async fn over_budget_blocks_delegation() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -870,7 +870,7 @@ fn task_actor(
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -1185,7 +1185,7 @@ async fn agents_show_dumps_child_transcript() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 1,
             wall_clock_ms: 1_000,
@@ -1251,7 +1251,7 @@ async fn actor_answers_slash_agents() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 1,
             wall_clock_ms: 1_000,
@@ -1320,7 +1320,7 @@ async fn path_like_command_is_treated_as_text() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -1403,7 +1403,7 @@ async fn actor_answers_slash_prompt() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 1,
             wall_clock_ms: 1_000,
@@ -1470,7 +1470,7 @@ async fn actor_answers_slash_usage() {
         Arc::new(registry),
         Arc::new(env),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 1,
             wall_clock_ms: 1_000,
@@ -1646,7 +1646,7 @@ async fn role_shapes_child_prompt_tools_and_model() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m-main".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -1762,7 +1762,7 @@ async fn role_catalog_is_visible_and_hot_loaded() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -1940,7 +1940,7 @@ async fn spawn_extracts_pending_actions() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 5_000,
@@ -2049,7 +2049,7 @@ async fn child_agent_is_isolated_and_cannot_self_modify() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 10_000,
@@ -2166,7 +2166,7 @@ async fn approval_gate_allows_after_callback() {
         Arc::new(registry),
         Arc::new(env),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -2324,7 +2324,7 @@ async fn done_run_with_writes_offers_publish_button() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -2396,7 +2396,7 @@ async fn skill_button_starts_distill_run() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 2_000,
@@ -2515,7 +2515,7 @@ async fn clicking_publish_button_removes_keyboard() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -2715,7 +2715,7 @@ async fn run_one_tool_call(
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 0,
@@ -2813,7 +2813,7 @@ async fn slash_facts_empty_and_help_lists_commands() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 0,
@@ -2885,7 +2885,7 @@ async fn due_reminder_fires_once_and_rearms() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 0,
@@ -3020,7 +3020,7 @@ async fn pinned_reminder_runs_skill_without_model() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 0,
@@ -3123,7 +3123,7 @@ async fn static_reminder_sends_text_only() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 0,
@@ -3245,7 +3245,7 @@ async fn approval_card_uses_tool_hint() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 3,
             wall_clock_ms: 0,
@@ -3333,7 +3333,7 @@ async fn reminders_are_per_user() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 0,
@@ -3464,7 +3464,7 @@ async fn pinned_reminder_with_polish_passes_data_to_model() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 3,
             wall_clock_ms: 0,
@@ -3565,7 +3565,7 @@ async fn tool_catalog_is_injected_into_system_prompt() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 0,
@@ -3652,7 +3652,7 @@ fn actor_with_registry(
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -3866,7 +3866,7 @@ async fn two_channels_do_not_cross_talk() {
             Arc::clone(&tg) as Arc<dyn harness_kernel::Channel>,
             Arc::clone(&wx) as Arc<dyn harness_kernel::Channel>,
         ],
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -3940,7 +3940,7 @@ async fn unbound_address_gets_unauthorized_without_running() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4040,7 +4040,7 @@ async fn short_code_approval_with_human_readable_card() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4174,7 +4174,7 @@ async fn bare_media_waits_for_instruction() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4246,7 +4246,7 @@ async fn pending_media_merges_into_next_text() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4399,7 +4399,7 @@ async fn member_hits_ceiling_without_a_card() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4470,7 +4470,7 @@ async fn non_owner_cannot_approve() {
         Arc::new(harness_kernel::ToolRegistry::new()),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 1_000,
@@ -4600,7 +4600,7 @@ async fn member_runs_a_command_entry_without_a_card() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4720,7 +4720,7 @@ async fn unknown_command_entry_is_blocked() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -4893,7 +4893,7 @@ async fn proposal_is_installed_only_after_owner_approves() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -5030,7 +5030,7 @@ async fn member_sets_reminder_without_a_card() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -5113,7 +5113,7 @@ async fn repeated_blocks_notify_owner_once() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 1_000,
@@ -5207,7 +5207,7 @@ async fn member_can_schedule_a_model_reminder_but_owner_is_told() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 4,
             wall_clock_ms: 5_000,
@@ -5312,7 +5312,7 @@ async fn scheduled_run_skips_approval_and_tells_owner_once() {
         Arc::new(registry),
         Arc::new(NoopEnv),
         Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
-        ActorConfig {
+        ActorConfig { memory_inject_limit: 1000,
             model: "m".into(),
             max_turns: 2,
             wall_clock_ms: 1_000,

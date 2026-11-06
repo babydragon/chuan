@@ -623,7 +623,13 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                 }
                 let mut tx = self.store.begin_write().await?;
                 for d in out.doc_writes {
-                    tx.upsert_doc(conv.clone(), run.clone(), into_doc(d)).await?;
+                    // `DocOp::Delete` 与 upsert 落在同一个事务里：删旧页 + 写新页要么都成、要么都不成，
+                    // 并且都会进账本（删除落成 `op:"expire"`，`rebuild` 认得）。
+                    if matches!(d.op, crate::record::DocOp::Delete) {
+                        tx.delete_doc(conv.clone(), run.clone(), d.id).await?;
+                    } else {
+                        tx.upsert_doc(conv.clone(), run.clone(), into_doc(d)).await?;
+                    }
                 }
                 tx.close_tool_call(call.call.clone(), "ok", preview.clone()).await?;
                 tx.append(NewEvent {

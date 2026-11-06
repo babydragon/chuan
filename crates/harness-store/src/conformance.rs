@@ -506,3 +506,112 @@ async fn sqlite_v6_db_migrates_cache_columns() {
     assert_eq!(by_model.len(), 2);
     assert!(by_model.iter().any(|(m, u)| m == "new-model" && u.cache_hit_tokens == 40));
 }
+
+/// `list_docs` 必须支持**多个 scope**：调用方常传 `["family", "user:<id>"]`，
+/// 只看第一个会让个人记忆永远查不出来（真实事故：用户以为长期记忆丢了）。
+#[tokio::test]
+async fn list_docs_supports_multiple_scopes() {
+    use crate::{EphemeralStore, SqliteStore};
+    use harness_kernel::{DocQuery, Store};
+
+    for which in ["sqlite", "ephemeral"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Box<dyn Store> = match which {
+            "sqlite" => Box::new(SqliteStore::open(dir.path().join("t.db")).await.unwrap()),
+            _ => Box::new(EphemeralStore::new()),
+        };
+        let mut tx = store.begin_write().await.unwrap();
+        for (id, scope) in [("f1", "family"), ("u1", "user:42")] {
+            tx.upsert_doc(
+                ConversationId::from("c1"),
+                RunId::from("r1"),
+                Doc {
+                    id: DocId(id.into()),
+                    kind: "fact".into(),
+                    scope: scope.into(),
+                    payload: serde_json::json!({"subject": id, "predicate": "p", "value": "v"}),
+                    version: 1,
+                    valid_from: 0,
+                    valid_to: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut rd = store.begin_read().await.unwrap();
+        let both = rd
+            .list_docs(DocQuery {
+                scopes: vec!["family".into(), "user:42".into()],
+                kinds: vec!["fact".into()],
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(both.len(), 2, "{which}: 两个 scope 都要查到: {both:?}");
+
+        let only_family = rd
+            .list_docs(DocQuery {
+                scopes: vec!["family".into()],
+                kinds: vec!["fact".into()],
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(only_family.len(), 1, "{which}");
+    }
+}
+
+/// 事务内删除必须**可重放**：删了就是删了，`rebuild` 之后不能复活。
+/// （工具靠它把"删旧页 + 写新页"放进同一个事务。）
+#[tokio::test]
+async fn tx_delete_survives_rebuild() {
+    use crate::SqliteStore;
+    use harness_kernel::{DocQuery, Store};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path().join("t.db")).await.unwrap();
+    let conv = ConversationId::from("c1");
+    let run = RunId::from("r1");
+    let mk = |id: &str| Doc {
+        id: DocId(id.into()),
+        kind: "fact".into(),
+        scope: "family".into(),
+        payload: serde_json::json!({"subject": id, "predicate": "p", "value": "v"}),
+        version: 1,
+        valid_from: 0,
+        valid_to: None,
+    };
+
+    let mut tx = store.begin_write().await.unwrap();
+    tx.upsert_doc(conv.clone(), run.clone(), mk("d1")).await.unwrap();
+    tx.upsert_doc(conv.clone(), run.clone(), mk("d2")).await.unwrap();
+    tx.delete_doc(conv.clone(), run.clone(), DocId("d1".into())).await.unwrap();
+    tx.commit().await.unwrap();
+
+    async fn read_ids(store: &SqliteStore) -> Vec<String> {
+        let mut rd = store.begin_read().await.unwrap();
+        let mut ids: Vec<String> = rd
+            .list_docs(DocQuery {
+                scopes: vec!["family".into()],
+                kinds: vec!["fact".into()],
+                limit: 0,
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id.0)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    assert_eq!(read_ids(&store).await, vec!["d2".to_string()]);
+    store.rebuild().await.unwrap();
+    assert_eq!(
+        read_ids(&store).await,
+        vec!["d2".to_string()],
+        "rebuild 之后被删的 d1 不能复活"
+    );
+}

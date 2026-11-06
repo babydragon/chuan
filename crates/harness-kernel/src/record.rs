@@ -39,6 +39,8 @@ pub struct ConversationView {
 pub enum DocOp {
     Upsert,
     Supersede,
+    /// 删除（落账为 `doc.upserted{op:"expire"}`，与 `Store::delete_doc` 同一语义）。
+    Delete,
     Expire,
 }
 

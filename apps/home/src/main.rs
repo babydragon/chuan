@@ -614,6 +614,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         Arc::new(env),
         channels.clone(),
         ActorConfig {
+            memory_inject_limit: cfg.memory_inject_limit,
             model: cfg.model.clone().unwrap_or_else(|| cfg.provider.clone()),
             max_turns: cfg.max_turns,
             wall_clock_ms: cfg.wall_clock_ms,

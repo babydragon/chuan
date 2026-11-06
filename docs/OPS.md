@@ -373,6 +373,11 @@ services  = "never"   # http/mcp 默认直连（国内服务绕代理更慢）
 `<config>` 默认 `~/.config/chuan`，`<skills>/<library>/<media>` 默认在 `~/.local/share/chuan/` 下。
 
 ```toml
+[memory]
+# 长期记忆（facts）最多注入多少条；默认 1000。超限时只保留最近的，
+# 更聪明的筛选（2-gram + IDF）见 MEMORY-RANK.md，尚未实现。
+inject_limit = 1000
+
 [library]
 # 文件库：keep 存下来的产物（永久）
 dir = "~/.local/share/chuan/files"

@@ -118,6 +118,14 @@ pub trait Tx: Send {
     async fn abandon_tool_call(&mut self, call: CallId, reason: &str) -> Result<(), StoreError>;
 
     async fn upsert_doc(&mut self, conv: ConversationId, run: RunId, doc: Doc) -> Result<(), StoreError>;
+    /// 在同一写事务里删除一条 doc（连同 FTS 行，并补一条 `op:"expire"` 事件）。
+    /// 工具需要"删旧 + 写新"原子完成时用它，不要改走 `Store::delete_doc`（那是独立事务）。
+    async fn delete_doc(
+        &mut self,
+        conv: ConversationId,
+        run: RunId,
+        id: crate::ids::DocId,
+    ) -> Result<bool, StoreError>;
     async fn record_usage(&mut self, conv: ConversationId, run: RunId, u: UsageRecord) -> Result<(), StoreError>;
 
     /// 键值写入（走同一写事务，保证与其它状态一致）。

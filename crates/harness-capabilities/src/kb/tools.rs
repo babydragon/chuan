@@ -76,6 +76,25 @@ fn resolve_input(raw: &str, ws_root: &str, media_dir: &Path) -> Result<PathBuf, 
     Ok(Path::new(ws_root).join(rel))
 }
 
+/// 正文摘要（前 16 位）：用来判断"重入库的内容是否真的变了"。
+///
+/// 变了才失效结构索引——否则幂等重入会把昂贵的 outline 白白删掉。
+fn text_digest(s: &str) -> String {
+    Sha256::digest(s.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+fn delete_write(id: String) -> DocWrite {
+    DocWrite {
+        id: DocId(id),
+        kind: PAGE_KIND.into(),
+        scope: KB_SCOPE.into(),
+        payload: serde_json::Value::Null,
+        version: 1,
+        target: None,
+        op: DocOp::Delete,
+    }
+}
+
 fn safe_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -260,7 +279,15 @@ impl Tool for KbIngestTool {
         let sid = source_id(&sha);
         let now = harness_kernel::now_ms();
         let chars: usize = pages.iter().map(|p| p.chars().count()).sum();
-        let mut writes = Vec::with_capacity(pages.len() + 1);
+        let text_sha = text_digest(&text);
+        // 旧来源：判断"正文是否真的变了"，以及清掉页数变少后的尾巴
+        let old = ctx.docs.get(&sid).await.ok().flatten();
+        let old_text_sha = old
+            .as_ref()
+            .and_then(|d| d.payload.get("text_sha"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let mut writes = Vec::with_capacity(pages.len() + 3);
         writes.push(DocWrite {
             id: DocId(sid.clone()),
             kind: SOURCE_KIND.into(),
@@ -274,6 +301,7 @@ impl Tool for KbIngestTool {
                 "chars": chars,
                 "domain": domain,
                 "text_from": text_from,
+                "text_sha": text_sha,
                 "saved_at": now,
                 "source": ctx.call.0,
             }),
@@ -298,9 +326,38 @@ impl Tool for KbIngestTool {
             });
         }
 
+        // 清掉超出新页数的旧页：页号连续，探测到第一个不存在的就停。
+        // 这样连"历史上已经被错误瘦身过"的孤儿也能清理（不依赖旧记录的 pages）。
+        let mut pruned = 0usize;
+        let mut p = pages.len() as u32 + 1;
+        while p <= MAX_PAGES as u32 {
+            match ctx.docs.get(&page_id(&sha, p)).await {
+                Ok(Some(_)) => {
+                    writes.push(delete_write(page_id(&sha, p)));
+                    pruned += 1;
+                    p += 1;
+                }
+                _ => break,
+            }
+        }
+
+        // 正文变了 → 结构索引里的页锚点必然失效，直接删掉（提醒重新抽取）。
+        // 内容没变（幂等重入）时保留，避免白删。
+        let outline_dropped = old_text_sha.as_deref().is_some_and(|s| s != text_sha);
+        if outline_dropped {
+            writes.push(delete_write(format!("{sid}:outline")));
+        }
+
+        let mut tail = String::new();
+        if pruned > 0 {
+            tail.push_str(&format!("\n清理了 {pruned} 页超出新页数的旧页。"));
+        }
+        if outline_dropped {
+            tail.push_str("\n正文已变，旧的结构索引已删除——需要重新抽取结构。");
+        }
         Ok(ToolOutput {
             content: vec![Block::Paragraph(format!(
-                "已入库：{name}\n来源 id：{sid}\n{} 页（其中 {filled} 页有内容），约 {chars} 字；正文来源：{text_from}。\n\
+                "已入库：{name}\n来源 id：{sid}\n{} 页（其中 {filled} 页有内容），约 {chars} 字；正文来源：{text_from}。{tail}\n\
                  下一步：`kb_search` 查内容、`kb_read` 读整页、`kb_file` 取原件。",
                 pages.len()
             ))],
@@ -795,60 +852,88 @@ impl Tool for KbForgetTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 source", false))?,
         );
-        let Some(meta) = ctx
+        let meta = ctx
             .docs
             .get(&sid)
             .await
-            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?
-        else {
-            return Err(ToolError::new(
-                ErrorCode::NotFound,
-                format!("资料库里没有 {sid}"),
-                false,
-            ));
-        };
-        let pages = meta.payload.get("pages").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let title = meta.payload.get("title").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
+        let sha = sid.strip_prefix("kb:").unwrap_or(&sid).to_owned();
 
-        // 先删页，再删结构，最后删来源：中途失败时来源还在，重跑一次即可
+        // 删除也走 doc_writes：与"标记已上报/写结果"同一个事务，可重放。
+        // 以前在 execute 里逐条 `docs.delete`，一是非原子，二是只删到记录里的 pages 为止。
+        let mut writes = Vec::new();
         let mut removed = 0usize;
-        for page in 1..=pages {
-            match ctx.docs.delete(&format!("{sid}:p{page}")).await {
-                Ok(true) => removed += 1,
-                Ok(false) => {}
-                Err(e) => {
+        match &meta {
+            Some(m) => {
+                let pages = m.payload.get("pages").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                for page in 1..=pages {
+                    writes.push(delete_write(format!("{sid}:p{page}")));
+                    removed += 1;
+                }
+                // 超出声明页数的旧页（历史重入库留下的尾巴）：页号连续，探测到空洞即停
+                let mut p = pages + 1;
+                while p <= MAX_PAGES as u32 {
+                    match ctx.docs.get(&page_id(&sha, p)).await {
+                        Ok(Some(_)) => {
+                            writes.push(delete_write(page_id(&sha, p)));
+                            removed += 1;
+                            p += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                writes.push(delete_write(format!("{sid}:outline")));
+                writes.push(delete_write(sid.clone()));
+            }
+            None => {
+                // 来源记录已经不在，但可能遗留孤儿页（旧版本的 bug）：从第 1 页探到空洞
+                let mut p = 1u32;
+                while p <= MAX_PAGES as u32 {
+                    match ctx.docs.get(&page_id(&sha, p)).await {
+                        Ok(Some(_)) => {
+                            writes.push(delete_write(page_id(&sha, p)));
+                            removed += 1;
+                            p += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                if removed == 0 {
                     return Err(ToolError::new(
-                        ErrorCode::Unavailable,
-                        format!("删到第 {page} 页时失败：{e}（来源记录保留，可重试）"),
+                        ErrorCode::NotFound,
+                        format!("资料库里没有 {sid}"),
                         false,
-                    ))
+                    ));
                 }
             }
         }
-        let _ = ctx.docs.delete(&format!("{sid}:outline")).await;
 
-        let sha = sid.strip_prefix("kb:").unwrap_or(&sid);
-        let dir = self.library.join(sha);
+        let title = meta
+            .as_ref()
+            .and_then(|m| m.payload.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+
+        // 原件进回收站（与索引删除分属两个平面，失败不影响索引清理）
+        let dir = self.library.join(&sha);
         let trash_root = self.library.join(crate::selfmod::TRASH_DIR);
         let moved = crate::selfmod::trash(&dir, &trash_root)
             .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
-
-        ctx.docs
-            .delete(&sid)
-            .await
-            .map_err(|e| ToolError::new(ErrorCode::Unavailable, e, false))?;
-
         let where_ = moved
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "（原件已不在文件库）".into());
+
+        let head = if meta.is_some() {
+            format!("已移除 {sid}{}：删掉 {removed} 页索引与结构索引。", if title.is_empty() { String::new() } else { format!("（{title}）") })
+        } else {
+            format!("{sid} 的来源记录已不在，清理了 {removed} 个遗留页索引。")
+        };
         Ok(ToolOutput {
             content: vec![Block::Paragraph(format!(
-                "已移除 {sid}{}：删掉 {removed}/{} 页索引与结构索引。\n原件在 {where_}，\
-                 保留期内可以搬回文件库；恢复索引要重新 `kb_ingest`（正文需要重抽）。",
-                if title.is_empty() { String::new() } else { format!("（{title}）") },
-                pages
+                "{head}\n原件在 {where_}，保留期内可以搬回文件库；恢复索引要重新 `kb_ingest`（正文需要重抽）。"
             ))],
-            doc_writes: Vec::new(),
+            doc_writes: writes,
             artifacts: Vec::new(),
         })
     }
@@ -1032,6 +1117,31 @@ mod list_forget_tests {
         }
     }
 
+    /// 模拟 runner：按 op 把工具产出的 doc_writes 应用到"库"里。
+    fn apply(docs: &MapDocs, writes: Vec<DocWrite>) {
+        for w in writes {
+            match w.op {
+                DocOp::Delete => {
+                    docs.docs.lock().unwrap().remove(&w.id.0);
+                }
+                _ => {
+                    docs.docs.lock().unwrap().insert(
+                        w.id.0.clone(),
+                        Doc {
+                            id: w.id,
+                            kind: w.kind,
+                            scope: w.scope,
+                            payload: w.payload,
+                            version: 1,
+                            valid_from: 0,
+                            valid_to: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn doc(id: &str, kind: &str, payload: serde_json::Value) -> Doc {
         Doc {
             id: DocId(id.into()),
@@ -1151,7 +1261,8 @@ mod list_forget_tests {
             Block::Paragraph(t) => t.clone(),
             other => format!("{other:?}"),
         };
-        assert!(text.contains("删掉 2/2 页"), "{text}");
+        assert!(text.contains("删掉 2 页"), "{text}");
+        apply(&docs, out.doc_writes.clone());
         assert!(docs.docs.lock().unwrap().is_empty(), "索引必须清干净");
         assert!(!book_dir.exists(), "原目录应被移走");
         let trash = library.join(".trash");
@@ -1162,5 +1273,213 @@ mod list_forget_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    fn ws_ctx<'a>(ws: &'a Workspace, docs: &'a MapDocs, env: &'a crate::NullEnv) -> ToolCtx<'a> {
+        ToolCtx {
+            system_prompt: "",
+            spawner: None,
+            conv: ConversationId("c".into()),
+            actor: "owner",
+            outbox: &harness_kernel::NullOutbox,
+            docs,
+            run: RunId("r".into()),
+            call: CallId("call-ing".into()),
+            workspace: ws,
+            env,
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    fn page_ids(docs: &MapDocs) -> Vec<String> {
+        let mut out: Vec<String> = docs
+            .docs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|d| d.kind == PAGE_KIND)
+            .map(|d| d.id.0.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn source_id_of(docs: &MapDocs) -> String {
+        docs.docs
+            .lock()
+            .unwrap()
+            .values()
+            .find(|d| d.kind == SOURCE_KIND)
+            .map(|d| d.id.0.clone())
+            .expect("应先有来源")
+    }
+
+    #[tokio::test]
+    async fn reingest_prunes_stale_pages_and_invalidates_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_root = dir.path().join("ws");
+        let library = dir.path().join("files");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        std::fs::write(ws_root.join("book.pdf"), b"%PDF-1.4 fake").unwrap();
+        std::fs::write(ws_root.join("a.txt"), "第一页\u{0c}第二页\u{0c}第三页\u{0c}").unwrap();
+        std::fs::write(ws_root.join("b.txt"), "只有一页\u{0c}").unwrap();
+
+        let ws = Workspace { run: RunId("r".into()), root: ws_root.to_string_lossy().into_owned() };
+        let docs = MapDocs::default();
+        let env = crate::NullEnv;
+        let c = ws_ctx(&ws, &docs, &env);
+        let tool = KbIngestTool::new(&library, dir.path().join("media"));
+
+        // 第一次：3 页
+        let out = tool
+            .execute(serde_json::json!({"path": "/ws/book.pdf", "pages_file": "/ws/a.txt"}), &c)
+            .await
+            .unwrap();
+        apply(&docs, out.doc_writes);
+        let sid = source_id_of(&docs);
+        assert_eq!(page_ids(&docs).len(), 3);
+        docs.docs.lock().unwrap().insert(
+            format!("{sid}:outline"),
+            doc(&format!("{sid}:outline"), "kb.outline", serde_json::json!({"nodes": []})),
+        );
+
+        // 第二次：只有 1 页，正文也变了
+        let out = tool
+            .execute(serde_json::json!({"path": "/ws/book.pdf", "pages_file": "/ws/b.txt"}), &c)
+            .await
+            .unwrap();
+        let deleted: Vec<String> = out
+            .doc_writes
+            .iter()
+            .filter(|w| matches!(w.op, DocOp::Delete))
+            .map(|w| w.id.0.clone())
+            .collect();
+        assert!(deleted.contains(&format!("{sid}:p2")), "{deleted:?}");
+        assert!(deleted.contains(&format!("{sid}:p3")), "{deleted:?}");
+        assert!(deleted.contains(&format!("{sid}:outline")), "正文变了要失效结构：{deleted:?}");
+
+        apply(&docs, out.doc_writes);
+        assert_eq!(page_ids(&docs).len(), 1, "旧页必须清掉");
+        assert!(!docs.docs.lock().unwrap().contains_key(&format!("{sid}:outline")));
+    }
+
+    #[tokio::test]
+    async fn reingest_same_text_keeps_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_root = dir.path().join("ws");
+        let library = dir.path().join("files");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        std::fs::write(ws_root.join("book.pdf"), b"%PDF-1.4 fake").unwrap();
+        std::fs::write(ws_root.join("a.txt"), "第一页\u{0c}第二页\u{0c}").unwrap();
+
+        let ws = Workspace { run: RunId("r".into()), root: ws_root.to_string_lossy().into_owned() };
+        let docs = MapDocs::default();
+        let env = crate::NullEnv;
+        let c = ws_ctx(&ws, &docs, &env);
+        let tool = KbIngestTool::new(&library, dir.path().join("media"));
+
+        let out = tool
+            .execute(serde_json::json!({"path": "/ws/book.pdf", "pages_file": "/ws/a.txt"}), &c)
+            .await
+            .unwrap();
+        apply(&docs, out.doc_writes);
+        let sid = source_id_of(&docs);
+        docs.docs.lock().unwrap().insert(
+            format!("{sid}:outline"),
+            doc(&format!("{sid}:outline"), "kb.outline", serde_json::json!({"nodes": []})),
+        );
+
+        // 同样内容再入一次：不该删结构
+        let out = tool
+            .execute(serde_json::json!({"path": "/ws/book.pdf", "pages_file": "/ws/a.txt"}), &c)
+            .await
+            .unwrap();
+        let deleted: Vec<String> = out
+            .doc_writes
+            .iter()
+            .filter(|w| matches!(w.op, DocOp::Delete))
+            .map(|w| w.id.0.clone())
+            .collect();
+        assert!(deleted.is_empty(), "幂等重入不该删任何东西：{deleted:?}");
+        apply(&docs, out.doc_writes);
+        assert!(docs.docs.lock().unwrap().contains_key(&format!("{sid}:outline")));
+    }
+
+    #[tokio::test]
+    async fn forget_removes_pages_beyond_recorded_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("files");
+        std::fs::create_dir_all(&library).unwrap();
+        let sha = "0123456789abcdef";
+        let docs = MapDocs::default();
+        {
+            let mut m = docs.docs.lock().unwrap();
+            m.insert(
+                format!("kb:{sha}"),
+                doc(
+                    &format!("kb:{sha}"),
+                    SOURCE_KIND,
+                    serde_json::json!({"title": "t", "pages": 2, "rel": format!("{sha}/a.pdf")}),
+                ),
+            );
+            // 记录说 2 页，实际存在 5 页（历史 bug 留下的尾巴）
+            for p in 1..=5 {
+                m.insert(
+                    format!("kb:{sha}:p{p}"),
+                    doc(&format!("kb:{sha}:p{p}"), PAGE_KIND, serde_json::json!({"page": p, "text": "x"})),
+                );
+            }
+            m.insert(
+                format!("kb:{sha}:outline"),
+                doc(&format!("kb:{sha}:outline"), "kb.outline", serde_json::json!({"nodes": []})),
+            );
+        }
+        let ws_root = dir.path().join("ws");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        let ws = Workspace { run: RunId("r".into()), root: ws_root.to_string_lossy().into_owned() };
+        let env = crate::NullEnv;
+        let c = ws_ctx(&ws, &docs, &env);
+
+        let out = KbForgetTool::new(&library)
+            .execute(serde_json::json!({"source": format!("kb:{sha}")}), &c)
+            .await
+            .unwrap();
+        apply(&docs, out.doc_writes);
+        assert!(docs.docs.lock().unwrap().is_empty(), "5 页 + 结构 + 来源都要清干净");
+    }
+
+    #[tokio::test]
+    async fn forget_cleans_orphan_pages_without_source_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("files");
+        std::fs::create_dir_all(&library).unwrap();
+        let sha = "fedcba9876543210";
+        let docs = MapDocs::default();
+        {
+            let mut m = docs.docs.lock().unwrap();
+            for p in 1..=3 {
+                m.insert(
+                    format!("kb:{sha}:p{p}"),
+                    doc(&format!("kb:{sha}:p{p}"), PAGE_KIND, serde_json::json!({"page": p, "text": "x"})),
+                );
+            }
+        }
+        let ws_root = dir.path().join("ws");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        let ws = Workspace { run: RunId("r".into()), root: ws_root.to_string_lossy().into_owned() };
+        let env = crate::NullEnv;
+        let c = ws_ctx(&ws, &docs, &env);
+
+        let out = KbForgetTool::new(&library)
+            .execute(serde_json::json!({"source": format!("kb:{sha}")}), &c)
+            .await
+            .unwrap();
+        let text = match &out.content[0] {
+            Block::Paragraph(t) => t.clone(),
+            other => format!("{other:?}"),
+        };
+        assert!(text.contains("遗留页"), "应说明这是孤儿清理：{text}");
+        apply(&docs, out.doc_writes);
+        assert!(docs.docs.lock().unwrap().is_empty(), "孤儿页必须删干净");
     }
 }

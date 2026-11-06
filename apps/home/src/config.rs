@@ -103,6 +103,9 @@ pub struct FileConfig {
     pub sandbox: SandboxFile,
     #[serde(default)]
     pub library: LibraryFile,
+    /// 长期记忆注入
+    #[serde(default)]
+    pub memory: MemoryFile,
     /// 回收站（自改与被删资料）保留多久
     #[serde(default)]
     pub trash: TrashFile,
@@ -159,6 +162,22 @@ fn default_service_kind() -> String {
 
 fn default_auth_header() -> String {
     "Authorization: Bearer {token}".into()
+}
+
+/// `[memory]`：长期记忆（facts）如何注入 system。
+#[derive(Clone, Debug, Deserialize)]
+pub struct MemoryFile {
+    /// 最多注入多少条（0 = 用默认 1000）。
+    #[serde(default = "default_memory_limit")]
+    pub inject_limit: usize,
+}
+impl Default for MemoryFile {
+    fn default() -> Self {
+        Self { inject_limit: default_memory_limit() }
+    }
+}
+fn default_memory_limit() -> usize {
+    1000
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -671,6 +690,8 @@ pub struct Config {
     pub commands_dir: std::path::PathBuf,
     pub media_dir: String,
     pub media_keep_days: u64,
+    /// 长期记忆最多注入多少条
+    pub memory_inject_limit: usize,
     /// 回收站保留天数（0 = 永不清理）
     pub trash_keep_days: u64,
     pub sandbox_mounts: Vec<harness_capabilities::Mount>,
@@ -1129,6 +1150,11 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .dir
             .unwrap_or_else(|| format!("{home}/.local/share/chuan/media")),
         media_keep_days: file.media.keep_days.unwrap_or(30),
+        memory_inject_limit: if file.memory.inject_limit == 0 {
+            default_memory_limit()
+        } else {
+            file.memory.inject_limit
+        },
         trash_keep_days: file.trash.keep_days,
         config_dir,
         config_path: path.clone(),

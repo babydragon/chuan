@@ -105,6 +105,7 @@
 | 13 | [`WEIXIN.md`](WEIXIN.md) | 微信通道（ClawBot / iLink）**已实测事实**与未验证清单；只记事实，不含取舍 |
 | 14 | [`VOICE.md`](VOICE.md) | 语音消息**入站**的方案与成本：两平台事实、现状缺口、最小改动集、未验证项 |
 | 15 | [`ASR.md`](ASR.md) | 本地语音识别的可行性（K1/RVV）、模型选型、实测步骤与判据 |
+| 16 | [`MEMORY-RANK.md`](MEMORY-RANK.md) | 长期记忆超过注入上限时怎么挑（设计，未实现） |
 
 图：`architecture.png`（源 `architecture.dot`，同时导出 `.svg`）。
 历史版本与已合并的文档在 `archive/`。

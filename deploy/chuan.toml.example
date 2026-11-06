@@ -221,6 +221,10 @@ enabled = false
 dir = "/var/lib/chuan/media"
 keep_days = 30
 
+[memory]
+# 长期记忆最多注入多少条（默认 1000）。超过时只保留最近的，见 docs/MEMORY-RANK.md
+# inject_limit = 1000
+
 [library]
 dir = "/var/lib/chuan/files"
 
