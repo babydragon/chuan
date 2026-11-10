@@ -1181,7 +1181,16 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                             .await;
                     }
                     let page = match self.store.begin_read().await {
-                        Ok(mut rd) => rd.messages(ConversationId(id.clone()), 0, 60).await.ok(),
+                        Ok(mut rd) => {
+                            rd.recent_messages(ConversationId(id.clone()), 60)
+                                .await
+                                .ok()
+                                .map(|msgs| crate::record::MessagePage {
+                                    msgs,
+                                    next: None,
+                                    truncated: false,
+                                })
+                        }
                         Err(_) => None,
                     };
                     let Some(page) = page.filter(|p| !p.msgs.is_empty()) else {
@@ -2657,12 +2666,12 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
 
     async fn brief_from_conv(&self, conv: &str) -> Option<String> {
         let mut rd = self.store.begin_read().await.ok()?;
-        let page = rd
-            .messages(ConversationId(conv.to_owned()), 0, 40)
+        // "最后两段"必须来自会话尾部，不能是开头那 40 轮
+        let msgs = rd
+            .recent_messages(ConversationId(conv.to_owned()), 40)
             .await
             .ok()?;
-        let mut parts: Vec<String> = page
-            .msgs
+        let mut parts: Vec<String> = msgs
             .iter()
             .filter(|m| m.role == crate::record::Role::Assistant)
             .filter_map(|m| m.payload.get("text").and_then(|v| v.as_str()))

@@ -1305,7 +1305,8 @@ struct SqliteRead {
 #[async_trait]
 impl ReadTx for SqliteRead {
     async fn view(&mut self, conv: ConversationId) -> Result<ConversationView, StoreError> {
-        let page = self.messages(conv.clone(), 0, 50).await?;
+        // 会话视图要的是"现在是什么样"，所以取最近的一段，和模型看到的一致
+        let msgs = self.recent_messages(conv.clone(), 50).await?;
         let last: Option<(Seq, String, String)> = self
             .conn
             .query_row(
@@ -1320,7 +1321,7 @@ impl ReadTx for SqliteRead {
             run: last.as_ref().and_then(|(_, run, kind)| {
                 if kind == "run.finished" { None } else { Some(RunId(run.clone())) }
             }),
-            messages: page.msgs,
+            messages: msgs,
             last_seq: last.map(|(s, _, _)| s).unwrap_or(0),
             summary: None,
         })
@@ -1387,6 +1388,58 @@ impl ReadTx for SqliteRead {
             .map_err(map_err)?;
 
         Ok(MessagePage { msgs, next: cut, truncated: cut.is_some() })
+    }
+
+    async fn recent_messages(
+        &mut self,
+        conv: ConversationId,
+        max_turns: u16,
+    ) -> Result<Vec<Message>, StoreError> {
+        // 边界 = run.started / turn.started：窗口必须从一个完整的轮次开始，
+        // 否则会留下一个没有 tool_call 的 tool_result 或半截 assistant。
+        let anchor: Seq = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MIN(seq), 0) FROM (
+                     SELECT seq FROM journal
+                     WHERE conv_id=?1 AND kind IN ('run.started','turn.started')
+                     ORDER BY seq DESC LIMIT ?2
+                 )",
+                params![conv.0, max_turns.max(1) as i64],
+                |r| r.get(0),
+            )
+            .map_err(map_err)?;
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT seq, turn_id, kind, payload FROM journal
+                 WHERE conv_id=?1 AND seq>=?2
+                   AND kind IN ('run.started','msg.assistant','msg.tool_result','msg.synthetic')
+                 ORDER BY seq",
+            )
+            .map_err(map_err)?;
+        let msgs = stmt
+            .query_map(params![conv.0, anchor], |r| {
+                let kind: String = r.get(2)?;
+                let role = match kind.as_str() {
+                    "run.started" => Role::User,
+                    "msg.assistant" => Role::Assistant,
+                    "msg.tool_result" => Role::ToolResult,
+                    _ => Role::Synthetic,
+                };
+                let payload: String = r.get(3)?;
+                Ok(Message {
+                    seq: r.get(0)?,
+                    turn: r.get::<_, Option<String>>(1)?.map(TurnId),
+                    role,
+                    payload: serde_json::from_str(&payload).unwrap_or_default(),
+                })
+            })
+            .map_err(map_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_err)?;
+        Ok(msgs)
     }
 
     async fn get_doc(&mut self, id: DocId) -> Result<Option<Doc>, StoreError> {

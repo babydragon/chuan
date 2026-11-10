@@ -83,6 +83,16 @@ pub trait ReadTx: Send {
         from: Seq,
         max_turns: u16,
     ) -> Result<MessagePage, StoreError>;
+    /// **最近的** `max_turns` 个 turn（含当前这条用户消息）。
+    ///
+    /// 别拿 `messages(conv, 0, n)` 当它用：那是**正向分页**，`from=0` 拿到的是会话开头
+    /// 前 n 个 turn。超过 n 轮之后，最新消息（也就是用户刚问的那句）会被切掉——
+    /// 模型看不到问题，只能接着上一段往下编（真实事故：会话过 50 轮后"一直绕同一个回复"）。
+    async fn recent_messages(
+        &mut self,
+        conv: ConversationId,
+        max_turns: u16,
+    ) -> Result<Vec<Message>, StoreError>;
     async fn get_doc(&mut self, id: DocId) -> Result<Option<Doc>, StoreError>;
     async fn list_docs(&mut self, q: DocQuery) -> Result<Vec<Doc>, StoreError>;
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError>;

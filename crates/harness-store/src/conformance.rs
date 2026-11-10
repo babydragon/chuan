@@ -56,6 +56,43 @@ pub async fn suite<S: Store>(store: &S) {
     assert_eq!(p2.msgs.len(), 1, "第二页剩 1 轮");
     assert!(p2.next.is_none());
 
+    // --- 最近 N 轮：窗口在**尾部**，最新那条必须在内 ---
+    // 回归测试：会话超过 N 轮后，旧实现取"开头的前 N 轮"，用户刚问的那句被切掉，
+    // 模型只能接着上一段往下编（真实事故：一直绕同一个回复）。
+    let conv2 = ConversationId::from("c1-recent");
+    let run2 = RunId::from("r2");
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(ev(&conv2, &run2, None, EventKind::RunStarted, serde_json::json!({"text":"task 0"}), None)).await.unwrap();
+    for i in 0..5 {
+        let turn = TurnId(format!("q{i}"));
+        tx.append(ev(&conv2, &run2, Some(&turn), EventKind::TurnStarted, serde_json::json!({"turn_no":i}), None)).await.unwrap();
+        tx.append(ev(&conv2, &run2, Some(&turn), EventKind::MsgAssistant, serde_json::json!({"text":format!("a{i}")}), None)).await.unwrap();
+    }
+    tx.append(ev(&conv2, &run2, None, EventKind::RunStarted, serde_json::json!({"text":"最新一句"}), None)).await.unwrap();
+    tx.commit().await.unwrap();
+
+    // 重新开一个读事务：EphemeralStore 的读是快照，写之前拿的句柄看不到新事件
+    let mut rd = store.begin_read().await.unwrap();
+    let recent = rd.recent_messages(conv2.clone(), 2).await.unwrap();
+    let texts: Vec<&str> = recent
+        .iter()
+        .filter_map(|m| m.payload.get("text").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        texts.contains(&"最新一句"),
+        "最近窗口必须包含最新那条（否则模型看不到用户的问题）: {texts:?}"
+    );
+    assert!(
+        !texts.contains(&"a0"),
+        "最近窗口不该退回到会话开头: {texts:?}"
+    );
+    // 正向分页的语义保持不变：`messages(0, n)` 仍是开头那一段
+    let first = rd.messages(conv2.clone(), 0, 2).await.unwrap();
+    assert!(
+        first.msgs.last().unwrap().seq < recent.last().unwrap().seq,
+        "分页仍从开头走，与 recent 不同"
+    );
+
     // --- 工具调用生命周期 + 恢复查询 ---
     let call = CallId::from("call-1");
     let mut tx = store.begin_write().await.unwrap();

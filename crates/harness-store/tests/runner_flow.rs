@@ -5386,3 +5386,90 @@ async fn scheduled_run_skips_approval_and_tells_owner_once() {
     let sent = channel.delivered.lock().unwrap().join("\n");
     assert_eq!(sent.matches("需要你确认").count(), 1, "{sent}");
 }
+
+/// 会话超过 50 轮之后，用户**刚问的那句**必须仍在发给模型的历史里。
+///
+/// 回归：旧实现用 `messages(conv, 0, 50)` 取历史，那是**正向分页**——拿到的是会话开头
+/// 前 50 轮。超过之后最新消息被切掉，模型看不到问题，只能接着上一段往下编
+/// （真实事故：会话过 50 轮后"一直绕同一个回复"）。
+#[tokio::test]
+async fn history_keeps_latest_turn_in_long_conversation() {
+    use harness_kernel::{EventKind, NewEvent};
+
+    let store = EphemeralStore::new();
+    let conv = ConversationId::from("c1");
+    let run = RunId::from("r0");
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(NewEvent {
+        conv: conv.clone(),
+        run: run.clone(),
+        turn: None,
+        kind: EventKind::RunStarted,
+        payload: serde_json::json!({"text": "早先的问题"}),
+        dedupe_key: None,
+    })
+    .await
+    .unwrap();
+    for i in 0..60 {
+        let turn = TurnId(format!("t{i}"));
+        tx.append(NewEvent {
+            conv: conv.clone(),
+            run: run.clone(),
+            turn: Some(turn.clone()),
+            kind: EventKind::TurnStarted,
+            payload: serde_json::json!({"turn_no": i}),
+            dedupe_key: Some(format!("turn-{i}")),
+        })
+        .await
+        .unwrap();
+        tx.append(NewEvent {
+            conv: conv.clone(),
+            run: run.clone(),
+            turn: Some(turn),
+            kind: EventKind::MsgAssistant,
+            payload: serde_json::json!({"text": format!("回答{i}")}),
+            dedupe_key: None,
+        })
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let driver = FakeDriver::new(vec![Step::Done {
+        text: "答".into(),
+        finish: FinishReason::Stop,
+    }]);
+    let registry = harness_kernel::ToolRegistry::new();
+    let env = NoopEnv;
+    let runner = Runner {
+        store: &store,
+        driver: &driver,
+        tools: &registry,
+        env: &env,
+        lanes: lanes(),
+        spawner: None,
+        gate: None,
+        outbox: None,
+        docs: None,
+    };
+    let mut req = request();
+    req.text = "第六十一轮的提问".into();
+    req.run = RunId::from("r1");
+    let pair = EventSink::channel(32);
+    runner.run(req, pair.sink, CancellationToken::new()).await.unwrap();
+
+    let seen = driver.seen.lock().unwrap();
+    let first = &seen[0];
+    let texts: Vec<&str> = first
+        .iter()
+        .filter_map(|m| m.payload.get("text").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        texts.contains(&"第六十一轮的提问"),
+        "最新一条用户消息必须进上下文，否则模型只能接上一段编：{texts:?}"
+    );
+    assert!(
+        !texts.contains(&"早先的问题"),
+        "历史窗口不该退回到会话开头：{texts:?}"
+    );
+}

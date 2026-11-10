@@ -178,7 +178,9 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
 
         let history = {
             let mut rd = self.store.begin_read().await?;
-            rd.messages(conv.clone(), 0, 50).await?.msgs
+            // 取**最近**的若干 turn：用 `messages(0, n)` 会拿到会话开头的前 n 轮，
+            // 超过 n 轮之后用户刚问的那句就被切掉了（模型只能接着上一段编）。
+            rd.recent_messages(conv.clone(), 50).await?
         };
         let (history, trimmed) = crate::context::select(&history, req.context_budget_tokens);
         if trimmed > 0 {

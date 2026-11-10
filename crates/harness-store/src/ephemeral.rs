@@ -471,6 +471,44 @@ impl ReadTx for EphemeralRead {
         Ok(MessagePage { msgs, next: cut, truncated: cut.is_some() })
     }
 
+    async fn recent_messages(
+        &mut self,
+        conv: ConversationId,
+        max_turns: u16,
+    ) -> Result<Vec<Message>, StoreError> {
+        let is_boundary =
+            |k: &EventKind| matches!(k, EventKind::RunStarted | EventKind::TurnStarted);
+        let mut boundaries: Vec<Seq> = self
+            .state
+            .journal
+            .iter()
+            .filter(|e| e.conv == conv && is_boundary(&e.kind))
+            .map(|e| e.seq)
+            .collect();
+        boundaries.sort_unstable();
+        let start = boundaries.len().saturating_sub(max_turns.max(1) as usize);
+        let anchor = boundaries.get(start).copied().unwrap_or(0);
+
+        let mut msgs: Vec<Message> = self
+            .state
+            .journal
+            .iter()
+            .filter(|e| e.conv == conv && e.seq >= anchor)
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    EventKind::RunStarted
+                        | EventKind::MsgAssistant
+                        | EventKind::MsgToolResult
+                        | EventKind::MsgSynthetic
+                )
+            })
+            .filter_map(to_message)
+            .collect();
+        msgs.sort_by_key(|m| m.seq);
+        Ok(msgs)
+    }
+
     async fn get_doc(&mut self, id: DocId) -> Result<Option<Doc>, StoreError> {
         Ok(self.state.docs.get(&id.0).cloned())
     }
