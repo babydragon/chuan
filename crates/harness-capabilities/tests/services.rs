@@ -531,7 +531,73 @@ async fn save_to_rejects_json_response() {
         .await
         .unwrap_err();
     assert!(err.message.contains("不是文件"), "{}", err.message);
+    // 2xx 也一样要把响应体带出来：模型要靠它判断"接口回了什么"
+    assert!(err.message.contains("echo"), "响应体丢了: {}", err.message);
     assert!(!dir.path().join("x.json").exists());
+}
+
+/// 上游 4xx/5xx 常常也是 JSON：必须报 `Unavailable` 并带出响应体，
+/// 不能翻译成"响应不是文件"——否则模型会去改路径/编码，而不是看上游说了什么。
+#[tokio::test]
+async fn save_to_surfaces_upstream_error_body() {
+    let (base, _seen) = status_server(
+        "401 Unauthorized",
+        "application/json",
+        r#"{"code":401,"message":"sign mismatch"}"#,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("net.jsonl");
+    let svc = Service { name: "alist".into(), base, ..Default::default() };
+    let tool = HttpServiceTool::new(vec![svc], &log).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let err = tool
+        .execute(
+            serde_json::json!({
+                "service":"alist","method":"GET",
+                "path":"/d/book.pdf?sign=SECRET-SIGN","save_to":"book.pdf"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, harness_kernel::ErrorCode::Unavailable, "{}", err.message);
+    assert!(err.message.contains("401"), "{}", err.message);
+    assert!(err.message.contains("sign mismatch"), "上游原因必须带出来: {}", err.message);
+    assert!(!dir.path().join("book.pdf").exists(), "失败时不能留下文件");
+    assert!(!dir.path().join(".book.pdf.part").exists());
+
+    // 下载路径上的签名能直接换到文件本体：审计日志只留键、不留值
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(!logged.contains("SECRET-SIGN"), "日志泄漏了签名: {logged}");
+    assert!(logged.contains("alist:/d/book.pdf?…"), "{logged}");
+}
+
+/// 只应答一次、指定状态与响应体的服务。
+async fn status_server(
+    status: &'static str,
+    ctype: &'static str,
+    body: &'static str,
+) -> (String, Arc<Mutex<String>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(String::new()));
+    let seen2 = Arc::clone(&seen);
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 8192];
+        let n = sock.read(&mut buf).await.unwrap_or(0);
+        *seen2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+        let resp = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+    });
+    (format!("http://{addr}"), seen)
 }
 
 /// 只应答一次、返回固定字节的服务。

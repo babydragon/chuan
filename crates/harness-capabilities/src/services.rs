@@ -358,6 +358,20 @@ fn looks_binary(ctype: Option<&str>) -> bool {
         || c.ends_with("+xml"))
 }
 
+/// 错误响应体只取前 `limit` 字节：够看清原因，又不把上游的整页 HTML 塞进上下文。
+/// 读不到就当没有——诊断信息不该盖住真正的错误。
+async fn body_snippet(resp: &mut reqwest::Response, limit: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        let take = limit.saturating_sub(buf.len()).min(chunk.len());
+        buf.extend_from_slice(&chunk[..take]);
+        if buf.len() >= limit {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&buf).trim().to_owned()
+}
+
 /// 相对 Location 按 base 解析；只接受 http(s)。
 fn resolve_target(base: &str, location: &str) -> Option<String> {
     let base = reqwest::Url::parse(base).ok()?;
@@ -542,7 +556,15 @@ impl Tool for HttpServiceTool {
             url = u.to_string();
         }
         // 审计日志里的 path 也要抹掉值（Feishu 的 hook id 就在路径上）
-        let log_path = svc.scrub(&path_rendered, &vars.secrets());
+        let mut log_path = svc.scrub(&path_rendered, &vars.secrets());
+        if save_to.is_some() {
+            // 下载的 query 往往是签名（`?sign=…`）：拿到它就能换到文件本体，
+            // 属于"能取到这个文件"的凭证。日志只留键、不留值（D32）。
+            match log_path.split_once('?') {
+                Some((p, q)) if !q.is_empty() => log_path = format!("{p}?…"),
+                _ => {}
+            }
+        }
 
         let (hname, hvalue) = match svc.header_of(&vars) {
             Ok(Some(h)) => h,
@@ -697,13 +719,55 @@ impl Tool for HttpServiceTool {
         }
 
         if let Some(rel) = save_to.clone() {
+            let mut resp = resp;
+            // 先分状态、再看 content-type：上游 4xx/5xx 也常常是 JSON，
+            // 但那是"环境/上游的问题"（Unavailable），不是"参数用错"（InvalidArgs）。
+            // 两种情况都要把响应体带出来——否则模型只能靠猜（alist 的 `sign mismatch`
+            // 就是这样丢掉线索，转头去试 percent-encoding 和 lan_exec 的）。
+            if !status.is_success() {
+                let snippet = body_snippet(&mut resp, 300).await;
+                let note = if snippet.is_empty() {
+                    format!("下载失败：HTTP {}", status.as_u16())
+                } else {
+                    format!("下载失败：HTTP {} · {snippet}", status.as_u16())
+                };
+                self.log_line(
+                    &svc.name,
+                    &method,
+                    &log_path,
+                    Some(status.as_u16()),
+                    0,
+                    started.elapsed().as_millis() as i64,
+                    "save_to 上游错误",
+                );
+                return Err(ToolError::new(
+                    ErrorCode::Unavailable,
+                    svc.redact(&note),
+                    false,
+                ));
+            }
             if !looks_binary(ctype.as_deref()) {
+                let snippet = body_snippet(&mut resp, 300).await;
+                let note = if snippet.is_empty() {
+                    String::new()
+                } else {
+                    format!("：{snippet}")
+                };
+                self.log_line(
+                    &svc.name,
+                    &method,
+                    &log_path,
+                    Some(status.as_u16()),
+                    0,
+                    started.elapsed().as_millis() as i64,
+                    "save_to 不是文件",
+                );
                 return Err(ToolError::new(
                     ErrorCode::InvalidArgs,
-                    format!(
-                        "响应不是文件（content-type: {}）；JSON/文本接口不要加 save_to",
+                    svc.redact(&format!(
+                        "响应不是文件（content-type: {}）{note}；JSON/文本接口不要加 save_to",
                         ctype.as_deref().unwrap_or("(未知)")
-                    ),
+                    )),
                     false,
                 ));
             }
