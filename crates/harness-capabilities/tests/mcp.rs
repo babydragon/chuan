@@ -325,3 +325,75 @@ async fn service_tool_rejects_token_outside_secrets() {
         .unwrap_err();
     assert!(err.message.contains("绝对路径"), "{}", err.message);
 }
+
+/// 同名重加会把宿主侧的下载边界（redirect_hosts / redirect 规则）清空，
+/// 而 `service add` 又带不动这些字段 —— 直接拒绝，让它去改配置文件。
+#[tokio::test]
+async fn service_tool_refuses_to_erase_download_boundaries() {
+    use harness_capabilities::services::{HttpServiceTool, RedirectRule};
+    use harness_capabilities::{Service, ServiceTool};
+
+    let dir = tempfile::tempdir().unwrap();
+    let hub = McpHub::new(vec![]);
+    let http = HttpServiceTool::new(
+        vec![Service {
+            name: "alist".into(),
+            base: "http://127.0.0.1:5244".into(),
+            redirect_hosts: vec!["*.baidu.com".into()],
+            redirect_rules: vec![RedirectRule {
+                hosts: vec!["*.baidu.com".into()],
+                headers: vec![("User-Agent".into(), "pan.baidu.com".into())],
+            }],
+            ..Default::default()
+        }],
+        dir.path().join("net.jsonl"),
+    )
+    .unwrap();
+    let secrets = dir.path().join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    let tool = ServiceTool::new(
+        dir.path().join("services.d"),
+        secrets,
+        Arc::clone(&hub),
+        Arc::clone(&http),
+    );
+
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ToolCtx {
+        system_prompt: "",
+        spawner: None,
+        conv: harness_kernel::ConversationId("c".into()),
+        actor: "42",
+        outbox: &harness_kernel::NullOutbox,
+        docs: &harness_kernel::NullDocReader,
+        run: harness_kernel::RunId("r".into()),
+        call: harness_kernel::CallId("c".into()),
+        workspace: &ws,
+        env: &env,
+        cancel: CancellationToken::new(),
+    };
+
+    let err = tool
+        .execute(
+            serde_json::json!({
+                "action": "add", "name": "alist",
+                "base": "http://127.0.0.1:5244",
+                "_approval": { "why": "重加服务", "impact": "改自身配置" }
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code,
+        harness_kernel::ErrorCode::NotPermitted,
+        "{}",
+        err.message
+    );
+    assert!(err.message.contains("redirect_hosts"), "{}", err.message);
+    assert!(
+        !dir.path().join("services.d/alist.toml").exists(),
+        "被拒时不能留下配置片段"
+    );
+}

@@ -50,6 +50,19 @@ pub struct Service {
     /// `save_to` 允许跟随的重定向主机（`*.aliyundrive.com` 这类通配）。
     /// 空 = 不跟随任何重定向（默认最严）。
     pub redirect_hosts: Vec<String>,
+    /// 跟随重定向时，**按目标主机**补的静态头。
+    /// 不能挂在 service 上：同一个 alist 后面挂着阿里云和百度，
+    /// 把百度的 UA 也发给阿里云就是错的（见 D32）。
+    pub redirect_rules: Vec<RedirectRule>,
+}
+
+/// 一条"跳到这个主机时补这些头"的规则。
+#[derive(Clone, Debug, Default)]
+pub struct RedirectRule {
+    /// 目标主机通配（与 `redirect_hosts` 同一套匹配规则）；空 = 永不命中
+    pub hosts: Vec<String>,
+    /// **字面值**，不做 `{token}` 渲染——结构上就不可能把凭据带到第二跳
+    pub headers: Vec<(String, String)>,
 }
 
 impl Default for Service {
@@ -65,6 +78,7 @@ impl Default for Service {
             body: BTreeMap::new(),
             sign: None,
             redirect_hosts: Vec::new(),
+            redirect_rules: Vec::new(),
         }
     }
 }
@@ -256,6 +270,11 @@ impl HttpServiceTool {
         self.services.read().unwrap().keys().cloned().collect()
     }
 
+    /// 取一个已注册的服务（`service` 工具用它检查"重加会不会清掉边界配置"）。
+    pub fn get(&self, name: &str) -> Option<Service> {
+        self.services.read().unwrap().get(name).cloned()
+    }
+
     /// 探活：证明 base 能连上（不看状态码——很多 API 对根路径/HEAD 回 404）。
     pub async fn probe(&self, svc: &Service) -> String {
         let mut req = self.client.head(&svc.base);
@@ -440,6 +459,36 @@ fn host_allowed(url: &str, allow: &[String]) -> bool {
             None => host == p,
         }
     })
+}
+
+/// 第二跳要补的头：**只取目标主机命中的规则**。
+///
+/// 为什么按主机而不是按 service：一个 alist 后面可能同时挂着阿里云和百度，
+/// 百度的 `User-Agent: pan.baidu.com` 发给阿里云就是错的；反过来漏带又是 403。
+fn redirect_headers_for(target: &str, svc: &Service) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for rule in &svc.redirect_rules {
+        if !host_allowed(target, &rule.hosts) {
+            continue;
+        }
+        for (name, value) in &rule.headers {
+            let lower = name.trim().to_ascii_lowercase();
+            // 第二跳不带凭据是硬边界（D32）。值虽然是宿主写的字面量，
+            // 但"写死一个 token"和"注入一个 token"对日志/审计是一回事，直接拒绝。
+            if matches!(
+                lower.as_str(),
+                "authorization" | "cookie" | "proxy-authorization" | "set-cookie"
+            ) {
+                return Err(format!(
+                    "服务 `{}` 的重定向规则里不允许 `{name}`：\
+                     第二跳只补不需要凭据的头（如 User-Agent / Referer），凭据只经 token_file 注入",
+                    svc.name
+                ));
+            }
+            out.push((name.trim().to_owned(), value.clone()));
+        }
+    }
+    Ok(out)
 }
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
@@ -702,7 +751,8 @@ impl Tool for HttpServiceTool {
                 return Err(ToolError::new(ErrorCode::Unavailable, note, false));
             };
             // `save_to` 时在宿主侧跳一次：目标主机必须在服务白名单里，
-            // 第二跳**不带任何鉴权头**（签名 URL 自带凭证），也永不回显。
+            // 第二跳**不带服务鉴权头**（签名 URL 自带凭证），只补该主机明确声明的静态头
+            // （百度 >20MB 必须 `User-Agent: pan.baidu.com`），也永不回显。
             let location = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
@@ -737,7 +787,17 @@ impl Tool for HttpServiceTool {
                     false,
                 ));
             }
-            let resp = match self.download_client.get(&target).send().await {
+            let hop_headers = match redirect_headers_for(&target, svc) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(ToolError::new(ErrorCode::Unavailable, svc.redact(&e), false));
+                }
+            };
+            let mut hop = self.download_client.get(&target);
+            for (k, v) in &hop_headers {
+                hop = hop.header(k, v);
+            }
+            let resp = match hop.send().await {
                 Ok(r) => r,
                 Err(e) => {
                     self.log_line(&svc.name, &method, &log_path, None, 0, started.elapsed().as_millis() as i64, "重定向后请求失败");

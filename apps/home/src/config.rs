@@ -144,6 +144,19 @@ pub struct ServiceFile {
     /// `http(save_to)` 允许跟随的重定向主机（`["*.aliyundrive.com"]`）；空 = 不跟随
     #[serde(default)]
     pub redirect_hosts: Vec<String>,
+    /// 跟随重定向时按**目标主机**补的静态头（百度 >20MB 要 `User-Agent: pan.baidu.com`）
+    #[serde(default)]
+    pub redirect: Vec<RedirectRuleFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct RedirectRuleFile {
+    /// 目标主机通配（与 `redirect_hosts` 同一套规则）；空 = 永不命中
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// `[["User-Agent", "pan.baidu.com"]]`；字面值，不支持 `{token}`
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1211,6 +1224,14 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
                     ),
                 }),
                 redirect_hosts: s.redirect_hosts.clone(),
+                redirect_rules: s
+                    .redirect
+                    .iter()
+                    .map(|r| harness_capabilities::services::RedirectRule {
+                        hosts: r.hosts.clone(),
+                        headers: r.headers.clone(),
+                    })
+                    .collect(),
             })
             .collect(),
         library_dir: file

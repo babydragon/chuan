@@ -175,12 +175,18 @@ require_approval = []
 # tools = ["create_task", "list_undone_tasks_by_time_query"]
 
 # 取文件本体（`http(service=…, path=…, save_to="file.bin")`）。
-# 端点是 3xx 时，宿主只跟随**白名单里的主机**，且第二跳不带 token；
+# 端点是 3xx 时，宿主只跟随**白名单里的主机**，且第二跳不带服务的鉴权头；
 # 临时凭证与响应体都不进上下文、不进日志。不配 redirect_hosts 就一律不跟随（默认最严）。
 # [services.storage]
 # base = "https://storage.example.com"
 # token_file = "~/.config/chuan/secrets/storage_token"
 # redirect_hosts = ["*.cdn.example.com"]
+#
+# 有的网盘对直链有 UA 要求（百度 >20MB 必须 User-Agent: pan.baidu.com）。
+# 这类头**按目标主机**配置，不会跟着服务发给别家 CDN：
+# [[services.storage.redirect]]
+# hosts = ["*.pcs.baidu.com", "*.baidupcs.com"]
+# headers = [["User-Agent", "pan.baidu.com"]]
 ```
 
 ## 定时任务（提醒）的三种形态

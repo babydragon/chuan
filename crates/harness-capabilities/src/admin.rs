@@ -398,6 +398,22 @@ impl Tool for ServiceTool {
                         false,
                     ));
                 }
+                // `service add` 只带得动 base/token/header 这些，**带不动**宿主侧的下载边界
+                // （redirect_hosts / redirect 规则）。同名重加会把它们清空，而且写出的
+                // services.d 片段会盖掉 chuan.toml —— 下一次启动就默默失去白名单。
+                if let Some(old) = self.http.get(&name) {
+                    if !old.redirect_hosts.is_empty() || !old.redirect_rules.is_empty() {
+                        return Err(ToolError::new(
+                            ErrorCode::NotPermitted,
+                            format!(
+                                "`{name}` 已有宿主侧配置（redirect_hosts / redirect 规则），\
+                                 运行期重加会把它清空，写出的片段还会在下次启动时覆盖 chuan.toml。\n\
+                                 要改这个服务，请直接改配置文件里对应的 [services.{name}]，然后重启。"
+                            ),
+                            false,
+                        ));
+                    }
+                }
                 let token_file = args.get("token_file").and_then(|v| v.as_str()).map(str::to_owned);
                 if let Some(t) = &token_file {
                     self.token_path(t)
@@ -506,6 +522,7 @@ impl Tool for ServiceTool {
                             body: body.clone(),
                             sign: sign.clone(),
                             redirect_hosts: Vec::new(),
+                            redirect_rules: Vec::new(),
                         };
                         // 探活：至少证明 DNS/TLS/端点能通（不看状态码，API 常对 HEAD/根路径回 404）
                         let probe = self.http.probe(&svc).await;

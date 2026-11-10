@@ -512,6 +512,83 @@ async fn save_to_refuses_unlisted_redirect_host() {
     assert!(!dir.path().join("x.pdf").exists(), "被拒时不能留下文件");
 }
 
+/// 重定向补头**按目标主机**生效：命中才加，不命中一个都不加。
+/// 这一条保证"百度的 UA"不会跟着同一个 alist 服务发给阿里云。
+#[tokio::test]
+async fn redirect_headers_are_scoped_to_matched_host() {
+    let payload = b"%PDF-1.4\nbytes\n";
+    let (file_base, seen) = binary_server(payload).await;
+    let (redir_base, _seen2) = redirect_server(&format!("{file_base}/file?sign=SECRET-SIGN")).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service {
+        name: "alist".into(),
+        base: redir_base,
+        redirect_hosts: vec!["127.0.0.1".into(), "*.baidu.com".into()],
+        redirect_rules: vec![
+            harness_capabilities::services::RedirectRule {
+                hosts: vec!["127.0.0.1".into()],
+                headers: vec![("User-Agent".into(), "pan.baidu.com".into())],
+            },
+            harness_capabilities::services::RedirectRule {
+                hosts: vec!["*.baidu.com".into()],
+                headers: vec![("Referer".into(), "https://pan.baidu.com/".into())],
+            },
+        ],
+        ..Default::default()
+    };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    tool.execute(
+        serde_json::json!({"service":"alist","method":"GET","path":"/d/x.pdf?sign=S","save_to":"x.pdf"}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let req = seen.lock().unwrap().to_lowercase();
+    assert!(req.contains("user-agent: pan.baidu.com"), "命中的规则没生效: {req}");
+    assert!(!req.contains("referer:"), "不命中的规则不该带上: {req}");
+    assert_eq!(std::fs::read(dir.path().join("x.pdf")).unwrap(), payload);
+}
+
+/// 第二跳不允许带凭据：写在重定向规则里也拒绝（宁可报错，也不悄悄发出去）。
+#[tokio::test]
+async fn redirect_headers_refuse_credentials() {
+    let (file_base, _seen) = binary_server(b"x").await;
+    let (redir_base, _seen2) = redirect_server(&format!("{file_base}/file")).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service {
+        name: "alist".into(),
+        base: redir_base,
+        redirect_hosts: vec!["127.0.0.1".into()],
+        redirect_rules: vec![harness_capabilities::services::RedirectRule {
+            hosts: vec!["127.0.0.1".into()],
+            headers: vec![("Authorization".into(), "Bearer leak".into())],
+        }],
+        ..Default::default()
+    };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let err = tool
+        .execute(
+            serde_json::json!({"service":"alist","method":"GET","path":"/d/x.bin","save_to":"x.bin"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("不允许"), "{}", err.message);
+    assert!(err.message.contains("Authorization"), "{}", err.message);
+    assert!(!dir.path().join("x.bin").exists());
+}
+
 /// JSON 接口误加 `save_to` → 明确报错，不把接口结果悄悄写进文件。
 #[tokio::test]
 async fn save_to_rejects_json_response() {
