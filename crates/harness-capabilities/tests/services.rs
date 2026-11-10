@@ -723,6 +723,168 @@ async fn slow_server(total: usize, gap: std::time::Duration) -> String {
     format!("http://{addr}")
 }
 
+/// `upload_from`：把 /ws 下的文件本体流式发出去，Content-Length 由宿主写死。
+#[tokio::test]
+async fn upload_streams_workspace_file_with_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.path().join("blob.bin"), &payload).unwrap();
+
+    let (base, seen) = upload_server().await;
+    let svc = Service { name: "alist".into(), base, ..Default::default() };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    let out = tool
+        .execute(
+            serde_json::json!({
+                "service":"alist","method":"PUT","path":"/api/fs/put",
+                "upload_from":"blob.bin",
+                "headers":{"File-Path":"/%E4%B8%AD/x.pdf","Content-Type":"application/pdf"}
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let text = match &out.content[0] {
+        harness_kernel::Block::Paragraph(t) => t.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(text.contains("已发出 /ws/blob.bin"), "{text}");
+
+    let cap = seen.lock().unwrap().clone().expect("没收到请求");
+    let head = cap.head.to_ascii_lowercase();
+    assert!(head.contains("file-path: /%e4%b8%ad/x.pdf"), "{}", cap.head);
+    assert!(head.contains("content-type: application/pdf"), "{}", cap.head);
+    assert!(
+        head.contains(&format!("content-length: {}", payload.len())),
+        "长度没写死：{}",
+        cap.head
+    );
+    assert_eq!(cap.body, payload, "上传的字节与文件不一致");
+}
+
+/// 上传时不允许模型改这些头：鉴权与长度由宿主决定。
+#[tokio::test]
+async fn upload_rejects_credential_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("x.bin"), b"x").unwrap();
+    let svc = Service { name: "alist".into(), base: "http://127.0.0.1:1".into(), ..Default::default() };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    for bad in ["Authorization", "Cookie", "Content-Length", "Host"] {
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "service":"alist","method":"PUT","path":"/api/fs/put",
+                    "upload_from":"x.bin","headers":{ bad: "v" }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("不允许"), "{bad}: {}", err.message);
+    }
+}
+
+/// `upload_from` 与 `save_to` / body 互斥，且不能越出 /ws。
+#[tokio::test]
+async fn upload_rejects_conflicts_and_escapes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("x.bin"), b"x").unwrap();
+    let svc = Service { name: "alist".into(), base: "http://127.0.0.1:1".into(), ..Default::default() };
+    let tool = HttpServiceTool::new(vec![svc], dir.path().join("net.jsonl")).unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    for (args, needle) in [
+        (
+            serde_json::json!({"service":"alist","method":"PUT","path":"/p","upload_from":"x.bin","save_to":"y.bin"}),
+            "不能同时用",
+        ),
+        (
+            serde_json::json!({"service":"alist","method":"PUT","path":"/p","upload_from":"x.bin","body":{"a":1}}),
+            "不能同时用",
+        ),
+        (
+            serde_json::json!({"service":"alist","method":"GET","path":"/p","upload_from":"x.bin"}),
+            "只支持 PUT / POST",
+        ),
+        (
+            serde_json::json!({"service":"alist","method":"PUT","path":"/p","upload_from":"../etc/passwd"}),
+            "不能包含", // check_save_path 的文案："不能以 / 开头，不能含 .."
+        ),
+    ] {
+        let err = tool.execute(args, &ctx).await.unwrap_err();
+        assert!(
+            err.message.contains(needle) || err.message.contains("相对路径"),
+            "{}",
+            err.message
+        );
+    }
+}
+
+/// 收一次请求：读出头部与按 Content-Length 指定的完整请求体。
+#[derive(Clone)]
+struct Captured {
+    head: String,
+    body: Vec<u8>,
+}
+
+async fn upload_server() -> (String, Arc<Mutex<Option<Captured>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(None));
+    let seen2 = Arc::clone(&seen);
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = vec![0u8; 8192];
+        let mut head_end = None;
+        loop {
+            let n = sock.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if head_end.is_none() {
+                if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    head_end = Some(p + 4);
+                }
+            }
+            if let Some(he) = head_end {
+                let head = String::from_utf8_lossy(&buf[..he]).to_ascii_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if buf.len() >= he + len {
+                    *seen2.lock().unwrap() = Some(Captured {
+                        head: String::from_utf8_lossy(&buf[..he]).to_string(),
+                        body: buf[he..he + len].to_vec(),
+                    });
+                    break;
+                }
+            }
+        }
+        let body = r#"{"code":200,"message":"success"}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
 /// 只应答一次、指定状态与响应体的服务。
 async fn status_server(
     status: &'static str,

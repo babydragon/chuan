@@ -187,6 +187,10 @@ require_approval = []
 # [[services.storage.redirect]]
 # hosts = ["*.pcs.baidu.com", "*.baidupcs.com"]
 # headers = [["User-Agent", "pan.baidu.com"]]
+#
+# 上传文件本体（流式、不走内存；请求头里可以放目标路径这类参数）：
+# http(service="storage", method="PUT", path="/api/fs/put",
+#      upload_from="dir/file.pdf", headers={"File-Path": "/dir/file.pdf"})
 ```
 
 ## 定时任务（提醒）的三种形态

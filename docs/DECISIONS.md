@@ -1295,3 +1295,39 @@ trigram 索引比为一个尚未验证的规模去设计投影表更划算。抽
 3. `role list` 输出包含可用 provider 且不含任何密钥路径；`role add provider="nope"` 报错并列出可选项；
 4. 未知 provider 在**启动时**报配置错误（退出码 2），不是等到第一次调用；
 5. secrets 路径不出现在 system prompt、工具输出、日志中。
+
+---
+
+## D40 · 上传也走服务工具（`upload_from`），但请求头由宿主限定
+
+**背景**：alist 的 `PUT /api/fs/put` 需要把文件本体当请求体，并且**目标路径在头里**
+（`File-Path: <urlencoded>`）。`body_file` 帮不上忙：它限 1MB、强制 `application/json`，
+而且是给脚本生成的小 JSON 用的。于是 agent 只能走 `host` lane + curl——那要审批、会把 token
+带到命令行与 journald，正是 D9/D14 要避免的。
+
+**决定**：`http` 增加 `upload_from`（`/ws` 下的相对路径，PUT/POST）与 `headers`
+（原样发送的请求头）。实现要点：
+
+1. **流式**：`ReaderStream` + 显式 `Content-Length`，不把整份文件读进内存
+   （单板机 `MemoryMax=1G`，512MB 上限不能靠 buffer 兜）；上限与下载一致，512MB。
+2. **走 transfer client**：与下载同一个"不设总超时、只设空闲超时"的 client，
+   否则上传大文件会被 30 秒总时限腰斩。
+3. **请求头白名单**：`authorization` / `cookie` / `proxy-authorization` / `host` /
+   `content-length` / `transfer-encoding` / `connection` 一律拒绝；值是字面量、不做
+   `{token}` 渲染。鉴权仍只由 `token_file` 注入。
+4. 与 `save_to` / `body` / `body_file` 互斥；`upload_from` 走 `/ws` 同一条越界检查。
+
+**为什么不是"任意 URL 上传"**：和下载一样，域名只来自服务配置，模型给的是 path 与文件名。
+所以没有新增 SSRF/外泄面，`outbound` 域照旧免问。
+
+**非目标**：断点续传；分片上传协议（各家的 multipart 语义不同，交给 playbook 与上游 SDK 的
+HTTP 形态，内核只做"一个有头的 PUT"）。
+
+**验收**：
+1. `/ws` 下 200KB 文件经 `upload_from` 发出后，服务端收到的字节与文件一致、`Content-Length` 正确；
+2. 自定义头（如 `File-Path`）确实到达；`Content-Type` 缺省是 `application/octet-stream`；
+3. `headers` 里写 `Authorization` / `Content-Length` / `Host` → `InvalidArgs`，不发请求；
+4. 与 `save_to`、`body`、`body_file` 同时用 → `InvalidArgs`；`upload_from` 越出 `/ws` → `InvalidArgs`；
+5. 总耗时超过 API 总超时的上传仍能完成（与下载同一条 transfer client）。
+
+**反悔成本**：低。删掉 `upload_from` / `headers` 两个参数即回到"只能取、不能写"。

@@ -148,9 +148,9 @@ pub struct HttpServiceTool {
     services: std::sync::RwLock<BTreeMap<String, Service>>,
     /// 普通 API 调用：短超时，卡住就失败。
     client: reqwest::Client,
-    /// 下载（`save_to`）：不设总超时，只按"有没有新数据"判死。
+    /// 上传/下载（`upload_from` / `save_to`）：不设总超时，只按"有没有新数据"判死。
     /// 两者必须分开——`reqwest` 的 `.timeout()` 覆盖建连到读完响应体的全过程。
-    download_client: reqwest::Client,
+    transfer_client: reqwest::Client,
     log: PathBuf,
 }
 
@@ -186,11 +186,21 @@ fn base_path_suffix(base: &str) -> Option<String> {
 /// 读 `/ws` 下的文件作为请求体：绝对路径、`..`、越界都拒绝，大小限 1MB。
 fn read_workspace_file(root: &str, rel: &str) -> Result<Vec<u8>, String> {
     const MAX: u64 = 1024 * 1024;
+    let canon = resolve_workspace_file(root, rel, "body_file")?;
+    let meta = std::fs::metadata(&canon).map_err(|e| format!("读不到 body_file {rel}：{e}"))?;
+    if meta.len() > MAX {
+        return Err(format!("body_file 太大（{} 字节，上限 {MAX}）", meta.len()));
+    }
+    std::fs::read(&canon).map_err(|e| format!("读不到 body_file {rel}：{e}"))
+}
+
+/// `/ws` 下的文件解析成绝对路径：挡掉绝对路径、`..`、软链接越界。
+fn resolve_workspace_file(root: &str, rel: &str, what: &str) -> Result<PathBuf, String> {
     if rel.trim().is_empty() {
-        return Err("body_file 不能为空".into());
+        return Err(format!("{what} 不能为空"));
     }
     if rel.starts_with('/') || rel.contains("..") {
-        return Err("body_file 必须是 /ws 下的相对路径（例如 msg.json）".into());
+        return Err(format!("{what} 必须是 /ws 下的相对路径（例如 msg.json）"));
     }
     let root = std::path::Path::new(root)
         .canonicalize()
@@ -198,15 +208,11 @@ fn read_workspace_file(root: &str, rel: &str) -> Result<Vec<u8>, String> {
     let full = root.join(rel);
     let canon = full
         .canonicalize()
-        .map_err(|e| format!("读不到 body_file {rel}：{e}"))?;
+        .map_err(|e| format!("读不到 {what} {rel}：{e}"))?;
     if !canon.starts_with(&root) {
-        return Err("body_file 越出 workspace".into());
+        return Err(format!("{what} 越出 workspace"));
     }
-    let meta = std::fs::metadata(&canon).map_err(|e| format!("读不到 body_file {rel}：{e}"))?;
-    if meta.len() > MAX {
-        return Err(format!("body_file 太大（{} 字节，上限 {MAX}）", meta.len()));
-    }
-    std::fs::read(&canon).map_err(|e| format!("读不到 body_file {rel}：{e}"))
+    Ok(canon)
 }
 
 impl HttpServiceTool {
@@ -255,13 +261,13 @@ impl HttpServiceTool {
         // （22MB 在 20KB/s 上会"下到一半就断"，看起来像网络问题）。
         // 改成空闲超时后，只要还有新字节就一直走，真断了也只是这一次失败。
         let client = build(Some(limits.api_total), None)?;
-        let download_client = build(None, limits.download_idle)?;
+        let transfer_client = build(None, limits.download_idle)?;
         Ok(Arc::new(Self {
             services: std::sync::RwLock::new(
                 services.into_iter().map(|s| (s.name.clone(), s)).collect(),
             ),
             client,
-            download_client,
+            transfer_client,
             log: log.into(),
         }))
     }
@@ -512,6 +518,8 @@ impl Tool for HttpServiceTool {
 不要凭直觉拼 REST 路径（会 404）。只给 path，不要自己拼域名。\
 取**文件本体**（二进制）用 `save_to`：宿主负责跟随已授权的重定向并流式落盘，\
 临时凭证不会进上下文；也不要用 `lan_exec` + curl 自己拼。\
+发**文件本体**用 `upload_from`（PUT/POST）+ `headers`（如 alist 的 `File-Path`），\
+同样是宿主流式发送、token 只由宿主注入；不要为上传去用 host/lan_exec + curl。\
 注意：`kind = \"mcp\"` 的服务要用 `mcp(server=…, tool=…)`，不是这个工具。",
                 if self.names().is_empty() { "（未配置）".to_owned() } else { self.names().join("、") }
             ),
@@ -522,7 +530,16 @@ impl Tool for HttpServiceTool {
                     "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
                     "path": { "type": "string", "description": "以 / 开头的路径，可带 query" },
                     "body": { "type": "object", "description": "JSON 请求体（可选）" },
-                    "body_file": { "type": "string", "description": "从 /ws 下的文件读请求体（脚本生成内容、宿主负责发；仅 JSON）" },
+                    "body_file": { "type": "string", "description": "从 /ws 下的文件读请求体（脚本生成内容、宿主负责发；仅 JSON，≤1MB）" },
+                    "upload_from": {
+                        "type": "string",
+                        "description": "把 /ws 下的**文件本体**流式上传（PUT/POST）。大小以 Content-Length 显式给出，不走内存；上限 512MB。不要和 body / body_file / save_to 同时用"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "额外的请求头（可选，原样发送，不做模板替换）。禁止 authorization / cookie / host / content-length / transfer-encoding"
+                    },
                     "save_to": { "type": "string", "description": "把**文件本体**流式存到 /ws 下的相对路径。响应是 3xx 时由宿主跟随一次已授权的重定向，临时凭证不会交给你；上限 512MB。只用于二进制响应，JSON/文本接口不要加这个参数" }
                 },
                 "required": ["service", "method", "path"]
@@ -574,6 +591,19 @@ impl Tool for HttpServiceTool {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let upload_from = args
+            .get("upload_from")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if save_to.is_some() && upload_from.is_some() {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArgs,
+                "upload_from 与 save_to 不能同时用（一次请求只有一个方向）",
+                false,
+            ));
+        }
         if let Some(rel) = &save_to {
             check_save_path(rel).map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
             // 取文件本体只有 GET 一种形态；POST 加 save_to 会把"接口调用"变成"写文件"，难排查。
@@ -583,6 +613,55 @@ impl Tool for HttpServiceTool {
                     "save_to 只支持 GET（取文件本体；接口调用不要加这个参数）",
                     false,
                 ));
+            }
+        }
+        if let Some(rel) = &upload_from {
+            check_save_path(rel).map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
+            if method != "PUT" && method != "POST" {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "upload_from 只支持 PUT / POST（上传的是文件本体，不是查询）",
+                    false,
+                ));
+            }
+            if args.get("body").is_some() || args.get("body_file").is_some() {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "upload_from 与 body / body_file 不能同时用（请求体就是那个文件）",
+                    false,
+                ));
+            }
+        }
+        // 模型给的请求头：原样发送、不做模板替换；凭据类的名字一律拒绝，
+        // 因为"第二跳/请求头里带 token"是这套工具的硬边界（D9/D32）。
+        let mut req_headers: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(m) = args.get("headers").and_then(|v| v.as_object()) {
+            for (k, v) in m {
+                let Some(val) = v.as_str() else {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("headers.{k} 必须是字符串"),
+                        false,
+                    ));
+                };
+                let key = k.trim().to_ascii_lowercase();
+                if matches!(
+                    key.as_str(),
+                    "authorization"
+                        | "cookie"
+                        | "proxy-authorization"
+                        | "host"
+                        | "content-length"
+                        | "transfer-encoding"
+                        | "connection"
+                ) {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("headers 里不允许 `{k}`：鉴权与长度由宿主决定"),
+                        false,
+                    ));
+                }
+                req_headers.insert(key, val.to_owned());
             }
         }
         if path.contains("://") {
@@ -670,9 +749,10 @@ impl Tool for HttpServiceTool {
         };
 
         let started = Instant::now();
-        // `save_to` 是下载：从一开始就用不设总超时的 client。
-        // 否则 alist 开 Web 代理时，第一跳本身就是 22MB 的响应体。
-        let client = if save_to.is_some() { &self.download_client } else { &self.client };
+        // `save_to` / `upload_from` 是一次大流量传输：从一开始就用不设总超时的 client。
+        // 否则 alist 开 Web 代理时，第一跳本身就是整份文件。
+        let bulk = save_to.is_some() || upload_from.is_some();
+        let client = if bulk { &self.transfer_client } else { &self.client };
         let mut req = match method.as_str() {
             "GET" => client.get(&url),
             "POST" => client.post(&url),
@@ -693,6 +773,11 @@ impl Tool for HttpServiceTool {
         for (k, v) in &svc.extra_headers {
             req = req.header(k, v);
         }
+        // 调用方显式给的请求头（已过名字白名单检查），在原样发送前不做任何替换
+        for (k, v) in &req_headers {
+            req = req.header(k, v);
+        }
+        let mut uploaded: Option<(String, u64)> = None;
         // 请求体：调用方给的对象 + 服务配置里的注入字段（飞书加签）；
         // 也可以从 /ws 读文件（脚本生成内容、宿主负责发）。
         let mut body_json = args.get("body").cloned();
@@ -728,6 +813,65 @@ impl Tool for HttpServiceTool {
             req = req
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(bytes);
+        } else if let Some(rel) = &upload_from {
+            // 文件本体流式上传：Content-Length 由宿主按文件大小写死，
+            // 不把整份文件读进内存（单板机 MemoryMax=1G，512MB 上限不能靠 buffer 兜）。
+            let path_on_disk = match resolve_workspace_file(&_ctx.workspace.root, rel, "upload_from") {
+                Ok(p) => p,
+                Err(e) => return Err(ToolError::new(ErrorCode::InvalidArgs, e, false)),
+            };
+            let meta = match tokio::fs::metadata(&path_on_disk).await {
+                Ok(m) if m.is_file() => m,
+                Ok(_) => {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("upload_from 不是普通文件：{rel}"),
+                        false,
+                    ));
+                }
+                Err(e) => {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("读不到 upload_from {rel}：{e}"),
+                        false,
+                    ));
+                }
+            };
+            if meta.len() > MAX_DOWNLOAD_BYTES {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    format!(
+                        "upload_from 太大（{} 字节，上限 {} MB）",
+                        meta.len(),
+                        MAX_DOWNLOAD_BYTES / 1024 / 1024
+                    ),
+                    false,
+                ));
+            }
+            let file = match tokio::fs::File::open(&path_on_disk).await {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        format!("打不开 upload_from {rel}：{e}"),
+                        false,
+                    ));
+                }
+            };
+            let ctype = if req_headers.contains_key("content-type") {
+                None
+            } else {
+                Some("application/octet-stream")
+            };
+            if let Some(c) = ctype {
+                req = req.header(reqwest::header::CONTENT_TYPE, c);
+            }
+            req = req
+                .header(reqwest::header::CONTENT_LENGTH, meta.len())
+                .body(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(
+                    file,
+                )));
+            uploaded = Some((rel.clone(), meta.len()));
         }
 
         let resp = match req.send().await {
@@ -793,7 +937,7 @@ impl Tool for HttpServiceTool {
                     return Err(ToolError::new(ErrorCode::Unavailable, svc.redact(&e), false));
                 }
             };
-            let mut hop = self.download_client.get(&target);
+            let mut hop = self.transfer_client.get(&target);
             for (k, v) in &hop_headers {
                 hop = hop.header(k, v);
             }
@@ -905,14 +1049,20 @@ impl Tool for HttpServiceTool {
             }
         }
         let ms = started.elapsed().as_millis() as i64;
+        let note = match (&uploaded, status.is_success()) {
+            (Some((rel, n)), true) => format!("upload={rel} bytes={n} ok"),
+            (Some((rel, n)), false) => format!("upload={rel} bytes={n} http-error"),
+            (None, true) => "ok".to_owned(),
+            (None, false) => "http-error".to_owned(),
+        };
         self.log_line(
             &svc.name,
             &method,
             &log_path,
             Some(status.as_u16()),
-            body.len(),
+            uploaded.as_ref().map(|(_, n)| *n as usize).unwrap_or(body.len()),
             ms,
-            if status.is_success() { "ok" } else { "http-error" },
+            &note,
         );
 
         let text = svc.scrub(&String::from_utf8_lossy(&body), &vars.secrets());
@@ -942,12 +1092,16 @@ impl Tool for HttpServiceTool {
             &_ctx.call.0,
             None,
         );
-        let mut out = format!(
+        let mut out = String::new();
+        if let Some((rel, n)) = &uploaded {
+            out.push_str(&format!("已发出 /ws/{rel}（{} KB）\n", n / 1024));
+        }
+        out.push_str(&format!(
             "{method} {} · HTTP {} · {} 字节 · {ms}ms\n\n",
             svc.name,
             status.as_u16(),
             body.len()
-        );
+        ));
         out.push_str(&rendered.text);
         Ok(ToolOutput {
             content: vec![Block::Paragraph(out)],
