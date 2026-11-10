@@ -1707,7 +1707,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             };
             if let Ok(docs) = rd.list_docs(q).await {
                 if !docs.is_empty() {
-                    system.push_str("\n\n已知事实（长期记忆，可直接使用，不必再问用户）：\n");
+                    // 记忆是"过去的结论"，不是真理：外部服务/工具行为会变，
+                    // 旧结论与最新输入或本次实测冲突时必须让位，否则模型会拿旧结论
+                    // 顶掉用户此刻的提问（真实事故：alist 下载那条错误记忆被反复引用）。
+                    system.push_str(
+                        "\n\n已知事实（长期记忆，过去的结论；可直接使用、不必再问用户，\
+                         但与最新输入或本次实测冲突时以最新的为准）：\n",
+                    );
                     for d in &docs {
                         let subj = d.payload["subject"].as_str().unwrap_or("?");
                         let pred = d.payload["predicate"].as_str().unwrap_or("?");
