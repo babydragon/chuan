@@ -48,7 +48,7 @@ pub use tools::remind::{RemindersTool, RemindTool};
 pub use tools::send::SendFileTool;
 pub use tools::task::TaskTool;
 pub use playbook::{PlaybookTool, PublishPlaybookTool, RollbackPlaybookTool};
-pub use services::{HttpServiceTool, Service};
+pub use services::{HttpServiceTool, Service, Timeouts};
 pub use proxy::{Mode as ProxyMode, ProxyConfig};
 pub use sandbox::{BwrapEnv, Mount, SandboxProfile, validate_mount};
 pub use skills::{PublishSkillTool, RollbackSkillTool, RunSkillTool, SkillCatalog};

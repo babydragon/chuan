@@ -576,6 +576,76 @@ async fn save_to_surfaces_upstream_error_body() {
     assert!(logged.contains("alist:/d/book.pdf?…"), "{logged}");
 }
 
+/// 下载不设总超时：同样的慢响应，API 调用会被总超时掐掉，`save_to` 要能下完。
+/// 判据是"有没有新数据"，不是"总共花了多久"——512MB 上限配 30 秒总时限是自相矛盾的。
+#[tokio::test]
+async fn save_to_ignores_api_total_timeout() {
+    let base = slow_server(400, std::time::Duration::from_millis(80)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let svc = Service { name: "slow".into(), base, ..Default::default() };
+    let tool = HttpServiceTool::with_limits(
+        vec![svc],
+        dir.path().join("net.jsonl"),
+        &harness_capabilities::proxy::ProxyConfig::default(),
+        harness_capabilities::Timeouts {
+            api_total: std::time::Duration::from_millis(200),
+            download_idle: Some(std::time::Duration::from_secs(5)),
+        },
+    )
+    .unwrap();
+    let ws = Workspace { run: harness_kernel::RunId("r".into()), root: dir.path().to_string_lossy().into() };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    // 普通 API 调用：200ms 总超时应当把它掐掉
+    let err = tool
+        .execute(
+            serde_json::json!({"service":"slow","method":"GET","path":"/slow"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, harness_kernel::ErrorCode::Unavailable, "{}", err.message);
+
+    // 同一个响应、同样的耗时：走 save_to 必须下完
+    tool.execute(
+        serde_json::json!({"service":"slow","method":"GET","path":"/slow","save_to":"slow.bin"}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let got = std::fs::read(dir.path().join("slow.bin")).unwrap();
+    assert_eq!(got.len(), 400, "下载被总超时截断了");
+}
+
+/// 分 4 段、段间停顿的慢服务：总耗时 ≈ 4×gap，用来区分"总超时"与"空闲超时"。
+async fn slow_server(total: usize, gap: std::time::Duration) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // 两个请求（一次普通、一次 save_to），逐条受理
+        for _ in 0..2 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {total}\r\nconnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let step = total / 4;
+                let body = vec![b'x'; step];
+                for _ in 0..4 {
+                    let _ = sock.write_all(&body).await;
+                    let _ = sock.flush().await;
+                    tokio::time::sleep(gap).await;
+                }
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
 /// 只应答一次、指定状态与响应体的服务。
 async fn status_server(
     status: &'static str,

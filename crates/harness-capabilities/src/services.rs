@@ -21,6 +21,7 @@ use tokio::io::AsyncWriteExt;
 
 const MAX_RESP_BYTES: usize = 2 * 1024 * 1024;
 /// `save_to` 落盘上限：够放一本教材，又不至于把 8GB 单板机的盘写满。
+/// 时间维度不设总时限，靠空闲超时兜底（见 `Timeouts`）。
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 fn now_ms() -> i64 {
@@ -131,8 +132,30 @@ impl Service {
 
 pub struct HttpServiceTool {
     services: std::sync::RwLock<BTreeMap<String, Service>>,
+    /// 普通 API 调用：短超时，卡住就失败。
     client: reqwest::Client,
+    /// 下载（`save_to`）：不设总超时，只按"有没有新数据"判死。
+    /// 两者必须分开——`reqwest` 的 `.timeout()` 覆盖建连到读完响应体的全过程。
+    download_client: reqwest::Client,
     log: PathBuf,
+}
+
+/// 两个 client 的超时策略。
+#[derive(Clone, Copy, Debug)]
+pub struct Timeouts {
+    /// 非下载请求的总超时（含读完响应体）。
+    pub api_total: Duration,
+    /// 下载请求允许的**空闲**时长：连续这么久收不到新字节才断。
+    pub download_idle: Option<Duration>,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            api_total: Duration::from_secs(30),
+            download_idle: Some(Duration::from_secs(60)),
+        }
+    }
 }
 
 /// base 里自带的那段路径（`/` 视为没有）。用于检测"base 与 path 重复"。
@@ -186,22 +209,45 @@ impl HttpServiceTool {
         log: impl Into<PathBuf>,
         proxy: &crate::proxy::ProxyConfig,
     ) -> Result<Arc<Self>, String> {
-        let mut b = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            // 不跟重定向：避免被跳到别的域名（token 只该发给配置的那个 host）
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent("chuan/0.1");
-        b = match (proxy.services, proxy.reqwest()) {
-            (crate::proxy::Mode::Always, Some(p)) => b.proxy(p),
-            _ => b.no_proxy(),
+        Self::with_limits(services, log, proxy, Timeouts::default())
+    }
+
+    /// 超时可注入：测试用它把"总超时"缩到毫秒级，生产用 `Timeouts::default()`。
+    pub fn with_limits(
+        services: Vec<Service>,
+        log: impl Into<PathBuf>,
+        proxy: &crate::proxy::ProxyConfig,
+        limits: Timeouts,
+    ) -> Result<Arc<Self>, String> {
+        let build = |total: Option<Duration>, idle: Option<Duration>| -> Result<reqwest::Client, String> {
+            let mut b = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                // 不跟重定向：避免被跳到别的域名（token 只该发给配置的那个 host）
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent("chuan/0.1");
+            if let Some(t) = total {
+                b = b.timeout(t);
+            }
+            if let Some(i) = idle {
+                b = b.read_timeout(i);
+            }
+            b = match (proxy.services, proxy.reqwest()) {
+                (crate::proxy::Mode::Always, Some(p)) => b.proxy(p),
+                _ => b.no_proxy(),
+            };
+            b.build().map_err(|e| format!("HTTP 客户端初始化失败：{e}"))
         };
-        let client = b.build().map_err(|e| format!("HTTP 客户端初始化失败：{e}"))?;
+        // 下载不设总超时：上限是 512MB，用 30 秒总时限去卡它就是自相矛盾
+        // （22MB 在 20KB/s 上会"下到一半就断"，看起来像网络问题）。
+        // 改成空闲超时后，只要还有新字节就一直走，真断了也只是这一次失败。
+        let client = build(Some(limits.api_total), None)?;
+        let download_client = build(None, limits.download_idle)?;
         Ok(Arc::new(Self {
             services: std::sync::RwLock::new(
                 services.into_iter().map(|s| (s.name.clone(), s)).collect(),
             ),
             client,
+            download_client,
             log: log.into(),
         }))
     }
@@ -575,12 +621,15 @@ impl Tool for HttpServiceTool {
         };
 
         let started = Instant::now();
+        // `save_to` 是下载：从一开始就用不设总超时的 client。
+        // 否则 alist 开 Web 代理时，第一跳本身就是 22MB 的响应体。
+        let client = if save_to.is_some() { &self.download_client } else { &self.client };
         let mut req = match method.as_str() {
-            "GET" => self.client.get(&url),
-            "POST" => self.client.post(&url),
-            "PUT" => self.client.put(&url),
-            "PATCH" => self.client.patch(&url),
-            "DELETE" => self.client.delete(&url),
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "PATCH" => client.patch(&url),
+            "DELETE" => client.delete(&url),
             other => {
                 return Err(ToolError::new(
                     ErrorCode::InvalidArgs,
@@ -688,7 +737,7 @@ impl Tool for HttpServiceTool {
                     false,
                 ));
             }
-            let resp = match self.client.get(&target).send().await {
+            let resp = match self.download_client.get(&target).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     self.log_line(&svc.name, &method, &log_path, None, 0, started.elapsed().as_millis() as i64, "重定向后请求失败");
