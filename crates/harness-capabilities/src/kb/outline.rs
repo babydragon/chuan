@@ -40,7 +40,15 @@ struct Node {
 
 impl Node {
     fn from_json(v: &serde_json::Value) -> Result<Self, String> {
-        let obj = v.as_object().ok_or("节点必须是对象")?;
+        let obj = v.as_object().ok_or_else(|| {
+            if v.is_string() {
+                // 真实踩过：模型按 description 里"用 path 传路径"的提示，把路径塞进了 nodes。
+                "节点必须是对象（收到字符串）。如果这是 /ws 下的 JSON 路径，请用 `path` 参数，不要放进 nodes"
+                    .to_owned()
+            } else {
+                "节点必须是对象".to_owned()
+            }
+        })?;
         let get_str = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(str::trim);
 
         let id = get_str("id").filter(|s| !s.is_empty()).ok_or("节点缺少 id")?;
@@ -240,8 +248,9 @@ impl Tool for KbOutlineSetTool {
             name: "kb_outline_set".into(),
             description: "把一份资料的**结构**写进索引（整体替换这一份的结构）。\
 节点是扁平列表：`{id, type, label?, parent?, page?, attrs?}`，用 parent 串成树；\
-type 由你自己定（章节/单元/生字/条款…），系统不预设。写完之后用 `kb_select` 按结构取集合。\
-同一份资料重复写只会覆盖。\
+type 由你自己定（章节/单元/生字/条款…），系统不预设；**用 attrs 表达属性**（是否加粗、等级、释义…）\
+而不是分裂 type。写完之后用 `kb_select` 按结构取集合。\
+同一份资料重复写只会覆盖；**清空必须显式 clear=true**。\
 结构大（几百个节点以上）时**不要用 nodes 内联**：让脚本生成 JSON 文件，用 path 传路径。"
                 .into(),
             parameters: serde_json::json!({
@@ -251,10 +260,18 @@ type 由你自己定（章节/单元/生字/条款…），系统不预设。写
                     "nodes": {
                         "type": "array",
                         "items": { "type": "object" },
-                        "description": "节点数组；id 唯一（字母数字 ._-），parent 指向已有 id，最多 5000 个"
+                        "description": "节点数组（小结构直接内联）；id 唯一（字母数字 ._-），parent 指向已有 id，最多 5000 个"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "/ws 下的 JSON 文件（节点数组，或 {\"nodes\":[...]}）。几百个节点以上用它，与 nodes 互斥"
+                    },
+                    "clear": {
+                        "type": "boolean",
+                        "description": "清空这份资料的结构。只有 nodes/path 为空时才需要它——空结构等于删除，不显式确认一律拒绝"
                     }
                 },
-                "required": ["source", "nodes"]
+                "required": ["source"]
             }),
         }
     }
@@ -299,6 +316,26 @@ type 由你自己定（章节/单元/生字/条款…），系统不预设。写
                 ))
             }
         };
+        // 空结构 = 清空这份资料的结构。这是破坏性动作，必须显式确认：
+        // "先清空再写"是很自然的思路，但一次手滑就把索引清了（真实踩过：
+        // nodes=[] 回了「已写入结构：0 个节点」，看起来像成功）。
+        let clear = args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
+        if arr.is_empty() {
+            if !clear {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "空结构等于**清空**这份资料的结构索引。确实要清空就加 clear=true；\
+                     想写入内容请给非空的 nodes 或 path（别用 [] 占位）",
+                    false,
+                ));
+            }
+        } else if clear {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArgs,
+                "clear=true 只用于清空：既然给了节点，就去掉 clear（重写即覆盖，不需要先清空）",
+                false,
+            ));
+        }
         let mut nodes = Vec::with_capacity(arr.len());
         for v in &arr {
             nodes.push(Node::from_json(v).map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?);
@@ -889,5 +926,80 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("只能给一个"), "{}", err.message);
+    }
+
+    /// 参数 schema 必须声明 `path`、且不能把 `nodes` 列为必填。
+    ///
+    /// 真实事故：description 写着"用 path 传路径"，schema 里却只有 required 的 `nodes`，
+    /// 于是模型只能把路径塞进数组，被 `Node::from_json` 以"节点必须是对象"拒掉——
+    /// 113 个节点的词表结构因此写不进库，模型的结论是"工具不支持"。
+    #[test]
+    fn schema_declares_path_and_does_not_require_nodes() {
+        let spec = KbOutlineSetTool.spec();
+        let props = &spec.parameters["properties"];
+        assert!(
+            props.get("path").is_some(),
+            "schema 必须声明 path，否则模型看不见这个入参：{}",
+            spec.parameters
+        );
+        let required: Vec<&str> = spec.parameters["required"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(required, vec!["source"], "只有 source 必填（nodes/path 二选一）");
+    }
+
+    /// 把路径塞进 nodes 时，报错要指向 `path`，别只说"必须是对象"。
+    #[tokio::test]
+    async fn string_in_nodes_points_at_path_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace { run: RunId("r".into()), root: dir.path().to_string_lossy().into() };
+        let docs = MapDocs::default();
+        let env = crate::NullEnv;
+        let c = ctx(&ws, &docs, &env);
+
+        let err = KbOutlineSetTool
+            .execute(
+                serde_json::json!({"source": "kb:book", "nodes": ["/ws/outline.json"]}),
+                &c,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("path"), "{}", err.message);
+    }
+
+    /// 空结构是**清空**，必须显式确认；给了节点又写 clear 也要拒绝（别让语义含混）。
+    #[tokio::test]
+    async fn empty_outline_requires_explicit_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace { run: RunId("r".into()), root: dir.path().to_string_lossy().into() };
+        let docs = MapDocs::default();
+        let env = crate::NullEnv;
+        let c = ctx(&ws, &docs, &env);
+
+        // 不带 clear 的 [] → 拒绝
+        let err = KbOutlineSetTool
+            .execute(serde_json::json!({"source":"kb:book","nodes":[]}), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgs, "{}", err.message);
+        assert!(err.message.contains("clear=true"), "{}", err.message);
+
+        // 带 clear 的 [] → 真的清空
+        let out = KbOutlineSetTool
+            .execute(serde_json::json!({"source":"kb:book","nodes":[],"clear":true}), &c)
+            .await
+            .unwrap();
+        assert_eq!(out.doc_writes[0].payload["count"], 0);
+
+        // 有节点 + clear → 语义含混，拒绝
+        let err = KbOutlineSetTool
+            .execute(
+                serde_json::json!({"source":"kb:book","nodes":[{"id":"a","type":"x"}],"clear":true}),
+                &c,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("去掉 clear"), "{}", err.message);
     }
 }
