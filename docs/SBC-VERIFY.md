@@ -252,6 +252,10 @@
       踩过的坑：`ReadWritePaths=/run/user/%U` 在 system 单元里 `%U` 恒为 0 → `/run/user/0` 不存在 →
       `226/NAMESPACE` 起不来（板上实测）。真要可写必须写死 uid，且 bwrap 的 `--bind` 不清除
       继承的 `MS_RDONLY`，所以"挂成 rw"在只读父挂载下本来就不成立
+- [ ] 授权表里标 `rw` 的路径在宿主 lane 里**真的可写**（不是继承 ro）：
+      `capability list` 里没有 `⚠ 当前只读`；`journalctl -u chuan | grep -c '在本进程里是只读'` 为 0；
+      `host` 里 `touch <路径>/.probe` 成功。不满足 = unit 的 `ReadWritePaths` 漏了这条路径
+      （网络挂载还缺 `RequiresMountsFor=`）
 - [ ] 看到的是**宿主进程表**：`ps -e | head` 里有 PID 1 与 `journald`（不是空表、不是新 procfs）
 - [ ] **遮蔽实测**（2026-10-29 曾有回归：`masks_for` 写了但没接进 `exec_with`，L1 里能 `cat /etc/chuan/chuan.toml`）：
       `ls -la /etc/chuan/secrets` 应为空、`cat /etc/chuan/chuan.toml` 应读出 0 字节

@@ -386,6 +386,8 @@ cat <<NEXT
   - 已 enable-linger $SVC_USER：systemctl --user 才能用（user timer 跑在独立 slice，
     不吃 chuan.service 的 MemoryMax）
   - unit 里已加 SupplementaryGroups=systemd-journal（journalctl 要读系统日志）
+  - unit 已一次性放开通用可写位置（/mnt /media /srv /run/media）：加可写目录只改
+    chuan.toml 的 [host.path]，不用再动 unit；其它位置才需要 ReadWritePaths
   - 授权表就在本配置文件（改完热加载，不用重启）；默认表见 chuan.toml 的 [host] 段
 
 代理说明：

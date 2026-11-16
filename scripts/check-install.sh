@@ -34,6 +34,25 @@ cp "$REPO_ROOT/deploy/install.sh" "$WORK/client/install.sh"
 
 fail() { printf 'FAIL: %b\n' "$*" >&2; exit 1; }
 
+# 授权表里标了 rw 的路径必须**同时**出现在 unit 的 ReadWritePaths 里：
+# `ProtectSystem=strict` 下否则它在服务命名空间里只读，而 bwrap 的 --bind 只继承 ro，
+# 表现是"配置看着没错、工具报 Read-only file system"（2026-11-16 板上真踩过）。
+# 输出：漏掉的路径（一行一个）；全部覆盖则无输出。
+missing_rw_paths() {
+  local cfg="$1" unit="$2" p rw
+  [[ -f $cfg && -f $unit ]] || return 0
+  rw=$(grep -h '^ReadWritePaths=' "$unit" | sed 's/^ReadWritePaths=//' | tr ' ' '\n' \
+        | sed 's/^-//' | grep -v '^$' || true)
+  while IFS= read -r p; do
+    [[ -z $p ]] && continue
+    # 覆盖按目录边界算：/var/lib/chuan 覆盖 /var/lib/chuan/timers，但不覆盖 /var/lib/chuan2
+    if ! printf '%s\n' "$rw" | awk -v p="$p" '
+          $0 != "" && (p == $0 || index(p, $0 "/") == 1) { f = 1 } END { exit !f }'; then
+      printf '%s\n' "$p"
+    fi
+  done < <(awk '!/^[[:space:]]*#/ && /mode[[:space:]]*=[[:space:]]*"rw"/ { split($0, a, "\""); print a[2] }' "$cfg")
+}
+
 run_case() {
   local name="$1"; shift
   local out="$WORK/$name.log"
@@ -75,6 +94,24 @@ grep -q "需要参数" "$WORK/argerr.log" || fail "--proxy 缺参数没有提示
 leftover=$(ls -d /tmp/tmp.* 2>/dev/null | grep -v "^$WORK\$" | wc -l || true)
 leftover=${leftover//[!0-9]/}
 [[ "$leftover" == "0" ]] || fail "临时目录残留 $leftover 个：$(ls -d /tmp/tmp.* | grep -v "^$WORK\$" | head -3)"
+
+# 6. 上面那条 unit 断言本身要能报错，否则是"永远通过"的摆设
+t="$WORK/rw"; mkdir -p "$t"
+printf '[host.path]\n"/srv/data" = { mode = "rw" }\n# "/srv/skip" = { mode = "rw" }\n' > "$t/c.toml"
+printf 'ReadWritePaths=/var/lib/chuan\n' > "$t/unit"
+out=$(missing_rw_paths "$t/c.toml" "$t/unit")
+[[ "$out" == "/srv/data" ]] || fail "rw 漏在 unit 外没被检出（得到 [$out]）"
+printf 'ReadWritePaths=/var/lib/chuan\nReadWritePaths=-/srv/data\n' > "$t/unit"
+out=$(missing_rw_paths "$t/c.toml" "$t/unit")
+[[ -z "$out" ]] || fail "rw 已在 unit 里却报缺失（得到 [$out]）"
+# 父目录放开也算覆盖（默认配置就是 ReadWritePaths=/var/lib/chuan 覆盖它下面两条 rw）
+printf 'ReadWritePaths=/srv\n' > "$t/unit"
+out=$(missing_rw_paths "$t/c.toml" "$t/unit")
+[[ -z "$out" ]] || fail "父目录 /srv 应覆盖 /srv/data（得到 [$out]）"
+# 但目录边界要按分量算：/srv/data2 不覆盖 /srv/data
+printf 'ReadWritePaths=/srv/data2\n' > "$t/unit"
+out=$(missing_rw_paths "$t/c.toml" "$t/unit")
+[[ "$out" == "/srv/data" ]] || fail "目录边界判定错（得到 [$out]）"
 
 # ---------- 真装一次到临时根，验证目录与权限（含"修正历史安装"）----------
 if sudo -n true 2>/dev/null; then
@@ -120,6 +157,10 @@ if sudo -n true 2>/dev/null; then
   for d in playbooks services.d roles commands.d capabilities; do
     grep -q -- "/etc/chuan/$d" "$unit" || fail "unit 的 ReadWritePaths 缺少 /etc/chuan/$d"
   done
+  # 同一条规则的另一半：授权表里标了 rw 的路径也必须在 unit 里放开，
+  # 否则装完看着没问题、一写就 Read-only file system（2026-11-16 板上真踩过）。
+  miss=$(missing_rw_paths "$ROOT/etc/chuan/chuan.toml" "$unit")
+  [[ -z $miss ]] || fail "授权表标了 rw 但 unit 的 ReadWritePaths 没放开：$(echo "$miss" | tr '\n' ' ')"
 
   # 幂等：第二次跑不应该再报任何"校正"（stat 的 750 vs 配置的 0750 必须按数值比）
   sudo env CHUAN_ROOT="$ROOT" CHUAN_USER="$U" CHUAN_GROUP="$G" \

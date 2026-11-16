@@ -429,6 +429,12 @@ SOP 五条硬规则随二进制发布，可按项目惯例用 `~/.config/chuan/p
   可写目录必须写进 unit 的 `ReadWritePaths`，且**只能写实际 uid 的路径**：
   system 单元里 `%U` 恒为 0，写 `/run/user/%U` 会变成 `/run/user/0` 并让服务起不来（实测 226/NAMESPACE）。
   `/run/user/<uid>` 本身只需 `ro`——`systemctl --user` 只连 socket。
+  这类错配**不需要靠猜**：`grants.rs` 读 `/proc/self/mountinfo` 自查，标了 rw 但实际只读的路径
+  会在加载授权表时 warn、在 `capability list` 里标 ⚠、在 `host` 命令失败时附一段"不是命令写错"的提示
+  （2026-11-16 板上为此误判过两轮：先怀疑 NAS，再怀疑 fstab）。
+  **分工要固定下来**：unit 的 `ReadWritePaths` 只给通用挂载点一次性放开（`/mnt` `/media` `/srv`），
+  日常加可写目录只改 `[host.path]`——否则"unit 与授权表两处都要改"早晚会漏一处，
+  而漏的那次一定是以 `Read-only file system` 的形式暴露。
 - **自毁防护**：`chuan.service` 的 `restart` 排队到本轮 turn 结束后执行（先发消息再重启）；
   `stop` / `disable` 一律拒绝，要主人手工。
 - 单位名称/路径不靠 argv 猜：hostd 匹配授权后再过一遍通用校验（拒绝 `..`、拒绝符号链接逃逸、

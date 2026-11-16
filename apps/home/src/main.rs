@@ -526,6 +526,21 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("/etc/chuan/chuan.toml")),
     ));
+    // `[sandbox] mounts` 里 ro = false 的条目和 `[host.path]` 的 rw 是同一个坑：
+    // 源挂载在本进程里只读时，bwrap 的 --bind 只能继承 ro（`ProtectSystem=strict`
+    // 没放开它）。启动就把话说明白，别等一次失败的写入去猜是 NAS 还是挂载参数。
+    for m in cfg.sandbox_mounts.iter().filter(|m| !m.ro) {
+        if let Some(view) = harness_capabilities::grants::covering_mount(&m.src) {
+            if view.ro {
+                tracing::warn!(
+                    src = %m.src.display(),
+                    mount = %view.mountpoint.display(),
+                    "沙盒挂载标了可写，但源路径所在的挂载在本进程里是只读：沙盒里写入会 EROFS；\
+                     把该路径写进服务单元的 ReadWritePaths（改 unit 后要 daemon-reload + restart）"
+                );
+            }
+        }
+    }
     // 审计与 hostd 写同一个文件（谁在什么时候动了宿主，一个 jq 就能看全）
     let host_audit = std::path::Path::new(&cfg.db)
         .parent()

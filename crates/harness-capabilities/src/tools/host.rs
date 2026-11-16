@@ -71,6 +71,28 @@ pub(crate) fn audit_call(
     crate::net::append_log(path, &rec.to_string());
 }
 
+/// 命令失败、且**标了 rw 的授权其实只读**时附上的诊断。
+///
+/// 没有这一段，模型只能看到 sh 的 `Read-only file system`，然后开始猜
+/// 「NAS 坏了 / fstab 写错 / bwrap 的锅」——2026-11-16 板上就是为这件事绕了一大圈，
+/// 真因只是 unit 的 `ProtectSystem=strict` 没放开那条路径。
+fn ro_mount_hint(blocked: &[(PathBuf, PathBuf)]) -> String {
+    let mut s = String::from("\n--- 权限提示（不是命令写错）---\n");
+    for (path, mp) in blocked {
+        s.push_str(&format!(
+            "{}：授权表里是 rw，但它所在的挂载 {} 在本进程里是只读；\
+             bwrap 的 --bind 只能继承 ro，所以在这里写入必然失败。\n",
+            path.display(),
+            mp.display()
+        ));
+    }
+    s.push_str(
+        "修法只有一条：让这个挂载以 rw 交给本服务（把路径写进服务单元的 ReadWritePaths，\
+         或确认挂载本身不是 ro）。换写法、重试、拆小文件都不会成功。\n",
+    );
+    s
+}
+
 #[async_trait]
 impl Tool for HostTool {
     fn spec(&self) -> ToolSpec {
@@ -208,10 +230,19 @@ impl Tool for HostTool {
             stdin: None,
         };
 
-        let grants_desc: Vec<String> = crate::host::mounts_for(&merged)
+        let mounts = crate::host::mounts_for(&merged);
+        let grants_desc: Vec<String> = mounts
             .iter()
             .map(|m| format!("{}:{}", m.src.display(), if m.ro { "ro" } else { "rw" }))
             .collect();
+        // 与上一步同一份挂载集：只有真被挂进来的 rw 路径才值得提示（不存在的路径不挂）。
+        let mounted_rw: Vec<&PathBuf> =
+            mounts.iter().filter(|m| !m.ro).map(|m| &m.src).collect();
+        let ro_rw: Vec<(PathBuf, PathBuf)> =
+            crate::grants::rw_grants_blocked_by_ro_mount(&merged)
+                .into_iter()
+                .filter(|(p, _)| mounted_rw.iter().any(|m| *m == p))
+                .collect();
         let started = Instant::now();
         let result = self
             .env
@@ -257,6 +288,10 @@ impl Tool for HostTool {
         if out.truncated {
             text.push_str("\n[输出已截断]");
         }
+        // 只在失败时补：成功的命令可能只是没碰到那条路径，别制造噪音。
+        if out.code != Some(0) && !ro_rw.is_empty() {
+            text.push_str(&ro_mount_hint(&ro_rw));
+        }
 
         Ok(ToolOutput {
             content: vec![Block::Code { lang: None, text }],
@@ -299,6 +334,19 @@ mod tests {
     fn broken_table_never_skips() {
         let (_d, t) = tool("[host.path\n");
         assert!(!t.skip_approval(&serde_json::json!({"argv": ["true"]})));
+    }
+
+    #[test]
+    fn ro_mount_hint_says_it_is_not_the_command() {
+        let hint = ro_mount_hint(&[(
+            PathBuf::from("/mnt/nas"),
+            PathBuf::from("/mnt/nas"),
+        )]);
+        // 三件事必须说清：哪条路径、为什么、以及"换写法没用"
+        assert!(hint.contains("/mnt/nas"), "{hint}");
+        assert!(hint.contains("只读"), "{hint}");
+        assert!(hint.contains("ReadWritePaths"), "{hint}");
+        assert!(hint.contains("不会成功"), "{hint}");
     }
 
     #[test]

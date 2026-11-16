@@ -150,6 +150,9 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 "/run/user/%U"        = { mode = "ro" }   # systemctl --user 的控制 socket（只连不写）
 "/var/lib/chuan/.config" = { mode = "rw" }  # user unit 文件
 "/var/lib/chuan/timers"  = { mode = "rw" }  # 监控脚本
+# 可写目录只看这张表：unit 已把 /mnt /media /srv /run/media 一次性放开，
+# 下面这类只需要加在这里（不用再改 unit）
+# "/mnt/nas" = { mode = "rw" }
 # 要读别的目录就点名（只读、弹卡）：host(grant=["/home/you/report.csv"])
 # "/home" = { mode = "ro", approval = "once" }
 

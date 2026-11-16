@@ -79,6 +79,19 @@ impl CapabilityTool {
                     crate::grants::Approval::Once => "once（要点名才挂）",
                 };
                 s.push_str(&format!("{}. {} = {mode}, {ap}\n", i + 1, p.path.display()));
+                // 标了 rw 也可能写不进去：源挂载在本进程里是 ro 时，bwrap 只能继承 ro。
+                // 直接标出来，省得模型又一次把"只读"归咎于挂载参数或 NAS。
+                if p.mode == Mode::Rw && p.path.exists() {
+                    if let Some(m) = crate::grants::covering_mount(&p.path) {
+                        if m.ro {
+                            s.push_str(&format!(
+                                "   ⚠ 当前只读：覆盖它的挂载 {} 在本进程里是 ro，\
+                                 沙盒里写入会失败（unit 的 ReadWritePaths 没放开这条路径？）\n",
+                                m.mountpoint.display()
+                            ));
+                        }
+                    }
+                }
             }
         }
         if !g.elevated.is_empty() {

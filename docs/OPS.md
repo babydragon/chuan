@@ -400,6 +400,8 @@ keep_days = 30
 [sandbox]
 # 显式授权给沙盒的宿主挂载（默认空）。例：让技能能用 CUPS
 # mounts = [{ src = "/run/cups", dst = "/run/cups", ro = true }]
+# ⚠ ro = false 同样受 unit 的 ReadWritePaths 限制：源路径在本进程里是只读时，
+# bwrap 只能继承 ro。启动日志会 warn「沙盒挂载标了可写，但源路径所在的挂载…是只读」。
 
 [net]
 # 出网访问记录（JSONL，8MB 自动轮转），net_log 用它做审计
@@ -492,6 +494,15 @@ net = "host"        # 共享宿主 netns：能连 127.0.0.1 的代理与 D-Bus
 # "/home" = { mode = "ro", approval = "once" }
 # rw 只能配 always（临时挂载永远只读）：
 # "/var/lib/chuan/share" = { mode = "rw" }
+
+# ⚠ rw 有两道门：`mode = "rw"` 只决定 bwrap 用 `--bind`；**能不能真写由服务单元决定**。
+# `ProtectSystem=strict` 下整棵树是只读的，而 `--bind` 只继承源的 `MS_RDONLY`
+# （user namespace 里 `mount -o remount,rw` 会 EPERM；2026-10-29 / 2026-11-16 两次实测）。
+# 出厂 unit 已把通用挂载点**一次性**放开：`/mnt` `/media` `/srv` `/run/media`——
+# 所以 NAS、U 盘、/srv 下的数据，加可写目录**只改这张表**，不用动 unit。
+# 数据在别处（例如 /home 下）时才需要再加一行 `ReadWritePaths=-/那条路径`。
+# 写错的表现是"配置对、写不进去"：启动日志 warn「授权标了 rw，但它所在的挂载在
+# 本进程里是只读」、`capability list` 在该条后跟 ⚠、`host` 命令失败时输出末尾贴「权限提示」。
 
 # 提权授权（argv 前缀，无 shell）。被 /etc/sudoers 取代的是这张表，不是脚本。
 # 提权授权：argv 前缀（不带 shell）。换发行版只改这里，不改代码。
@@ -684,6 +695,8 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/chuan
+# 通用可写挂载点一次性放开：之后加可写目录只改 [host.path]，不用再动 unit
+ReadWritePaths=-/mnt -/media -/srv -/run/media
 # P4.6-B 起加：ReadWritePaths=/run/user/%U（见「宿主执行与授权」）
 # 崩溃循环熔断：5 分钟内 5 次 → failed（由 OnFailure 告警）
 OnFailure=chuan-alert@%n.service
@@ -716,6 +729,8 @@ ProtectControlGroups=yes
 ```
 
 `scripts/check-sandbox-unit.sh` 会从 unit 里抽出全部加固项，用 `systemd-run` 真跑一次 bwrap 验证——CI 里跑，别只靠 review。
+带上配置文件时它还会对每条 `rw` 路径**真写一次**（`bash scripts/check-sandbox-unit.sh /etc/chuan/chuan.toml`），
+专抓"`ProtectSystem=strict` 没放开、bwrap 只能继承 ro"这类只在写入时暴露的问题。
 
 资源限制走 `systemd-run --user --scope -p MemoryMax=`（已验证 `rc=137`）。系统服务内调用它需要 **user manager 在跑**：`loginctl enable-linger chuan`。若不可用，降级为 `prlimit`（对 Python 不可靠，需在 `/status` 标记）。
 

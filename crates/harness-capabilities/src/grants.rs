@@ -570,6 +570,120 @@ pub fn from_toml_for_uid(text: &str, uid: u32) -> Result<Grants, String> {
     Ok(g)
 }
 
+// ---------------------------------------------------------------------------
+// 挂载视图：授权表说 rw，不等于本进程里真能写
+// ---------------------------------------------------------------------------
+
+/// 一个挂载点在**本进程命名空间**里的样子（只关心覆盖关系与只读位）。
+///
+/// 为什么需要它：`[host.path]` 的 `mode = "rw"` 只决定 bwrap 用 `--bind` 还是
+/// `--ro-bind`。而 `--bind` **只继承源挂载的 `MS_RDONLY`**，在 user namespace 里
+/// 也清不掉（`mount -o remount,rw` → EPERM，本机 bwrap 0.13 实测）。
+/// 源挂载之所以可能是 ro，最常见的是 unit 的 `ProtectSystem=strict` 没把这条路径
+/// 写进 `ReadWritePaths`——配置全对、工具却报 `Read-only file system`。
+/// 2026-11-16 板上为这个现象绕了一大圈（先怀疑 NAS，又怀疑 fstab），
+/// 所以把"本进程到底能不能写"变成可以直接查的事实。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MountView {
+    pub mountpoint: PathBuf,
+    /// 挂载级 `ro`（不是超级块的只读；两者在 mountinfo 里分开写）
+    pub ro: bool,
+}
+
+/// 解析 `/proc/self/mountinfo`：只取挂载点与挂载级选项（第 5、6 列）。
+///
+/// 形如 `36 35 98:0 / /mnt rw,relatime shared:1 - cifs //h/s rw`；
+/// 第 7 列起是 optional fields，直到 `-`。挂载点里的空格等字符被转义成 `\040` 形态。
+pub fn parse_mountinfo(text: &str) -> Vec<MountView> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut cols = line.split(' ');
+        // 前四列(id/parent/major:minor/root)只用于定位：挂载点第 5 列、挂载级选项第 6 列。
+        let (Some(_id), Some(_parent), Some(_dev), Some(_root), Some(mp), Some(opts)) = (
+            cols.next(),
+            cols.next(),
+            cols.next(),
+            cols.next(),
+            cols.next(),
+            cols.next(),
+        ) else {
+            continue;
+        };
+        out.push(MountView {
+            mountpoint: PathBuf::from(unescape_mountinfo(mp)),
+            ro: opts.split(',').any(|o| o == "ro"),
+        });
+    }
+    out
+}
+
+/// mountinfo 用 `\040`（空格）/`\011`/`\012`/`\134` 转义；按字符处理，别把 UTF-8 拆坏。
+fn unescape_mountinfo(s: &str) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < cs.len() {
+        if cs[i] == '\\'
+            && i + 3 < cs.len()
+            && cs[i + 1].is_digit(8)
+            && cs[i + 2].is_digit(8)
+            && cs[i + 3].is_digit(8)
+        {
+            let v = (cs[i + 1] as u32 - '0' as u32) * 64
+                + (cs[i + 2] as u32 - '0' as u32) * 8
+                + (cs[i + 3] as u32 - '0' as u32);
+            if let Some(c) = char::from_u32(v) {
+                out.push(c);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(cs[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 覆盖 `path` 的挂载点：取**最长前缀**（路径自身是挂载点时命中它自己）。
+/// 比较按路径分量做，`/mnt/nasx` 不会命中 `/mnt/nas`。
+pub fn covering_mount_in<'a>(path: &Path, mounts: &'a [MountView]) -> Option<&'a MountView> {
+    mounts
+        .iter()
+        .filter(|m| path.starts_with(&m.mountpoint))
+        .max_by_key(|m| m.mountpoint.as_os_str().len())
+}
+
+/// 本进程挂载视图里覆盖 `path` 的挂载点。
+/// 读不到 `/proc/self/mountinfo` 时返回 `None`——查不出来只是少一条提示，不是故障。
+pub fn covering_mount(path: &Path) -> Option<MountView> {
+    covering_mount_in(path, &read_mountinfo()).cloned()
+}
+
+fn read_mountinfo() -> Vec<MountView> {
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|t| parse_mountinfo(&t))
+        .unwrap_or_default()
+}
+
+/// 授权表里标了 `rw`、但**在本进程命名空间里实际只读**的条目：`(授权路径, 覆盖它的挂载点)`。
+///
+/// 授人以鱼不如授人以渔：拿到这张表就能直接说"不是我写错命令，是这条路径只能读"。
+pub fn rw_grants_blocked_by_ro_mount(grants: &Grants) -> Vec<(PathBuf, PathBuf)> {
+    blocked_in(grants, &read_mountinfo())
+}
+
+fn blocked_in(grants: &Grants, mounts: &[MountView]) -> Vec<(PathBuf, PathBuf)> {
+    grants
+        .paths
+        .iter()
+        .filter(|g| g.mode == Mode::Rw)
+        .filter_map(|g| {
+            let m = covering_mount_in(&g.path, mounts)?;
+            m.ro.then(|| (g.path.clone(), m.mountpoint.clone()))
+        })
+        .collect()
+}
+
 /// 带 mtime 缓存的授权表。改文件后**下一次调用**就生效，无需重启。
 pub struct GrantsCache {
     path: PathBuf,
@@ -629,6 +743,18 @@ impl GrantsCache {
                 "host 授权表已加载/重新加载"
             ),
         }
+        // "标了 rw 却写不进去"必须当场说出来：否则只能等一次失败的写入去猜
+        // （是 NAS 坏了？fstab 错了？还是 bwrap？）。这里查的是**本进程**的挂载视图，
+        // 而 bwrap 的 `--bind` 只继承源挂载的 ro，所以本进程只读 = 沙盒里必然只读。
+        for (path, mp) in rw_grants_blocked_by_ro_mount(&fresh) {
+            tracing::warn!(
+                path = %path.display(),
+                mount = %mp.display(),
+                "授权标了 rw，但它所在的挂载在本进程里是只读：bwrap 只能继承 ro，沙盒里写入会 EROFS。\
+                 可写路径必须同时写进服务单元的 ReadWritePaths（改 unit 后要 daemon-reload + restart），\
+                 或者确认该挂载本身不是 ro"
+            );
+        }
         *st = (mtime, fresh.clone());
         fresh
     }
@@ -671,6 +797,63 @@ snapshot = "dpkg"
         assert_eq!(gr.snapshot.as_deref(), Some("dpkg"));
         // 不是前缀就不匹配（remove 不能借用 install 的授权）
         assert!(g.match_argv(&["/usr/bin/apt-get".into(), "remove".into()]).is_none());
+    }
+
+    #[test]
+    fn mountinfo_view_picks_longest_prefix() {
+        // 第 2 行是 2026-11-16 板上的实际形态：超级块 rw、挂载级 ro
+        let text = "\
+36 35 98:0 / / rw,relatime shared:1 - ext4 /dev/root rw
+37 36 0:42 / /proc ro,nosuid - proc proc rw
+38 36 0:63 / /mnt/nas rw,relatime - cifs //h/s rw
+39 38 0:63 / /mnt/nas/sub ro,relatime - cifs //h/s rw
+40 36 0:64 / /mnt/with\\040space rw - tmpfs tmpfs rw
+";
+        let m = parse_mountinfo(text);
+        let at = |s: &str| {
+            covering_mount_in(Path::new(s), &m).map(|x| (x.mountpoint.clone(), x.ro))
+        };
+        assert_eq!(at("/etc/hosts"), Some((PathBuf::from("/"), false)));
+        assert_eq!(at("/proc/2/status"), Some((PathBuf::from("/proc"), true)));
+        assert_eq!(at("/mnt/nas/a/b"), Some((PathBuf::from("/mnt/nas"), false)));
+        // 子挂载 ro 时按最长前缀走它自己，而不是父挂载的 rw
+        assert_eq!(at("/mnt/nas/sub/x"), Some((PathBuf::from("/mnt/nas/sub"), true)));
+        // 转义的空格要还原，否则路径永远对不上
+        assert_eq!(at("/mnt/with space/f"), Some((PathBuf::from("/mnt/with space"), false)));
+        // 前缀必须按分量算：/mnt/nasx 不属于 /mnt/nas
+        assert_eq!(at("/mnt/nasx"), Some((PathBuf::from("/"), false)));
+    }
+
+    #[test]
+    fn rw_grant_blocked_by_ro_mount_is_reported() {
+        let g = from_toml(
+            r#"
+[host.path]
+"/mnt/nas" = { mode = "rw" }
+"/var/lib/chuan/timers" = { mode = "rw" }
+"/usr" = { mode = "ro" }
+"#,
+        )
+        .unwrap();
+        let mounts = parse_mountinfo(
+            "\
+1 0 0:1 / / rw - ext4 /dev/root rw
+2 1 0:2 / /mnt/nas ro - cifs //nas/share rw
+",
+        );
+        let blocked = blocked_in(&g, &mounts);
+        assert_eq!(blocked.len(), 1, "只有 /mnt/nas 该被报出来：{blocked:?}");
+        assert_eq!(blocked[0].0, PathBuf::from("/mnt/nas"));
+        assert_eq!(blocked[0].1, PathBuf::from("/mnt/nas"));
+
+        // 同上路径改回 rw 挂载 → 不该再报（否则每次启动都刷假警报）
+        let rw = parse_mountinfo(
+            "\
+1 0 0:1 / / rw - ext4 /dev/root rw
+2 1 0:2 / /mnt/nas rw - cifs //nas/share rw
+",
+        );
+        assert!(blocked_in(&g, &rw).is_empty());
     }
 
     #[test]
