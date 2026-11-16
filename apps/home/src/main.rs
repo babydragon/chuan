@@ -323,6 +323,8 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     );
 
     std::fs::create_dir_all(&cfg.workspace)?;
+    // 上次异常退出可能留下技能网关的 socket 目录（D41）：超过 1 小时的清掉。
+    harness_capabilities::GatewaySession::sweep(&cfg.workspace);
     std::fs::create_dir_all(&cfg.media_dir)?;
     std::fs::create_dir_all(&cfg.library_dir)?;
     let gc = workspace_gc::sweep_now(
@@ -482,7 +484,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             cfg.config_dir.join("services.d"),
             cfg.config_dir.join("secrets"),
             Arc::clone(&mcp),
-            http_svc,
+            Arc::clone(&http_svc),
         )
         .with_proxy(cfg.proxy.clone()),
     );
@@ -508,10 +510,14 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             &cfg.runtime_dir,
         ));
     tools.register(Arc::new(
-        RunSkillTool::new(Arc::clone(&skills)).with_network(Arc::clone(&skill_net_env)),
+        RunSkillTool::new(Arc::clone(&skills))
+            .with_network(Arc::clone(&skill_net_env))
+            .with_services(Arc::clone(&http_svc)),
     ));
     tools.register(Arc::new(
-        PublishSkillTool::new(Arc::clone(&skills)).with_network(Arc::clone(&skill_net_env)),
+        PublishSkillTool::new(Arc::clone(&skills))
+            .with_network(Arc::clone(&skill_net_env))
+            .with_services(Arc::clone(&http_svc)),
     ));
     tools.register(Arc::new(RollbackSkillTool::new(Arc::clone(&skills))));
     // 子 agent 委托（D19）。tier=1：子 agent 的工具集里没有它。

@@ -193,6 +193,39 @@ require_approval = []
 #      upload_from="dir/file.pdf", headers={"File-Path": "/dir/file.pdf"})
 ```
 
+### 让技能调用有鉴权的服务（D41）
+
+技能脚本**不拿密码、也不开网卡**：`run_skill` 在宿主侧为本次执行起一个 unix socket，
+脚本按一行 JSON 的协议请求，宿主校验后注入凭据、代发、留痕。三张白名单缺一不可：
+
+```toml
+# [services.router]
+# base = "http://192.0.2.1"
+# token_file = "~/.config/chuan/secrets/router_admin"   # 一行 base64("user:password") 或令牌
+# header = "X-Auth: Basic {token}"                       # 宿主注入；脚本设不了鉴权头
+# extra_headers = [["Content-Type", "text/plain"]]
+# expose_to_skills = true
+# allow_methods = ["POST"]
+# allow_paths = ["/api/"]                                # 以 / 结尾 = 前缀匹配
+# [services.router.header_allow]
+# "X-Action" = ["GetStatus", "SetWifi"]                  # 动作白名单；表外拒绝
+```
+
+技能侧：`skill.json` 写 `"services": ["router"]`，脚本从 stdin 的 `_gateway` 取 socket 路径：
+
+```json
+{"method":"POST","path":"/api/","headers":{"X-Action":"GetStatus"},"body":{}}
+```
+
+宿主回一行 `{"status":200,"body":"…"}`；被拒时回 `{"error":"…"}`。约束：
+`network: true` 与 `services` 互斥；每服务每次执行最多 64 次转发、请求体 ≤64KB、
+响应 ≤1MB、单请求 20s。**删除服务即收回入口**。
+
+这套配置不必手写：让 agent 用 `service` 工具提出，审批卡会列出
+「目的地 / 方法 / 路径 / 可设置的头（动作）/ 凭据文件」；批准后立即生效并写入
+`services.d/<name>.toml`，重启不丢。安装技能时 `publish_skill` 的 `services` 参数
+必须与 `skill.json` 一致，卡上同样会列出这份清单。
+
 ## 定时任务（提醒）的三种形态
 
 `remind` 建的是"到点做什么"，形态由参数决定，**优先级 `message` > `skill` > `text`**：

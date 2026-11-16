@@ -108,7 +108,14 @@ impl ServiceTool {
         if http.is_empty() {
             out.push_str("HTTP 服务：无\n");
         } else {
-            out.push_str(&format!("HTTP 服务：{}\n", http.join("、")));
+            let listed: Vec<String> = http
+                .iter()
+                .map(|n| match self.http.get(n) {
+                    Some(s) if s.expose_to_skills => format!("{n}（技能可用）"),
+                    _ => n.clone(),
+                })
+                .collect();
+            out.push_str(&format!("HTTP 服务：{}\n", listed.join("、")));
         }
         out.push_str(&format!("配置文件目录：{}", self.dir.display()));
         out
@@ -140,6 +147,114 @@ struct HttpExtra<'a> {
     query: Option<&'a std::collections::BTreeMap<String, String>>,
     body: Option<&'a std::collections::BTreeMap<String, String>>,
     sign: Option<&'a crate::auth::SignConfig>,
+    extra_headers: Vec<(String, String)>,
+    /// 技能网关授权（D41）。`None` = 不写；`Some(false)` 也显式写出来，
+    /// 防止同名旧片段残留"已开放"的状态。
+    expose_to_skills: Option<bool>,
+    allow_methods: Vec<String>,
+    allow_paths: Vec<String>,
+    header_allow: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// 技能网关相关参数的解析与校验（`service` 工具与审批卡共用一套）。
+type GatewayArgs = (
+    bool,
+    Vec<String>,
+    Vec<String>,
+    std::collections::BTreeMap<String, Vec<String>>,
+);
+
+fn parse_gateway_args(args: &serde_json::Value) -> Result<GatewayArgs, String> {
+    use std::collections::BTreeMap;
+    let expose = args.get("expose_to_skills").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut methods: Vec<String> = args
+        .get("allow_methods")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.as_str())
+                .map(|m| m.trim().to_ascii_uppercase())
+                .filter(|m| !m.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let paths: Vec<String> = args
+        .get("allow_paths")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.as_str())
+                .map(|p| p.trim().to_owned())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let header_allow: BTreeMap<String, Vec<String>> = args
+        .get("header_allow")
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| {
+                    let vals: Vec<String> = v
+                        .as_array()?
+                        .iter()
+                        .filter_map(|x| x.as_str())
+                        .map(|x| x.trim().to_owned())
+                        .filter(|x| !x.is_empty())
+                        .collect();
+                    if vals.is_empty() {
+                        None
+                    } else {
+                        Some((k.trim().to_owned(), vals))
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !expose {
+        if !methods.is_empty() || !paths.is_empty() || !header_allow.is_empty() {
+            return Err(
+                "allow_methods / allow_paths / header_allow 只在 expose_to_skills = true 时有效；\
+                 不想开放就别写它们（别留一份看起来开放的清单）"
+                    .into(),
+            );
+        }
+        return Ok((false, methods, paths, header_allow));
+    }
+
+    methods.sort();
+    methods.dedup();
+    if methods.is_empty() || paths.is_empty() {
+        return Err("expose_to_skills = true 时必须同时给出非空的 allow_methods 与 allow_paths".into());
+    }
+    for m in &methods {
+        if !matches!(m.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+            return Err(format!("allow_methods 里有不支持的方法：{m}"));
+        }
+    }
+    for p in &paths {
+        if !p.starts_with('/') || p.contains("://") || p.contains("..") || p.contains(char::is_whitespace) {
+            return Err(format!("allow_paths 里的 `{p}` 不合法：必须以 / 开头，且不含协议、.. 或空白"));
+        }
+    }
+    for name in header_allow.keys() {
+        let l = name.trim().to_ascii_lowercase();
+        if matches!(
+            l.as_str(),
+            "authorization"
+                | "proxy-authorization"
+                | "cookie"
+                | "set-cookie"
+                | "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+        ) {
+            return Err(format!("header_allow 里不允许 `{name}`：鉴权与长度由宿主决定"));
+        }
+    }
+    Ok((true, methods, paths, header_allow))
 }
 
 /// 用 JSON 的转义规则写 TOML 基本字符串：两者的 \\ \" \n 语义一致。
@@ -178,6 +293,14 @@ fn write_fragment(
     if let Some(k) = extra.token_key {
         s.push_str(&format!("token_key = {}\n", q(k)));
     }
+    if !extra.extra_headers.is_empty() {
+        let pairs: Vec<String> = extra
+            .extra_headers
+            .iter()
+            .map(|(k, v)| format!("[{}, {}]", q(k), q(v)))
+            .collect();
+        s.push_str(&format!("extra_headers = [{}]\n", pairs.join(", ")));
+    }
     if let Some(m) = extra.query {
         if !m.is_empty() {
             s.push_str(&format!("query = {}\n", inline_table(m)));
@@ -186,6 +309,34 @@ fn write_fragment(
     if let Some(m) = extra.body {
         if !m.is_empty() {
             s.push_str(&format!("body = {}\n", inline_table(m)));
+        }
+    }
+    // 顶层标量/数组必须在任何 `[table]` 之前写完，否则会被 TOML 归到上一个表里。
+    if let Some(expose) = extra.expose_to_skills {
+        s.push_str(&format!(
+            "expose_to_skills = {}\n",
+            if expose { "true" } else { "false" }
+        ));
+        if expose {
+            let list = |v: &[String]| {
+                v.iter().map(|x| q(x)).collect::<Vec<_>>().join(", ")
+            };
+            s.push_str(&format!("allow_methods = [{}]\n", list(&extra.allow_methods)));
+            s.push_str(&format!("allow_paths = [{}]\n", list(&extra.allow_paths)));
+        }
+    }
+    if !tools.is_empty() {
+        let list: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
+        s.push_str(&format!("tools = [{}]\n", list.join(", ")));
+    }
+    if let Some(c) = catalog {
+        s.push_str(&format!("catalog = \"{c}\"\n"));
+    }
+    if !extra.header_allow.is_empty() {
+        s.push_str("\n[header_allow]\n");
+        for (k, vals) in &extra.header_allow {
+            let list = vals.iter().map(|v| q(v)).collect::<Vec<_>>().join(", ");
+            s.push_str(&format!("{k} = [{list}]\n"));
         }
     }
     if let Some(sign) = extra.sign {
@@ -200,13 +351,6 @@ fn write_fragment(
             crate::auth::Encode::Hex => "hex",
         };
         s.push_str(&format!("encode = \"{enc}\"\n"));
-    }
-    if !tools.is_empty() {
-        let list: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
-        s.push_str(&format!("tools = [{}]\n", list.join(", ")));
-    }
-    if let Some(c) = catalog {
-        s.push_str(&format!("catalog = \"{c}\"\n"));
     }
     let path = dir.join(format!("{name}.toml"));
     // 覆盖前备份（保留 5 版），写入走原子替换：断电不留半截 TOML
@@ -223,6 +367,8 @@ impl Tool for ServiceTool {
             description: "在运行时添加/删除第三方服务（`kind=http|mcp`）。\
 主人只负责把 key 放进凭据文件；**写配置、连接、试调由你来做**。\
 加完立刻可用（不用重启），并写入 services.d/ 供下次启动加载。\
+要让**技能脚本**也能调用它，加 `expose_to_skills = true` 与 `allow_methods` / `allow_paths` / \
+`header_allow`（技能看不到凭据，只能发清单内的请求；审批卡会列出整份清单）。\
 加 MCP 服务会当场握手，失败会返回原因，按原因改参数再 add 一次即可。"
                 .into(),
             parameters: serde_json::json!({
@@ -266,6 +412,30 @@ impl Tool for ServiceTool {
                         },
                         "description": "HMAC-SHA256 签名（webhook 加签）"
                     },
+                    "extra_headers": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "固定请求头（如 Content-Type），字面值、不做模板替换。鉴权头请用 header"
+                    },
+                    "expose_to_skills": {
+                        "type": "boolean",
+                        "description": "是否允许技能经宿主网关调用（默认 false）。打开后技能只能发 allow_methods / allow_paths / header_allow 允许的请求；凭据仍由宿主注入，技能看不到"
+                    },
+                    "allow_methods": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "技能可用的 HTTP 方法（GET/POST/PUT/PATCH/DELETE）。expose_to_skills=true 时必须非空"
+                    },
+                    "allow_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "技能可用的路径（以 / 结尾按前缀匹配，否则精确匹配），如 [\"/JNAP/\"]"
+                    },
+                    "header_allow": {
+                        "type": "object",
+                        "additionalProperties": { "type": "array", "items": { "type": "string" } },
+                        "description": "技能可设置的请求头及允许取值（名字不区分大小写，取值精确匹配），如 {\"X-JNAP-Action\": [\"GetDeviceInfo\"]}"
+                    },
                     "tools": {
                         "type": "array", "items": { "type": "string" },
                         "description": "MCP：只暴露这些工具（可选）"
@@ -284,6 +454,53 @@ impl Tool for ServiceTool {
     fn domain(&self) -> harness_kernel::Domain {
         // 改配置 + 建立对外连接：属于"改自身"
         harness_kernel::Domain::SelfModify
+    }
+
+    /// 审批卡必须让人看清"批准之后技能能打到什么"（D41）：
+    /// 目的地、方法、路径、可设置的头（动作）、凭据文件都写出来。
+    fn approval_hint(&self, args: &serde_json::Value) -> Option<String> {
+        let action = args.get("action")?.as_str()?;
+        if action == "remove" {
+            let name = args.get("name")?.as_str()?;
+            return Some(format!(
+                "删除服务 `{name}`：技能对这个服务的入口会一并收回，之后的请求会直接失败"
+            ));
+        }
+        if action != "add" {
+            return None;
+        }
+        let name = args.get("name")?.as_str()?;
+        let base = args.get("base")?.as_str()?;
+        let mut out = format!("接入服务 `{name}` → {base}\n");
+        if let Some(t) = args.get("token_file").and_then(|v| v.as_str()) {
+            out.push_str(&format!("凭据文件：{t}\n"));
+        }
+        if let Some(h) = args.get("header").and_then(|v| v.as_str()) {
+            if !h.trim().is_empty() {
+                out.push_str(&format!("鉴权头模板：{h}\n"));
+            }
+        }
+        match parse_gateway_args(args) {
+            Err(e) => out.push_str(&format!("\n⚠️ 技能网关参数不合法（执行会失败）：{e}")),
+            Ok((false, _, _, _)) => {
+                out.push_str("\n只有模型能用 http 工具调用；技能拿不到入口。")
+            }
+            Ok((true, methods, paths, header_allow)) => {
+                let svc = crate::services::Service {
+                    name: name.to_owned(),
+                    base: base.to_owned(),
+                    expose_to_skills: true,
+                    allow_methods: methods,
+                    allow_paths: paths,
+                    header_allow,
+                    ..Default::default()
+                };
+                out.push_str("\n批准后，技能可以调用它（且仅限下面这些）：\n");
+                out.push_str(&svc.skill_grant());
+                out.push_str("\n\n生效后写入 services.d/，重启不丢；删掉服务即收回。");
+            }
+        }
+        Some(out)
     }
 
     async fn execute(
@@ -457,6 +674,29 @@ impl Tool for ServiceTool {
                     .unwrap_or_default();
                 let catalog = args.get("catalog").and_then(|v| v.as_str()).map(str::to_owned);
 
+                let extra_headers: Vec<(String, String)> = args
+                    .get("extra_headers")
+                    .and_then(|v| v.as_object())
+                    .map(|o| {
+                        o.iter()
+                            .filter_map(|(k, v)| {
+                                v.as_str().map(|v| (k.trim().to_owned(), v.trim().to_owned()))
+                            })
+                            .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let (expose, allow_methods, allow_paths, header_allow) =
+                    parse_gateway_args(&args)
+                        .map_err(|e| ToolError::new(ErrorCode::InvalidArgs, e, false))?;
+                if kind == "mcp" && expose {
+                    return Err(ToolError::new(
+                        ErrorCode::InvalidArgs,
+                        "expose_to_skills 只支持 HTTP 服务（MCP 的 tools/list 已经在协议层管住）",
+                        false,
+                    ));
+                }
+
                 match kind {
                     "mcp" => {
                         let server = McpServer::new(
@@ -516,13 +756,17 @@ impl Tool for ServiceTool {
                             header: header.clone().unwrap_or_else(|| {
                                 "Authorization: Bearer {token}".into()
                             }),
-                            extra_headers: Vec::new(),
+                            extra_headers: extra_headers.clone(),
                             token_key: token_key.clone(),
                             query: query.clone(),
                             body: body.clone(),
                             sign: sign.clone(),
                             redirect_hosts: Vec::new(),
                             redirect_rules: Vec::new(),
+                            expose_to_skills: expose,
+                            allow_methods: allow_methods.clone(),
+                            allow_paths: allow_paths.clone(),
+                            header_allow: header_allow.clone(),
                         };
                         // 探活：至少证明 DNS/TLS/端点能通（不看状态码，API 常对 HEAD/根路径回 404）
                         let probe = self.http.probe(&svc).await;
@@ -545,6 +789,11 @@ impl Tool for ServiceTool {
                                 query: Some(&query),
                                 body: Some(&body),
                                 sign: sign.as_ref(),
+                                extra_headers: extra_headers.clone(),
+                                expose_to_skills: Some(expose),
+                                allow_methods: allow_methods.clone(),
+                                allow_paths: allow_paths.clone(),
+                                header_allow: header_allow.clone(),
                             },
                         );
                         let body = match &saved {
@@ -562,7 +811,13 @@ impl Tool for ServiceTool {
                                 &name,
                                 "add",
                                 &body,
-                                serde_json::json!({ "base": base, "kind": kind }),
+                                serde_json::json!({
+                                    "base": base,
+                                    "kind": kind,
+                                    "expose_to_skills": expose,
+                                    "allow_methods": allow_methods,
+                                    "allow_paths": allow_paths,
+                                }),
                             )],
                             artifacts: Vec::new(),
                         })
@@ -621,5 +876,142 @@ mod tests {
         assert!(text.contains("kind = \"mcp\""));
         assert!(text.contains("base = \"https://mcp.dida365.com\""));
         assert!(text.contains("tools = [\"create_task\"]"));
+    }
+
+    /// 技能网关授权必须写进 services.d 片段，并且能被 `ServiceFile` 重新解析
+    /// ——"重启不丢"就是这条（D41）。
+    #[test]
+    fn gateway_grant_survives_restart() {
+        #[derive(serde::Deserialize)]
+        struct Frag {
+            base: String,
+            extra_headers: Vec<(String, String)>,
+            expose_to_skills: bool,
+            allow_methods: Vec<String>,
+            allow_paths: Vec<String>,
+            header_allow: std::collections::BTreeMap<String, Vec<String>>,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let methods = vec!["POST".to_string()];
+        let paths = vec!["/JNAP/".to_string()];
+        let headers = std::collections::BTreeMap::from([(
+            "X-JNAP-Action".to_owned(),
+            vec!["GetDeviceInfo".to_owned()],
+        )]);
+        let p = write_fragment(
+            dir.path(),
+            "velop",
+            "http",
+            "http://10.84.1.1",
+            Some("~/.config/chuan/secrets/velop_auth"),
+            Some("X-JNAP-Authorization: Basic {token}"),
+            &[],
+            None,
+            HttpExtra {
+                extra_headers: vec![("Content-Type".into(), "text/plain".into())],
+                expose_to_skills: Some(true),
+                allow_methods: methods.clone(),
+                allow_paths: paths.clone(),
+                header_allow: headers.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let f: Frag = toml::from_str(&text).unwrap();
+        assert_eq!(f.base, "http://10.84.1.1");
+        assert_eq!(f.extra_headers, vec![("Content-Type".to_string(), "text/plain".to_string())]);
+        assert!(f.expose_to_skills);
+        assert_eq!(f.allow_methods, methods);
+        assert_eq!(f.allow_paths, paths);
+        assert_eq!(f.header_allow, headers);
+        // 顶层键必须在任何 [table] 之前，否则会被归到上一个表里
+        assert!(text.find("allow_paths").unwrap() < text.find("[header_allow]").unwrap());
+    }
+
+    #[test]
+    fn gateway_args_fail_closed() {
+        // 只给 allow_* 却没打开 expose：拒绝，避免"看起来开放"
+        let err = parse_gateway_args(&serde_json::json!({
+            "allow_methods": ["POST"], "allow_paths": ["/JNAP/"]
+        }))
+        .unwrap_err();
+        assert!(err.contains("expose_to_skills = true"), "{err}");
+        // 打开了却给空白名单：拒绝，不能退化成"全放开"
+        let err = parse_gateway_args(&serde_json::json!({
+            "expose_to_skills": true, "allow_methods": ["POST"]
+        }))
+        .unwrap_err();
+        assert!(err.contains("非空"), "{err}");
+        // 鉴权头不能由技能设置
+        let err = parse_gateway_args(&serde_json::json!({
+            "expose_to_skills": true,
+            "allow_methods": ["POST"],
+            "allow_paths": ["/JNAP/"],
+            "header_allow": {"Authorization": ["x"]}
+        }))
+        .unwrap_err();
+        assert!(err.contains("不允许"), "{err}");
+    }
+
+    /// 审批卡本身：`service add` 时，主人必须能在一屏里看清
+    /// 目的地 / 方法 / 路径 / 动作 / 凭据文件，且**看不到凭据值**（D41）。
+    #[test]
+    fn approval_card_shows_gateway_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let http = HttpServiceTool::new(vec![], dir.path().join("net.jsonl")).unwrap();
+        let tool = ServiceTool::new(
+            dir.path().join("services.d"),
+            dir.path().join("secrets"),
+            McpHub::new(vec![]),
+            http,
+        );
+        let args = serde_json::json!({
+            "action": "add",
+            "name": "velop",
+            "base": "http://10.84.1.1",
+            "token_file": "~/.config/chuan/secrets/velop_admin",
+            "header": "X-JNAP-Authorization: Basic {token}",
+            "extra_headers": { "Content-Type": "text/plain" },
+            "expose_to_skills": true,
+            "allow_methods": ["POST"],
+            "allow_paths": ["/JNAP/"],
+            "header_allow": { "X-JNAP-Action": ["GetDeviceInfo"] },
+            "_approval": { "why": "读路由器状态", "impact": "向设备发指令" }
+        });
+        let text = tool.approval_hint(&args).expect("add 必须给卡");
+        for needle in [
+            "http://10.84.1.1",
+            "POST",
+            "/JNAP/",
+            "X-JNAP-Action",
+            "GetDeviceInfo",
+            "velop_admin",
+            "X-JNAP-Authorization",
+            "重启不丢",
+        ] {
+            assert!(text.contains(needle), "卡上缺少 {needle}：\n{text}");
+        }
+        assert!(!text.contains("YWRtaW4"), "卡上不能出现凭据值：\n{text}");
+    }
+
+    /// 审批卡的核心字段：目的地、方法、路径、动作、凭据来源（D41）。
+    #[test]
+    fn grant_summary_lists_core_fields() {        let svc = crate::services::Service {
+            name: "velop".into(),
+            base: "http://10.84.1.1".into(),
+            expose_to_skills: true,
+            allow_methods: vec!["POST".into()],
+            allow_paths: vec!["/JNAP/".into()],
+            header_allow: std::collections::BTreeMap::from([(
+                "X-JNAP-Action".to_owned(),
+                vec!["GetDeviceInfo".to_owned()],
+            )]),
+            ..Default::default()
+        };
+        let text = svc.skill_grant();
+        for needle in ["velop", "http://10.84.1.1", "POST", "/JNAP/", "X-JNAP-Action", "宿主注入"] {
+            assert!(text.contains(needle), "缺少 {needle}：{text}");
+        }
     }
 }

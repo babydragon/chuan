@@ -558,6 +558,19 @@ pub trait ExecutionEnv: Send + Sync {
 沙盒的默认 lane 永不联网；外部数据有两条路：宿主 `web_fetch` 代取（拒绝内网/回环、逐次审计），
 或技能声明 `network: true` 走独立联网 lane（`lan_exec` 同款）。凭据由宿主注入，不进上下文。
 
+**技能服务网关（D41）**：技能需要调有鉴权的命名服务时，声明 `skill.json.services`；
+`run_skill` 在 `/ws/.g/<id>/` 下为每个服务建一个 unix socket，路径通过 stdin 的 `_gateway`
+传给脚本。协议是一行 JSON：
+
+```json
+{"method":"POST","path":"/JNAP/","headers":{"X-Action":"GetStatus"},"body":{}}
+{"status":200,"body":"…"}
+{"error":"…"}
+```
+
+目的地、鉴权头、固定头与三张白名单（method / path / header 取值）都来自 `[services.*]`；
+`network: true` 与 `services` 互斥。socket 随执行创建与删除，不跨执行复用。
+
 ### 6.3 子 agent（委托）
 
 契约见 `DECISIONS.md` D19（形态与约束）、D20（记账与闸门）。内核只提供**派生与回传**，不做调度策略。

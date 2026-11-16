@@ -147,6 +147,18 @@ pub struct ServiceFile {
     /// 跟随重定向时按**目标主机**补的静态头（百度 >20MB 要 `User-Agent: pan.baidu.com`）
     #[serde(default)]
     pub redirect: Vec<RedirectRuleFile>,
+    /// 技能网关（D41）：是否允许技能调用这个服务。默认 false。
+    #[serde(default)]
+    pub expose_to_skills: bool,
+    /// 技能可用的 HTTP 方法（空 = 不开放）
+    #[serde(default)]
+    pub allow_methods: Vec<String>,
+    /// 技能可用的路径（以 / 结尾按前缀匹配）
+    #[serde(default)]
+    pub allow_paths: Vec<String>,
+    /// 技能可设置的请求头及取值白名单
+    #[serde(default)]
+    pub header_allow: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -1232,6 +1244,10 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
                         headers: r.headers.clone(),
                     })
                     .collect(),
+                expose_to_skills: s.expose_to_skills,
+                allow_methods: s.allow_methods.clone(),
+                allow_paths: s.allow_paths.clone(),
+                header_allow: s.header_allow.clone(),
             })
             .collect(),
         library_dir: file

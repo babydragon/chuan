@@ -31,6 +31,10 @@ pub struct SkillManifest {
     pub timeout_ms: u64,
     #[serde(default)]
     pub network: bool,
+    /// 申请经宿主网关调用的命名服务（D41）。与 `network: true` 互斥：
+    /// 两者同时出现等于"有网卡 + 有凭据入口"，正是要避免的组合。
+    #[serde(default)]
+    pub services: Vec<String>,
     /// 冒烟样例：dry-run 全过才允许落盘。没有样例的技能不允许安装。
     #[serde(default)]
     pub examples: Vec<Example>,
@@ -177,16 +181,24 @@ pub struct RunSkillTool {
     catalog: Arc<SkillCatalog>,
     /// 声明 `network: true` 的技能走这里；没有配置就明确报错，不静默降级
     net_env: Option<Arc<dyn ExecutionEnv>>,
+    /// 技能声明 `services` 时，用宿主网关把请求转给已批准的命名服务（D41）。
+    http: Option<Arc<crate::services::HttpServiceTool>>,
 }
 
 impl RunSkillTool {
     pub fn new(catalog: Arc<SkillCatalog>) -> Self {
-        Self { catalog, net_env: None }
+        Self { catalog, net_env: None, http: None }
     }
 
     /// 给需要联网的技能准备一条带网卡的执行环境。
     pub fn with_network(mut self, env: Arc<dyn ExecutionEnv>) -> Self {
         self.net_env = Some(env);
+        self
+    }
+
+    /// 给声明 `services` 的技能接上宿主网关。
+    pub fn with_services(mut self, http: Arc<crate::services::HttpServiceTool>) -> Self {
+        self.http = Some(http);
         self
     }
 }
@@ -230,6 +242,7 @@ impl Tool for RunSkillTool {
             ToolError::new(ErrorCode::NotFound, format!("未知技能 {name}"), false)
         })?;
         let payload = args.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mut payload = payload;
 
         // 必填参数校验
         if let Some(required) = manifest.params.get("required").and_then(|v| v.as_array()) {
@@ -242,6 +255,60 @@ impl Tool for RunSkillTool {
                     ));
                 }
             }
+        }
+
+        // 有网卡 + 有凭据入口是危险组合（D41）：只能选一条。
+        if manifest.network && !manifest.services.is_empty() {
+            return Err(ToolError::new(
+                ErrorCode::NotPermitted,
+                format!(
+                    "技能 {} 同时声明了 network=true 与 services：有网卡就不该再拿服务入口，\
+                     请改成只申请 services",
+                    manifest.name
+                ),
+                false,
+            ));
+        }
+
+        // 声明了服务：本次执行期间在 /ws 下起 unix socket，凭据留在宿主。
+        let gateway = if manifest.services.is_empty() {
+            None
+        } else {
+            let http = self.http.as_ref().ok_or_else(|| {
+                ToolError::new(
+                    ErrorCode::Unavailable,
+                    format!("技能 {} 申请了服务，但宿主没有装配服务网关", manifest.name),
+                    false,
+                )
+            })?;
+            Some(
+                crate::skill_gateway::GatewaySession::start(
+                    Arc::clone(http),
+                    &manifest.services,
+                    &ctx.workspace.root,
+                )
+                .await
+                .map_err(|e| {
+                    ToolError::new(
+                        ErrorCode::Unavailable,
+                        format!("技能服务网关启动失败：{e}"),
+                        false,
+                    )
+                })?,
+            )
+        };
+        if let Some(gw) = &gateway {
+            let Some(obj) = payload.as_object_mut() else {
+                return Err(ToolError::new(
+                    ErrorCode::InvalidArgs,
+                    "申请了服务的技能，参数必须是 JSON 对象（网关地址放在 _gateway）",
+                    false,
+                ));
+            };
+            obj.insert(
+                "_gateway".into(),
+                serde_json::to_value(gw.endpoints()).unwrap_or_default(),
+            );
         }
 
         let entry = format!("/skills/{}/{}", manifest.name, manifest.entry);
@@ -369,15 +436,22 @@ pub struct PublishSkillTool {
     catalog: Arc<SkillCatalog>,
     /// 技能声明 network=true 时，dry-run 走联网环境（批准安装即批准它出网）
     net_env: Option<Arc<dyn ExecutionEnv>>,
+    /// 技能申请 `services` 时，用来核对"服务确实已对技能开放"（D41）。
+    http: Option<Arc<crate::services::HttpServiceTool>>,
 }
 
 impl PublishSkillTool {
     pub fn new(catalog: Arc<SkillCatalog>) -> Self {
-        Self { catalog, net_env: None }
+        Self { catalog, net_env: None, http: None }
     }
 
     pub fn with_network(mut self, env: Arc<dyn ExecutionEnv>) -> Self {
         self.net_env = Some(env);
+        self
+    }
+
+    pub fn with_services(mut self, http: Arc<crate::services::HttpServiceTool>) -> Self {
+        self.http = Some(http);
         self
     }
 
@@ -532,7 +606,12 @@ impl Tool for PublishSkillTool {
                         },
                         "required": ["why", "impact"]
                     },
-                    "name": { "type": "string", "description": "技能名，需与 skill.json 的 name 一致" }
+                    "name": { "type": "string", "description": "技能名，需与 skill.json 的 name 一致" },
+                    "services": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "申请经宿主网关调用的服务名，必须与 skill.json 的 services 完全一致；审批卡会列出每个服务允许的方法、路径与动作"
+                    }
                 },
                 "required": ["name"]
             }),
@@ -561,7 +640,23 @@ impl Tool for PublishSkillTool {
         } else {
             "首次安装"
         };
-        Some(format!("安装技能 `{name}` · {what}\n会先跑 examples 验收，不过就装不进去"))
+        let mut out = format!("安装技能 `{name}` · {what}\n会先跑 examples 验收，不过就装不进去");
+        // 服务授权必须出现在卡上（D41）：这是"技能能打到什么"的唯一来源。
+        let requested: Vec<&str> = args
+            .get("services")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+        if !requested.is_empty() {
+            out.push_str("\n\n本技能申请的服务入口：");
+            for svc_name in requested {
+                match self.http.as_ref().and_then(|h| h.get(svc_name)) {
+                    Some(svc) => out.push_str(&format!("\n{}", svc.skill_grant())),
+                    None => out.push_str(&format!("\n服务 `{svc_name}`（未配置或未开放）")),
+                }
+            }
+        }
+        Some(out)
     }
 
     async fn execute(
@@ -604,6 +699,57 @@ impl Tool for PublishSkillTool {
                 format!("skill.json 的 name={} 与参数 {name} 不一致", manifest.name),
                 false,
             ));
+        }
+
+        // 服务授权（D41）：skill.json 声明什么，审批卡就展示什么；参数必须与它一致，
+        // 防止"卡上看到的"和"实际装进去的"不是同一份清单。
+        let mut requested: Vec<String> = args
+            .get("services")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        let mut declared = manifest.services.clone();
+        requested.sort();
+        declared.sort();
+        if requested != declared {
+            return Err(ToolError::new(
+                ErrorCode::InvalidArgs,
+                format!(
+                    "services 参数（{}）与 skill.json 的 services（{}）不一致：审批卡必须显示真实清单",
+                    if requested.is_empty() { "空".to_owned() } else { requested.join("、") },
+                    if declared.is_empty() { "空".to_owned() } else { declared.join("、") }
+                ),
+                false,
+            ));
+        }
+        if manifest.network && !manifest.services.is_empty() {
+            return Err(ToolError::new(
+                ErrorCode::NotPermitted,
+                "network=true 与 services 不能同时声明：有网卡就不该再拿服务入口".to_string(),
+                false,
+            ));
+        }
+        if !manifest.services.is_empty() {
+            let http = self.http.as_ref().ok_or_else(|| {
+                ToolError::new(ErrorCode::Unavailable, "宿主没有装配服务网关", false)
+            })?;
+            for svc_name in &manifest.services {
+                let svc = http.get(svc_name).ok_or_else(|| {
+                    ToolError::new(
+                        ErrorCode::NotPermitted,
+                        format!("技能申请的服务 `{svc_name}` 没有配置"),
+                        false,
+                    )
+                })?;
+                if !svc.expose_to_skills || svc.allow_methods.is_empty() || svc.allow_paths.is_empty()
+                {
+                    return Err(ToolError::new(
+                        ErrorCode::NotPermitted,
+                        format!("服务 `{svc_name}` 还没有对技能开放（需要主人批准）"),
+                        false,
+                    ));
+                }
+            }
         }
         if !INTERPRETERS.contains(&manifest.interpreter.as_str()) {
             return Err(ToolError::new(
@@ -675,6 +821,7 @@ impl Tool for PublishSkillTool {
                     "interpreter": manifest.interpreter,
                     "examples": n,
                     "network": manifest.network,
+                    "services": manifest.services,
                 }),
             )],
             artifacts: Vec::new(),

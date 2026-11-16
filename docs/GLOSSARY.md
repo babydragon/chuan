@@ -92,6 +92,7 @@
 | **授权表** | Grant table | 三份数据：`[host.path]` / `[[host_elevated.grant]]`（**人手写**）+ `commands.d/`（**内核在批准后写**）；都按 mtime 热加载、fail-closed | 权限配置、白名单（泛指） |
 | **命令条目** | Command Entry / `CommandEntry` | 一条"执行环境 + argv 模板 + 封闭参数域 + `who`"的声明；写进表即免审批（D31），名字即文件名 | 动作、白名单项、脚本 |
 | **命令条目表** | Command Table / `commands.d/` | 一文件一条的条目目录；内核在主人批准后写入，单条解析失败只废该条（D31） | 动作表、权限配置 |
+| **服务网关** | Service Gateway / `services` | 技能经 unix socket 调一个**已批准**的命名服务：目标、方法、路径、动作白名单与凭据都在宿主侧，技能只给 method/path/白名单内的头/JSON 体（D41） | 出口代理、透明代理、反向代理 |
 | **临时挂载** | Ephemeral mount / `grant[]` | 随一次调用带出的额外**只读**路径，不落盘、不可为 `rw` | 临时授权、临时允许 |
 | **结构化拒绝** | `NotGranted` | 越界时返回：缺哪一项（路径 / argv / root）+ 已授权清单 + 下一步动作 | 权限错误 |
 

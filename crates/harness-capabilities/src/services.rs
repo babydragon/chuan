@@ -54,6 +54,16 @@ pub struct Service {
     /// 不能挂在 service 上：同一个 alist 后面挂着阿里云和百度，
     /// 把百度的 UA 也发给阿里云就是错的（见 D32）。
     pub redirect_rules: Vec<RedirectRule>,
+    /// 是否允许技能脚本经宿主网关调用（D41）。默认 false。
+    /// 打开后技能仍看不到凭据：网关只在宿主侧注入，见 `skill_gateway`。
+    pub expose_to_skills: bool,
+    /// 技能可用的 HTTP 方法。空 = 不允许（fail closed）。
+    pub allow_methods: Vec<String>,
+    /// 技能可用的路径前缀（必须以 `/` 开头；空 = 不允许）。
+    pub allow_paths: Vec<String>,
+    /// 技能可设置的请求头及取值白名单（名字不区分大小写，取值精确匹配）。
+    /// 鉴权头不在这里——它由 `header` 模板在宿主侧注入，调用方永远设不了。
+    pub header_allow: BTreeMap<String, Vec<String>>,
 }
 
 /// 一条"跳到这个主机时补这些头"的规则。
@@ -79,11 +89,78 @@ impl Default for Service {
             sign: None,
             redirect_hosts: Vec::new(),
             redirect_rules: Vec::new(),
+            expose_to_skills: false,
+            allow_methods: Vec::new(),
+            allow_paths: Vec::new(),
+            header_allow: BTreeMap::new(),
         }
     }
 }
 
+/// 技能网关的一次请求（UDS 上的一行 JSON）。
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct GatewayRequest {
+    #[serde(default = "gateway_default_method")]
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub body: Option<serde_json::Value>,
+}
+
+fn gateway_default_method() -> String {
+    "POST".into()
+}
+
+/// 网关的一次应答。上游的 4xx/5xx 也走这里（脚本需要看到状态），
+/// 只有网络/协议层失败才返回 `Err`。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GatewayReply {
+    pub status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    pub body: String,
+}
+
 impl Service {
+    /// 审批卡与技能清单里用的授权摘要：**核心字段必须能被人看懂**（D41）。
+    pub fn skill_grant(&self) -> String {
+        let mut out = format!("服务 `{}` → {}", self.name, self.base);
+        out.push_str(&format!(
+            "\n允许：{} {}",
+            if self.allow_methods.is_empty() {
+                "（未开放方法）".to_owned()
+            } else {
+                self.allow_methods.join(" / ")
+            },
+            if self.allow_paths.is_empty() {
+                "（未开放路径）".to_owned()
+            } else {
+                self.allow_paths.join("、")
+            }
+        ));
+        if self.header_allow.is_empty() {
+            out.push_str("\n可设置的头：无（脚本只能给路径与请求体）");
+        } else {
+            let actions: Vec<String> = self
+                .header_allow
+                .iter()
+                .map(|(k, v)| format!("{k} = {}", v.join("、")))
+                .collect();
+            out.push_str(&format!("\n可设置的头：{}", actions.join("；")));
+        }
+        if self.header.trim().is_empty() {
+            out.push_str("\n鉴权：由宿主注入，技能看不到凭据");
+        } else {
+            let name = self.header.split(':').next().unwrap_or("").trim();
+            out.push_str(&format!(
+                "\n鉴权：宿主向 `{name}` 注入凭据，技能看不到值"
+            ));
+        }
+        out
+    }
+
     fn secret_file(&self) -> Result<Option<crate::auth::SecretFile>, String> {
         match &self.token_file {
             Some(f) => crate::auth::SecretFile::load(f).map(Some),
@@ -170,6 +247,17 @@ impl Default for Timeouts {
             download_idle: Some(Duration::from_secs(60)),
         }
     }
+}
+
+/// 技能网关的路径白名单：以 `/` 结尾的条目按前缀匹配，其余按精确匹配。
+pub(crate) fn gateway_path_allowed(path: &str, allowed: &[String]) -> bool {
+    allowed.iter().any(|p| {
+        if p.ends_with('/') {
+            path.starts_with(p.as_str())
+        } else {
+            path == p
+        }
+    })
 }
 
 /// base 里自带的那段路径（`/` 视为没有）。用于检测"base 与 path 重复"。
@@ -293,6 +381,230 @@ impl HttpServiceTool {
             Ok(r) => format!("连接正常（HTTP {}）", r.status().as_u16()),
             Err(e) => format!("⚠️ 连接失败：{}", svc.redact(&e.to_string())),
         }
+    }
+
+    /// 技能网关专用：一次 JSON 请求，**不**支持下载/上传/重定向。
+    ///
+    /// 调用方（沙盒里的脚本）只能给 method / path / 白名单内的头 / JSON 体；
+    /// 目的主机、鉴权头、固定头都由配置决定，凭据值只在这一侧出现（D41）。
+    pub(crate) async fn gateway_send(
+        &self,
+        svc: &Service,
+        req: GatewayRequest,
+    ) -> Result<GatewayReply, String> {
+        const MAX_BODY: usize = 64 * 1024;
+        const MAX_RESP: usize = 1024 * 1024;
+
+        let method = req.method.trim().to_ascii_uppercase();
+        if !svc.allow_methods.iter().any(|m| m.eq_ignore_ascii_case(&method)) {
+            return Err(format!(
+                "服务 `{}` 没有对技能开放方法 {method}（已开放：{}）",
+                svc.name,
+                if svc.allow_methods.is_empty() {
+                    "无".to_owned()
+                } else {
+                    svc.allow_methods.join("、")
+                }
+            ));
+        }
+
+        let path = req.path.trim();
+        if !path.starts_with('/') || path.contains("://") || path.contains("..") {
+            return Err("path 必须以 / 开头，且不能带协议、域名或 ..".into());
+        }
+        if !gateway_path_allowed(path, &svc.allow_paths) {
+            return Err(format!(
+                "服务 `{}` 没有对技能开放路径 {path}（已开放：{}）",
+                svc.name,
+                if svc.allow_paths.is_empty() {
+                    "无".to_owned()
+                } else {
+                    svc.allow_paths.join("、")
+                }
+            ));
+        }
+
+        let mut req_headers: Vec<(String, String)> = Vec::new();
+        for (k, v) in &req.headers {
+            let lk = k.trim().to_ascii_lowercase();
+            if matches!(
+                lk.as_str(),
+                "authorization"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "set-cookie"
+                    | "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "connection"
+            ) {
+                return Err(format!("请求头 `{k}` 不能由技能设置：鉴权与长度由宿主决定"));
+            }
+            let Some(allowed) = svc
+                .header_allow
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(&lk))
+                .map(|(_, v)| v)
+            else {
+                return Err(format!(
+                    "服务 `{}` 不允许技能设置请求头 `{k}`（可设置：{}）",
+                    svc.name,
+                    if svc.header_allow.is_empty() {
+                        "无".to_owned()
+                    } else {
+                        svc.header_allow.keys().cloned().collect::<Vec<_>>().join("、")
+                    }
+                ));
+            };
+            if !allowed.iter().any(|x| x.trim() == v.trim()) {
+                return Err(format!("请求头 `{k}` 的取值不在允许清单里"));
+            }
+            req_headers.push((k.trim().to_owned(), v.trim().to_owned()));
+        }
+
+        // 模板变量：只在这个进程里解析，返回给脚本之前还要过 scrub
+        let vars = svc.vars(path)?;
+        let path_rendered = vars.render(path);
+        if path_rendered.contains("://") || path_rendered.contains("..") {
+            return Err("渲染后的 path 不合法".into());
+        }
+        let mut url = format!("{}{}", svc.base.trim_end_matches('/'), path_rendered);
+        if !svc.query.is_empty() {
+            let mut u = reqwest::Url::parse(&url).map_err(|e| format!("base 或 path 拼不出合法 URL：{e}"))?;
+            {
+                let mut qp = u.query_pairs_mut();
+                for (k, tpl) in &svc.query {
+                    qp.append_pair(k, &vars.render(tpl));
+                }
+            }
+            url = u.to_string();
+        }
+
+        let (hname, hvalue) = match svc.header_of(&vars)? {
+            Some((k, v)) => (k, v),
+            None => (String::new(), String::new()),
+        };
+
+        let mut body_json = req.body.clone();
+        if !svc.body.is_empty() {
+            let mut obj = match body_json.take() {
+                Some(serde_json::Value::Object(m)) => m,
+                Some(_) => return Err("配置了请求体注入的服务只接受 JSON 对象".into()),
+                None => serde_json::Map::new(),
+            };
+            for (k, tpl) in &svc.body {
+                obj.insert(k.clone(), serde_json::Value::String(vars.render(tpl)));
+            }
+            body_json = Some(serde_json::Value::Object(obj));
+        }
+        if let Some(b) = &body_json {
+            let n = serde_json::to_vec(b).map(|v| v.len()).unwrap_or(0);
+            if n > MAX_BODY {
+                return Err(format!("请求体太大（{n} 字节，上限 {MAX_BODY}）"));
+            }
+        }
+
+        let started = Instant::now();
+        let mut req = match method.as_str() {
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            "PUT" => self.client.put(&url),
+            "PATCH" => self.client.patch(&url),
+            "DELETE" => self.client.delete(&url),
+            other => return Err(format!("不支持的 method：{other}")),
+        };
+        if !hname.is_empty() {
+            req = req.header(&hname, &hvalue);
+        }
+        if let Some(b) = &body_json {
+            req = req.json(b);
+        }
+        // 固定头放在 `.json()` 之后：配置里显式写的 Content-Type 要能压过默认值。
+        for (k, v) in &svc.extra_headers {
+            req = req.header(k, v);
+        }
+        for (k, v) in &req_headers {
+            req = req.header(k, v);
+        }
+
+        let mut log_path = svc.scrub(&path_rendered, &vars.secrets());
+        if let Some((p, _)) = log_path.split_once('?') {
+            log_path = p.to_owned();
+        }
+
+        let mut resp = match tokio::time::timeout(Duration::from_secs(20), req.send()).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                let note = format!("请求失败：{e}");
+                self.log_line(
+                    &svc.name,
+                    &method,
+                    &log_path,
+                    None,
+                    0,
+                    started.elapsed().as_millis() as i64,
+                    "gateway 请求失败",
+                );
+                return Err(svc.redact(&note));
+            }
+            Err(_) => {
+                self.log_line(
+                    &svc.name,
+                    &method,
+                    &log_path,
+                    None,
+                    0,
+                    started.elapsed().as_millis() as i64,
+                    "gateway 超时",
+                );
+                return Err("服务 20 秒内没有响应".into());
+            }
+        };
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let mut buf = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    buf.extend_from_slice(&chunk);
+                    if buf.len() >= MAX_RESP {
+                        buf.truncate(MAX_RESP);
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    self.log_line(
+                        &svc.name,
+                        &method,
+                        &log_path,
+                        Some(status),
+                        buf.len(),
+                        started.elapsed().as_millis() as i64,
+                        "gateway 读取中断",
+                    );
+                    return Err(svc.redact(&format!("读取响应中断：{e}")));
+                }
+            }
+        }
+        self.log_line(
+            &svc.name,
+            &method,
+            &log_path,
+            Some(status),
+            buf.len(),
+            started.elapsed().as_millis() as i64,
+            "gateway",
+        );
+        Ok(GatewayReply {
+            status,
+            content_type,
+            body: svc.scrub(&String::from_utf8_lossy(&buf), &vars.secrets()),
+        })
     }
 
     /// 运行时注册（`service` 工具用）。同名覆盖。
@@ -770,13 +1082,6 @@ impl Tool for HttpServiceTool {
         if !hname.is_empty() {
             req = req.header(&hname, &hvalue);
         }
-        for (k, v) in &svc.extra_headers {
-            req = req.header(k, v);
-        }
-        // 调用方显式给的请求头（已过名字白名单检查），在原样发送前不做任何替换
-        for (k, v) in &req_headers {
-            req = req.header(k, v);
-        }
         let mut uploaded: Option<(String, u64)> = None;
         // 请求体：调用方给的对象 + 服务配置里的注入字段（飞书加签）；
         // 也可以从 /ws 读文件（脚本生成内容、宿主负责发）。
@@ -872,6 +1177,15 @@ impl Tool for HttpServiceTool {
                     file,
                 )));
             uploaded = Some((rel.clone(), meta.len()));
+        }
+
+        // 固定头放在请求体之后：`.json()` 会写默认 Content-Type，配置里显式的值必须能压过它。
+        for (k, v) in &svc.extra_headers {
+            req = req.header(k, v);
+        }
+        // 调用方显式给的请求头（已过名字白名单检查），最后应用、不做任何替换
+        for (k, v) in &req_headers {
+            req = req.header(k, v);
         }
 
         let resp = match req.send().await {

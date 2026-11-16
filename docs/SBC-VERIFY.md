@@ -62,6 +62,10 @@
 - [x] 沙盒里读不到凭据：`/etc/chuan/secrets` 在沙盒内是空的只读 tmpfs
       （**2026-10-28 实测**：`ls` 为空、`cat` 报文件不存在、`touch` 报只读；
       宿主上仍是 0750 root:chuan + 各文件按用途 0400/0440）
+- [ ] 技能服务网关（D41）：`run_skill` 在离线 lane 里经 `/ws/.g/<id>/*.sock` 连宿主；
+      上游只收到宿主注入的鉴权头，表外 method/path/动作被拒
+      （**开发机已验**：bwrap 0.13 + `--unshare-all`，集成测试 `tests/skill_gateway.rs`；
+      板上要复核 bwrap 0.11、socket 路径长度是否 <108 字节）
 
 ## 3. 出网与审计
 

@@ -208,6 +208,23 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 # 调用：http(service="feishu", method="POST",
 #            path="/open-apis/bot/v2/hook/{token}", body={...})
 
+# —— 让技能调用一个有鉴权的设备/服务（D33）——
+# 技能不拿密码、也不开网卡：运行时宿主在 /ws 下给一个本地 unix socket，
+# 脚本只给 method / path / 白名单内的头 / JSON 体；目的地与鉴权头由本节固定。
+# 这些字段也可以由 agent 用 service 工具提出：审批卡会列出同样的清单，
+# 批准后立即生效并写入 services.d/，重启不丢（删除服务即收回）。
+#
+# [services.router]
+# base = "http://192.0.2.1"                          # 只到 host；path 由脚本给
+# token_file = "/etc/chuan/secrets/router_admin"     # 一行 base64("user:password") 或令牌
+# header = "X-Auth: Basic {token}"                   # 宿主注入；技能设不了鉴权头
+# extra_headers = [["Content-Type", "text/plain"]]
+# expose_to_skills = true                            # 打开技能入口（默认 false）
+# allow_methods = ["POST"]
+# allow_paths = ["/api/"]                            # 以 / 结尾 = 前缀匹配
+# [services.router.header_allow]
+# "X-Action" = ["GetStatus", "SetWifi"]              # 动作白名单：表外一律拒绝
+
 [proxy]
 # 宿主上的 HTTP 代理；留空则沿用 https_proxy / http_proxy
 url = "http://127.0.0.1:7890"

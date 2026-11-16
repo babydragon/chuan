@@ -71,6 +71,11 @@ pub const DEFAULT: &str = "\
 - `/ws` 是**临时草稿区**，会被定期清理（默认 7 天或总量超限）。需要长期保留的内容：用 `remember` 记成事实，或沉淀为技能；不要指望 /ws。
 - **每个任务用自己的子目录**：`/ws/<任务名>/`。不要把文件直接堆在 /ws 根目录——不同任务的同名文件会互相覆盖。
 - 技能草稿固定放 `/ws/publish/<技能名>/`，用 `publish_skill` 安装。
+- 需要调一个**有鉴权的接口**（设备管理、第三方 API）时：不要把密码/令牌写进脚本，也不要为此
+  申请联网；在 `skill.json` 里写 `services`，运行时宿主会给你一个本地入口（参数里的 `_gateway`），
+  凭据由宿主注入。能不能开、能打到什么，由主人在审批卡上决定。
+  入口协议：连 `_gateway[\"<服务名>\"]`（unix socket），写一行 JSON
+  `{\"method\",\"path\",\"headers\",\"body\"}`，读回一行 `{\"status\",\"body\"}` 或 `{\"error\"}`。
 - 要按固定流程办事时（导入/复刻外部技能、沉淀技能），先调 `playbook` 取规范（`import-skill` / `distill`），再动手。
 - 沙盒内的 `/tmp` 是内存盘（≤256MB），而且**每次调用都是全新容器**：上一次写的 `/tmp/x`，
   下一次就不在了。中间产物要留在 `/ws`，不要留在 `/tmp`。
@@ -94,6 +99,8 @@ pub const DISTILL: &str = "\
    - `skill.json`：name（小写字母/数字/-/_）、description（一句话说清什么时候该用它）、
      params（JSON Schema）、entry、interpreter（python3/bash/sh）、timeout_ms、network=false、
      以及 `examples`（至少一个，形如 {\"args\":{...},\"expect_contains\":\"...\"}）
+   - 要调有鉴权的服务就在 `skill.json` 写 `services`（与安装时的参数一致）；脚本从 stdin 的
+     `_gateway` 取本地入口，**不要**把密码、令牌写进脚本或参数
    - 入口脚本：从 stdin 读一个 JSON 对象作为参数，结果写 stdout，失败用非 0 退出码并在 stderr 说明
    - `SKILL.md`：给人看的说明（不会进入模型上下文）
 4. 调用 `publish_skill(name)` 安装。它会用 examples 在沙盒里 dry-run，全部通过才落盘；
@@ -121,13 +128,16 @@ pub const IMPORT: &str = "\
    - 只有当「输入参数 → 一段文本/文件输出」能表达这个能力时，才做成技能；
    - 纯提示词型（靠文字约束模型行为）、需要 GUI、需要越界能力（打印/发消息/宿主执行）的，
      直接说明原因并停止，不要硬塞进技能。
+   - 原实现里「用户名密码 → Basic/令牌」的部分**不要照搬**：把它改成 `services` 声明，
+     凭据由宿主注入（见第 5 步）。
 3. 盘点本机能力：需要的包在不在（`/py/bin/python3 -c \"import X\"`）。
    缺包就明确说缺什么、建议怎么装，不要自己偷偷装、也不要假装跑通。
 4. **重写，不要照抄**：按本机约定实现（stdin JSON → stdout，非 0 退出码 + stderr 说明），
    去掉原实现里不适用的路径、服务、认证方式和平台假设。
 5. 写到 `/ws/publish/<name>/`：
    - `skill.json`：name、description（一句话说清什么时候用）、params、entry、interpreter（python3/bash/sh）、
-     timeout_ms、network=false、`examples`（至少覆盖参考里的一个真实行为 + 一个边界情况）
+     timeout_ms、network=false、`services`（需要鉴权时列出服务名，与安装参数一致）、
+     `examples`（至少覆盖参考里的一个真实行为 + 一个边界情况；**不要**让样例依赖真实服务）
    - 入口脚本：从 stdin 读 JSON，结果写 stdout，失败用非 0 退出码
    - `SKILL.md`：给人看的说明，**并在顶部注明来源与许可**
 6. 调用 `publish_skill(name)` 安装。dry-run 不通过就按原因修，不要绕过。
