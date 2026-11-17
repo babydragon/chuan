@@ -226,6 +226,9 @@ require_approval = []
 `services.d/<name>.toml`，重启不丢。安装技能时 `publish_skill` 的 `services` 参数
 必须与 `skill.json` 一致，卡上同样会列出这份清单。
 
+给 agent 的完整步骤在**内置规程** `playbook("service-gateway")` 里（凭据格式、开通参数、
+脚本协议、排错对照）；可用 `<config>/playbooks/service-gateway.md` 覆盖。
+
 ## 定时任务（提醒）的三种形态
 
 `remind` 建的是"到点做什么"，形态由参数决定，**优先级 `message` > `skill` > `text`**：

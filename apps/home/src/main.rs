@@ -496,6 +496,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         ("webhook", crate::system_prompt::WEBHOOK),
         ("capability", crate::system_prompt::CAPABILITY),
         ("timer", crate::system_prompt::TIMER),
+        ("service-gateway", crate::system_prompt::SERVICE_GATEWAY),
     ];
     let playbook_topics: Vec<&'static str> = playbook_builtins.iter().map(|(k, _)| *k).collect();
     tools.register(PlaybookTool::new(&cfg.playbooks_dir, playbook_builtins));

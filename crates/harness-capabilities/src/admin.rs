@@ -367,8 +367,9 @@ impl Tool for ServiceTool {
             description: "在运行时添加/删除第三方服务（`kind=http|mcp`）。\
 主人只负责把 key 放进凭据文件；**写配置、连接、试调由你来做**。\
 加完立刻可用（不用重启），并写入 services.d/ 供下次启动加载。\
-要让**技能脚本**也能调用它，加 `expose_to_skills = true` 与 `allow_methods` / `allow_paths` / \
-`header_allow`（技能看不到凭据，只能发清单内的请求；审批卡会列出整份清单）。\
+要让**技能脚本**也能调用它，先取 `playbook(\"service-gateway\")` 按步骤做：\
+加 `expose_to_skills = true` 与 `allow_methods` / `allow_paths` / `header_allow`\
+（技能看不到凭据，只能发清单内的请求；审批卡会列出整份清单）。\
 加 MCP 服务会当场握手，失败会返回原因，按原因改参数再 add 一次即可。"
                 .into(),
             parameters: serde_json::json!({

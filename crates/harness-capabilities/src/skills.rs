@@ -592,7 +592,9 @@ impl Tool for PublishSkillTool {
             name: "publish_skill".into(),
             description: "把 /ws/publish/<name>/ 下的技能草稿验收后安装到技能目录。\
                           要求 skill.json 带 examples，全部样例在沙盒里跑通才会落盘；\
-                          旧版本自动备份，可用 rollback_skill 回滚。"
+                          旧版本自动备份，可用 rollback_skill 回滚。\
+                          技能要调有鉴权的服务时，先取 `playbook(\"service-gateway\")`，\
+                          `services` 参数必须与 skill.json 完全一致。"
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",

@@ -121,6 +121,7 @@ impl Tool for PlaybookTool {
                  目录：{}（`action=list` 看每个 topic 是内置还是哪份文件、多久前改的）。\
                  取不到时会告诉你这个目录和现有清单——**不要**据此要求主人「再去放一遍」，先看是不是目录不对。\
                  导入/复刻外部技能前取 `import-skill`；沉淀技能前取 `distill`。\
+                 技能要调有鉴权的服务（要密码/令牌、内网设备）前取 `service-gateway`，按它配服务与技能。\
                  把一次性的做法变成可复用规范，用 `publish_playbook`（需要主人确认）；改坏了用 `rollback_playbook` 回上一版。",
                 self.dir.display()
             ),

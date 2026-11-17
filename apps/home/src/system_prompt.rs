@@ -76,6 +76,7 @@ pub const DEFAULT: &str = "\
   凭据由宿主注入。能不能开、能打到什么，由主人在审批卡上决定。
   入口协议：连 `_gateway[\"<服务名>\"]`（unix socket），写一行 JSON
   `{\"method\",\"path\",\"headers\",\"body\"}`，读回一行 `{\"status\",\"body\"}` 或 `{\"error\"}`。
+  **要配置这类服务时先取 `playbook(\"service-gateway\")` 按步骤走**，不要自己猜凭据格式或路径。
 - 要按固定流程办事时（导入/复刻外部技能、沉淀技能），先调 `playbook` 取规范（`import-skill` / `distill`），再动手。
 - 沙盒内的 `/tmp` 是内存盘（≤256MB），而且**每次调用都是全新容器**：上一次写的 `/tmp/x`，
   下一次就不在了。中间产物要留在 `/ws`，不要留在 `/tmp`。
@@ -178,6 +179,10 @@ pub const CAPABILITY: &str = include_str!("../playbooks/capability.md");
 /// 建/管 user timer 的 SOP（P4.6-B）。随二进制发布，可用 `playbooks/timer.md` 覆盖。
 pub const TIMER: &str = include_str!("../playbooks/timer.md");
 
+/// 让技能经宿主网关调有鉴权服务的 SOP（D41）。随二进制发布，可用
+/// `playbooks/service-gateway.md` 覆盖。
+pub const SERVICE_GATEWAY: &str = include_str!("../playbooks/service-gateway.md");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +214,37 @@ mod tests {
             "旧结论不是事实",
         ] {
             assert!(DEFAULT.contains(needle), "默认提示缺了 {needle}");
+        }
+    }
+
+    /// 服务网关的 SOP 必须自带完整流程：凭据格式、开通参数、脚本协议、安装与排错。
+    /// 之前只写了工具描述，agent 被问"怎么配"时只能含糊其辞（真实事故）。
+    #[test]
+    fn service_gateway_playbook_covers_flow() {
+        for needle in [
+            "base64(\"user:password\")",
+            "`Basic ` 前缀",
+            "expose_to_skills=true",
+            "allow_methods",
+            "allow_paths",
+            "header_allow",
+            "_gateway",
+            "publish_skill",
+            "dry-run",
+            "network: true",
+            "排错",
+        ] {
+            assert!(
+                SERVICE_GATEWAY.contains(needle),
+                "service-gateway 规程缺了 {needle}"
+            );
+        }
+        // 规程是随二进制发布的通用文本，不能写某个主人的环境（AGENTS §8）
+        for banned in ["10.84.", "velop", "192.168."] {
+            assert!(
+                !SERVICE_GATEWAY.contains(banned),
+                "service-gateway 规程里混进了具体环境：{banned}"
+            );
         }
     }
 }
