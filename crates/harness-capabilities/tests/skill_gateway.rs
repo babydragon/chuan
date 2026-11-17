@@ -62,7 +62,17 @@ async fn mock_router() -> (
                                 })
                                 .map(str::to_owned)
                                 .unwrap_or_default();
-                            seen.lock().await.push(format!("{action}|{auth}"));
+                            let cts: Vec<&str> = head
+                                .lines()
+                                .filter(|l| {
+                                    l.to_ascii_lowercase().starts_with("content-type:")
+                                })
+                                .collect();
+                            seen.lock().await.push(format!(
+                                "{action}|{auth}|{}|{}",
+                                cts.len(),
+                                cts.first().copied().unwrap_or_default()
+                            ));
                             break;
                         }
                     }
@@ -186,6 +196,17 @@ async fn injects_auth_and_enforces_allowlists() {
     assert!(
         seen[0].contains("Basic YWRtaW46c2VjcmV0"),
         "宿主必须注入 Basic 头：{}",
+        seen[0]
+    );
+    // Content-Type 只能有一个，且是配置里的值（`.json()` 的默认值必须被覆盖）
+    assert!(
+        seen[0].contains("|1|"),
+        "Content-Type 重复了：{}",
+        seen[0]
+    );
+    assert!(
+        seen[0].to_lowercase().contains("content-type: text/plain; charset=utf-8"),
+        "配置的 Content-Type 没有生效：{}",
         seen[0]
     );
 }

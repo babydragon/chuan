@@ -969,3 +969,56 @@ async fn save_to_requires_get() {
         .unwrap_err();
     assert!(err.message.contains("只支持 GET"), "{}", err.message);
 }
+
+/// 回归：配置的 Content-Type 必须是**一个**头，不能与 `.json()` 的默认值并存。
+/// reqwest 的 `.header()` 是 append；两个 Content-Type 会让上游 nginx 直接 400
+/// （真实事故：JNAP 设备在 HTTP 层被拒，还没进业务逻辑）。
+#[tokio::test]
+async fn configured_content_type_is_not_duplicated() {
+    let (base, seen) = one_shot_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token_file = dir.path().join("token");
+    std::fs::write(&token_file, "dG9rZW4=\n").unwrap();
+    let log = dir.path().join("net.jsonl");
+
+    let tool = HttpServiceTool::new(
+        vec![Service {
+            name: "router".into(),
+            base,
+            token_file: Some(token_file),
+            header: "X-Auth: Basic {token}".into(),
+            extra_headers: vec![(
+                "Content-Type".into(),
+                "text/plain; charset=UTF-8".into(),
+            )],
+            ..Default::default()
+        }],
+        &log,
+    )
+    .unwrap();
+
+    let ws = Workspace {
+        run: harness_kernel::RunId("r".into()),
+        root: dir.path().to_string_lossy().into(),
+    };
+    let env = harness_capabilities::NullEnv;
+    let ctx = ctx_for(&ws, &env);
+
+    tool.execute(
+        serde_json::json!({"service":"router","method":"POST","path":"/JNAP/","body":{}}),
+        &ctx,
+    )
+    .await
+    .unwrap();
+
+    let raw = seen.lock().unwrap().to_lowercase();
+    assert_eq!(
+        raw.matches("content-type:").count(),
+        1,
+        "Content-Type 重复了：\n{raw}"
+    );
+    assert!(
+        raw.contains("content-type: text/plain; charset=utf-8"),
+        "配置的 Content-Type 没有生效：\n{raw}"
+    );
+}

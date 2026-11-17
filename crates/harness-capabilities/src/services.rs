@@ -249,6 +249,22 @@ impl Default for Timeouts {
     }
 }
 
+/// 请求头统一走 `HeaderMap::insert`（同名覆盖）。
+/// **不要**用 `RequestBuilder::header`：它是 append，Content-Type 会出现两个值。
+fn insert_header(
+    map: &mut reqwest::header::HeaderMap,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    let name = name.trim();
+    let n = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|e| format!("请求头名 `{name}` 不合法：{e}"))?;
+    let v = reqwest::header::HeaderValue::from_str(value)
+        .map_err(|e| format!("请求头 `{name}` 的值不合法：{e}"))?;
+    map.insert(n, v);
+    Ok(())
+}
+
 /// 技能网关的路径白名单：以 `/` 结尾的条目按前缀匹配，其余按精确匹配。
 pub(crate) fn gateway_path_allowed(path: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|p| {
@@ -513,19 +529,20 @@ impl HttpServiceTool {
             "DELETE" => self.client.delete(&url),
             other => return Err(format!("不支持的 method：{other}")),
         };
-        if !hname.is_empty() {
-            req = req.header(&hname, &hvalue);
-        }
         if let Some(b) = &body_json {
             req = req.json(b);
         }
-        // 固定头放在 `.json()` 之后：配置里显式写的 Content-Type 要能压过默认值。
-        for (k, v) in &svc.extra_headers {
-            req = req.header(k, v);
+        // 请求头统一走 HeaderMap：reqwest 的 `.header()` 是 **append**，
+        // 对 Content-Type 这类单值头会产生重复值（nginx 直接 400）。
+        // `insert` = 同名覆盖，配置的 Content-Type 压过 `.json()` 的默认值。
+        let mut hdrs = reqwest::header::HeaderMap::new();
+        if !hname.is_empty() {
+            insert_header(&mut hdrs, &hname, &hvalue)?;
         }
-        for (k, v) in &req_headers {
-            req = req.header(k, v);
+        for (k, v) in svc.extra_headers.iter().chain(req_headers.iter()) {
+            insert_header(&mut hdrs, k, v)?;
         }
+        req = req.headers(hdrs);
 
         let mut log_path = svc.scrub(&path_rendered, &vars.secrets());
         if let Some((p, _)) = log_path.split_once('?') {
@@ -1079,9 +1096,6 @@ impl Tool for HttpServiceTool {
                 ));
             }
         };
-        if !hname.is_empty() {
-            req = req.header(&hname, &hvalue);
-        }
         let mut uploaded: Option<(String, u64)> = None;
         // 请求体：调用方给的对象 + 服务配置里的注入字段（飞书加签）；
         // 也可以从 /ws 读文件（脚本生成内容、宿主负责发）。
@@ -1179,14 +1193,27 @@ impl Tool for HttpServiceTool {
             uploaded = Some((rel.clone(), meta.len()));
         }
 
-        // 固定头放在请求体之后：`.json()` 会写默认 Content-Type，配置里显式的值必须能压过它。
+        // 请求头统一走 HeaderMap：reqwest 的 `.header()` 是 **append**，对 Content-Type
+        // 这类单值头会产生重复值（JNAP 后面的 nginx 会直接回 400）。
+        // `insert` = 同名覆盖：配置的 Content-Type 压过 `.json()` 的默认值，
+        // 调用方显式给的头最后覆盖同名项（已过名字白名单检查，不做模板替换）。
+        let mut hdrs = reqwest::header::HeaderMap::new();
+        if !hname.is_empty() {
+            insert_header(&mut hdrs, &hname, &hvalue).map_err(|e| {
+                ToolError::new(ErrorCode::InvalidArgs, svc.scrub(&e, &vars.secrets()), false)
+            })?;
+        }
         for (k, v) in &svc.extra_headers {
-            req = req.header(k, v);
+            insert_header(&mut hdrs, k, v).map_err(|e| {
+                ToolError::new(ErrorCode::InvalidArgs, svc.scrub(&e, &vars.secrets()), false)
+            })?;
         }
-        // 调用方显式给的请求头（已过名字白名单检查），最后应用、不做任何替换
         for (k, v) in &req_headers {
-            req = req.header(k, v);
+            insert_header(&mut hdrs, k, v).map_err(|e| {
+                ToolError::new(ErrorCode::InvalidArgs, svc.scrub(&e, &vars.secrets()), false)
+            })?;
         }
+        req = req.headers(hdrs);
 
         let resp = match req.send().await {
             Ok(r) => r,
