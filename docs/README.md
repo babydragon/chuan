@@ -92,6 +92,10 @@
 > **0.3.0-rc.2**（补齐规程）：内置 `service-gateway` playbook——凭据文件格式、开通参数、
 > 脚本协议、安装与排错对照；工具说明与默认提示都指向它。rc.1 只有参数级描述，
 > agent 被问「怎么配置」时无法给出完整步骤。
+> **0.3.0-rc.3**（修复）：配置里的 `Content-Type` 不再与 `.json()` 的默认值重复。
+> `reqwest` 的 `.header()` 是 append——此前带 `extra_headers = [["Content-Type", …]]` 的请求
+> 会发出**两个** Content-Type，上游 nginx 直接回 400（JNAP 设备实测：请求没进业务层）。
+> 改为统一 `HeaderMap::insert`（同名覆盖），并加两条“只能有一个 Content-Type”的回归测试。
 
 ---
 
