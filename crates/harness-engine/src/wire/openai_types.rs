@@ -1,6 +1,20 @@
 //! OpenAI Chat Completions 的线上类型。仅供 `openai_chat` 使用。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// `null` 也要当成"没有"。
+///
+/// `#[serde(default)]` 只兜**缺字段**，不兜显式 `null`：很多 OpenAI 兼容实现会在
+/// 首个 chunk 里把没用到的字段写成 `"tool_calls": null`，按 `Vec<T>` 解析直接
+/// `invalid type: null, expected a sequence`，整轮 run 就废了
+/// （2026-11-19 板上真实事故：opencode-go / deepseek-v4.1-flash 首个 chunk）。
+fn null_to_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatRequest {
@@ -59,7 +73,7 @@ pub struct ToolFn {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct Chunk {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub choices: Vec<Choice>,
     #[serde(default)]
     pub usage: Option<UsageJson>,
@@ -67,7 +81,7 @@ pub struct Chunk {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct Choice {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub delta: Delta,
     #[serde(default)]
     pub finish_reason: Option<String>,
@@ -79,7 +93,7 @@ pub struct Delta {
     pub content: Option<String>,
     #[serde(default)]
     pub reasoning_content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub tool_calls: Vec<ToolDelta>,
 }
 
@@ -198,6 +212,43 @@ impl Msg {
             tool_calls: None,
             tool_call_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::Chunk;
+
+    /// 板上原文（2026-11-19）：首个 chunk 里 `tool_calls` / `reasoning_content` / `usage`
+    /// 都是显式 null。以前 `tool_calls` 是 `Vec`，直接解析失败，整轮 run 报
+    /// `bad chunk: invalid type: null, expected a sequence`。
+    #[test]
+    fn explicit_nulls_in_first_chunk_are_tolerated() {
+        let raw = r#"{"id":"chatcmpl-RVKVHQvlOTtlFTZheAF22wdX","object":"chat.completion.chunk","created":1795069560,"model":"deepseek-v4.1-flash","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":null,"tool_calls":null}}],"usage":null}"#;
+        let c: Chunk = serde_json::from_str(raw).expect("null 字段不该让整条流解析失败");
+        assert_eq!(c.choices.len(), 1);
+        assert!(c.choices[0].delta.tool_calls.is_empty());
+        assert_eq!(c.choices[0].delta.content.as_deref(), Some(""));
+        assert!(c.usage.is_none());
+    }
+
+    /// 同理：`choices: null` / `delta: null`（个别中转站会这么发）。
+    #[test]
+    fn null_choices_and_delta_are_empty_not_fatal() {
+        let c: Chunk = serde_json::from_str(r#"{"choices":null,"usage":null}"#).unwrap();
+        assert!(c.choices.is_empty());
+        let c: Chunk = serde_json::from_str(r#"{"choices":[{"delta":null}]}"#).unwrap();
+        assert!(c.choices[0].delta.tool_calls.is_empty());
+    }
+
+    /// 正常分片仍然要能解析出内容与工具调用（别把修复做成"什么都当空"）。
+    #[test]
+    fn normal_chunks_still_parse() {
+        let raw = r#"{"choices":[{"delta":{"content":"你好","tool_calls":[{"index":0,"id":"c1","function":{"name":"exec","arguments":"{}"}}]}}]}"#;
+        let c: Chunk = serde_json::from_str(raw).unwrap();
+        assert_eq!(c.choices[0].delta.content.as_deref(), Some("你好"));
+        assert_eq!(c.choices[0].delta.tool_calls.len(), 1);
+        assert_eq!(c.choices[0].delta.tool_calls[0].index, 0);
     }
 }
 
