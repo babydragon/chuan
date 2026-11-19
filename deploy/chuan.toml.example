@@ -43,9 +43,10 @@ wall_clock_ms = 0
 # /ws 是草稿区：按天 + 总量清理（0 = 该维度不设限）
 workspace_keep_days = 7
 workspace_max_mb = 256
-# 上下文预算（token）；超出后按轮裁剪旧对话
-# 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）
-context_budget_tokens = 24000
+# 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）。
+# **0 = 自动**：按模型窗口 × [engine] context_ratio（默认 0.5）算。
+# 只有想临时收紧时才写数字——写了就优先于自动值，日志会标「配置显式」。
+context_budget_tokens = 0
 workspace = "/var/lib/chuan/workspaces"
 # 用户投递目录：只读挂到沙盒 /inbox
 inbox = "/var/lib/chuan/inbox"
@@ -233,8 +234,9 @@ web_fetch = "auto"    # auto = 直连失败再试代理
 services = "never"    # http/mcp 默认直连
 
 [vision]
-# 开启后图片会作为多模态内容发给模型厂商（会外传，自行决定）
-enabled = false
+# 不写 = 按模型的输入模态自动（表里该模型支持图片就开）。
+# 打开后图片会作为多模态内容发给模型厂商（会外传，自行决定）；想强制关就写 false。
+# enabled = true
 
 [media]
 # 聊天附件落盘（只读挂到沙盒 /media），30 天清理

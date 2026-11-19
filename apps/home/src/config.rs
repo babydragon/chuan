@@ -679,21 +679,22 @@ fn resolve_context(
     explicit_budget: usize,
     ratio: f64,
     info: Option<crate::model_window::Info>,
-) -> (u64, usize) {
+) -> (u64, usize, &'static str) {
     let window = if explicit_window > 0 {
         explicit_window
     } else {
         info.map(|i| i.context).unwrap_or(0)
     };
     let ratio = if ratio.is_finite() { ratio.clamp(0.1, 1.0) } else { default_ctx_ratio() };
-    let budget = if explicit_budget > 0 {
-        explicit_budget
+    // 第三个返回值是"这个预算哪来的"：拼错配置时，日志里能一眼看出来。
+    let (budget, from) = if explicit_budget > 0 {
+        (explicit_budget, "配置显式")
     } else if window > 0 {
-        (window as f64 * ratio) as usize
+        ((window as f64 * ratio) as usize, "窗口 × 比例")
     } else {
-        FALLBACK_CTX_TOKENS
+        (FALLBACK_CTX_TOKENS, "兜底")
     };
-    (window, budget)
+    (window, budget, from)
 }
 
 fn default_ctx_ratio() -> f64 { 0.5 }
@@ -741,6 +742,8 @@ pub struct Config {
     pub retry_backoff_ms: u64,
     /// 历史/上下文的 token 预算（已按窗口 × 比例算好，不会是 0）
     pub context_budget_tokens: usize,
+    /// 预算的来源：配置显式 / 窗口 × 比例 / 兜底。启动行会打印。
+    pub context_budget_source: &'static str,
     /// 模型窗口（0 = 认不出这个模型）。`/usage` 与每轮上下文占比都要用。
     pub context_window: u64,
     /// 内置模型表查到的能力（窗口/输出/输入模态）；认不出则为 None
@@ -1071,12 +1074,26 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         .unwrap_or_default();
     let picked = crate::model_pick::pick(&provider, &model_id);
     let info = picked.map(|p| p.info);
-    let (context_window, context_budget_tokens) = resolve_context(
+    let (context_window, context_budget_tokens, context_budget_source) = resolve_context(
         file.engine.context_window,
         file.actor.context_budget_tokens,
         file.engine.context_ratio,
         info,
     );
+    // 显式预算远小于窗口时给一句提示：这一行踩过坑——从示例配置继承来的 24000
+    // 会让"自动预算"看起来生效了，其实一次都没用上。
+    if file.actor.context_budget_tokens > 0
+        && context_window > 0
+        && (context_budget_tokens as u64) * 10 < context_window
+    {
+        eprintln!(
+            "config: [actor] context_budget_tokens = {} 是显式值，只有模型窗口 {} 的 {:.1}%；\
+             想按窗口自动算就改成 0",
+            context_budget_tokens,
+            context_window,
+            context_budget_tokens as f64 * 100.0 / context_window as f64
+        );
+    }
     let model_source = picked.map(|p| p.describe()).unwrap_or_else(|| "未知（兜底）".into());
     if info.is_none() && file.engine.context_window == 0 {
         eprintln!(
@@ -1150,6 +1167,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         max_retries: file.engine.max_retries,
         retry_backoff_ms: file.engine.retry_backoff_ms,
         context_budget_tokens,
+        context_budget_source,
         context_window,
         model_info: info,
         model_window_source: model_source,
@@ -1379,20 +1397,23 @@ mod tests {
     fn context_budget_follows_window() {
         let info = crate::model_pick::pick("opencode-go", "deepseek-v4.1-flash").unwrap().info;
         assert_eq!(info.context, 1_000_000);
-        let (window, budget) = resolve_context(0, 0, 0.5, Some(info));
+        let (window, budget, from) = resolve_context(0, 0, 0.5, Some(info));
         assert_eq!(window, 1_000_000);
         assert_eq!(budget, 500_000);
+        assert_eq!(from, "窗口 × 比例");
 
         // 显式窗口 > 表；显式预算 > 窗口
-        let (window, _) = resolve_context(200_000, 0, 0.5, Some(info));
+        let (window, _, _) = resolve_context(200_000, 0, 0.5, Some(info));
         assert_eq!(window, 200_000);
-        let (_, budget) = resolve_context(0, 12_000, 0.5, Some(info));
+        let (_, budget, from) = resolve_context(0, 12_000, 0.5, Some(info));
         assert_eq!(budget, 12_000);
+        assert_eq!(from, "配置显式", "日志必须能看出预算是人手写死的");
 
         // 认不出的模型：退回兜底，不猜大窗口
-        let (window, budget) = resolve_context(0, 0, 0.5, None);
+        let (window, budget, from) = resolve_context(0, 0, 0.5, None);
         assert_eq!(window, 0);
         assert_eq!(budget, FALLBACK_CTX_TOKENS);
+        assert_eq!(from, "兜底");
 
         // 部署里实际在用的两个模型都要能认出来，且视觉能力跟着表走
         let glm = crate::model_pick::pick("zai", "glm-5.3-flash").unwrap().info;
@@ -1401,9 +1422,9 @@ mod tests {
         assert_eq!(resolve_context(0, 0, 0.5, Some(glm)).1, 500_000);
 
         // 比例越界要收口（写 0 或 3 都不该把预算算成 0 或整窗）
-        let (_, a) = resolve_context(1_000_000, 0, 0.0, None);
+        let (_, a, _) = resolve_context(1_000_000, 0, 0.0, None);
         assert_eq!(a, 100_000);
-        let (_, b) = resolve_context(1_000_000, 0, 9.0, None);
+        let (_, b, _) = resolve_context(1_000_000, 0, 9.0, None);
         assert_eq!(b, 1_000_000);
     }
 

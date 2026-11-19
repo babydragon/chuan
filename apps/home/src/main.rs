@@ -615,13 +615,14 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         );
     }
     println!(
-        "context: 窗口 {} · 历史预算 {} · 来源 {}{}",
+        "context: 窗口 {} · 历史预算 {}（{}） · 来源 {}{}",
         if cfg.context_window > 0 {
             cfg.context_window.to_string()
         } else {
             "未知（用兜底 24000）".to_owned()
         },
         cfg.context_budget_tokens,
+        cfg.context_budget_source,
         cfg.model_window_source,
         cfg.model_info.map(|i| {
             let mut caps = vec!["文本"];
