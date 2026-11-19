@@ -29,11 +29,13 @@ impl TurnDriver for AnyDriver {
     }
 }
 
-/// provider 预设：base_url / 默认模型 / key 文件名
+/// provider 预设：base_url / 默认模型。
+///
+/// 空串 = **必须由配置提供**（通用 OpenAI 兼容入口就是这种）。
+/// key 文件不在这里：统一走 `[engine] api_key_file`，否则两处真相。
 pub struct Preset {
     pub base_url: &'static str,
     pub model: &'static str,
-    pub key_file: &'static str,
 }
 
 pub fn preset(name: &str) -> Option<Preset> {
@@ -41,13 +43,14 @@ pub fn preset(name: &str) -> Option<Preset> {
         "zai" => Some(Preset {
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
             model: "glm-5.3-flash",
-            key_file: "zai_key",
         }),
         "opencode-go" => Some(Preset {
             base_url: "https://opencode.ai/zen/go/v1",
             model: "deepseek-v4.1-flash",
-            key_file: "opencode_go_key",
         }),
+        // 通用 OpenAI 兼容端点：厂商官方、云厂商兼容模式、第三方中转站都用它。
+        // 不绑死任何厂商专属头，base_url 与 model 必须由配置给（见 build 的校验）。
+        "openai" => Some(Preset { base_url: "", model: "" }),
         _ => None,
     }
 }
@@ -64,9 +67,15 @@ pub fn build(
     if name == "echo" {
         return Ok(AnyDriver::Echo(EchoDriver));
     }
-    let p = preset(name).ok_or_else(|| format!("unknown provider: {name}"))?;
-    let base = base_url.unwrap_or(p.base_url).to_owned();
-    let model = model.unwrap_or(p.model).to_owned();
+    let p = preset(name).ok_or_else(|| {
+        format!("unknown provider: {name}（可选 echo / zai / opencode-go / openai + base_url）")
+    })?;
+    let base = resolve_arg(base_url, p.base_url).ok_or_else(|| {
+        format!("provider={name} 需要 [engine] base_url（任意 OpenAI 兼容端点，含 /v1）")
+    })?;
+    let model = resolve_arg(model, p.model).ok_or_else(|| {
+        format!("provider={name} 需要 [engine] model（写成厂商文档里的模型 id）")
+    })?;
     let transport =
         Arc::new(ReqwestTransport::new_with_proxy(&base, api_key, proxy).map_err(|e| e.to_string())?);
     let mut driver = ModelDriver::new(transport, Arc::new(OpenAiChat), model)
@@ -81,4 +90,47 @@ pub fn build(
     }
     println!("provider={name} base={base}");
     Ok(AnyDriver::Model(driver))
+}
+
+/// 配置值优先；没给就用 preset 的默认值；两者都空 → None（由调用方报错）。
+fn resolve_arg(given: Option<&str>, preset_default: &'static str) -> Option<String> {
+    given
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| (!preset_default.is_empty()).then(|| preset_default.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 通用入口：不写 base_url / model 时必须给出能照做的提示，而不是 panic 或发空请求。
+    #[test]
+    fn generic_provider_requires_base_url_and_model() {
+        let e = build("openai", None, Some("qwen3.5-max"), "k", None, 1, 100).err().unwrap();
+        assert!(e.contains("base_url"), "{e}");
+        let e = build("openai", Some("https://example.com/v1"), None, "k", None, 1, 100)
+            .err()
+            .unwrap();
+        assert!(e.contains("model"), "{e}");
+        assert!(build(
+            "openai",
+            Some("https://example.com/v1"),
+            Some("qwen3.5-max"),
+            "k",
+            None,
+            1,
+            100
+        )
+        .is_ok());
+    }
+
+    /// 内置预设仍然自带 base_url / model，不用配置。
+    #[test]
+    fn known_presets_need_no_config() {
+        assert!(build("zai", Some("https://example.com/v1"), None, "k", None, 1, 100).is_ok());
+        assert!(preset("zai").is_some_and(|p| !p.base_url.is_empty() && !p.model.is_empty()));
+        assert!(preset("nope").is_none());
+    }
 }

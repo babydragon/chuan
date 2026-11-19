@@ -225,9 +225,9 @@ pub struct ProxyFile {
 
 #[derive(Clone, Debug, Deserialize, Default)]
 pub struct VisionFile {
-    /// 开启后，聊天里的图片会以多模态内容发给模型厂商
-    #[serde(default)]
-    pub enabled: bool,
+    /// 开启后，聊天里的图片会以多模态内容发给模型厂商。
+    /// `None` = 按模型能力自动（内置模型表里输入模态含图片就开）。
+    pub enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -437,6 +437,14 @@ pub struct EngineFile {
     pub system_prompt_file: Option<String>,
     #[serde(default = "default_retries")]
     pub max_retries: u32,
+    /// 模型上下文窗口（token）。0 = 自动（查内置模型表，见 `scripts/gen-model-windows.py`）。
+    /// 表里认不出这个模型时才需要手写；写错了只会让预算偏小/偏大，不影响正确性。
+    #[serde(default)]
+    pub context_window: u64,
+    /// 自动预算占窗口的比例（0.1–1.0，默认 0.5）。
+    /// 不取 1.0：窗口标称值与实际可用量各家都有出入，留一半吸收误差与输出预留。
+    #[serde(default = "default_ctx_ratio")]
+    pub context_ratio: f64,
     #[serde(default = "default_backoff")]
     pub retry_backoff_ms: u64,
 }
@@ -454,6 +462,8 @@ impl Default for EngineFile {
             system_prompt_file: None,
             max_retries: default_retries(),
             retry_backoff_ms: default_backoff(),
+            context_window: 0,
+            context_ratio: default_ctx_ratio(),
         }
     }
 }
@@ -469,7 +479,8 @@ pub struct ActorFile {
     pub inbox: Option<String>,
     /// 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）。
     /// 中文按 1 字 ≈ 1 token 估算，不再按英文的 3 字符折算。
-    #[serde(default = "default_ctx_tokens")]
+    /// **0 = 自动**：按模型窗口 × `[engine] context_ratio` 算（D43）。
+    #[serde(default)]
     pub context_budget_tokens: usize,
     /// workspace 清理：超过这么多天的文件删掉（0 = 不按时间删）
     #[serde(default = "default_ws_keep_days")]
@@ -485,7 +496,7 @@ impl Default for ActorFile {
             wall_clock_ms: default_wall(),
             workspace: None,
             inbox: None,
-            context_budget_tokens: default_ctx_tokens(),
+            context_budget_tokens: 0,
             workspace_keep_days: default_ws_keep_days(),
             workspace_max_mb: default_ws_max_mb(),
         }
@@ -661,7 +672,33 @@ fn default_stale() -> i64 { 300 }
 fn default_provider() -> String { "echo".into() }
 fn default_max_turns() -> u32 { 8 }
 fn default_retries() -> u32 { 3 }
-fn default_ctx_tokens() -> usize { 24_000 }
+/// 预算 / 窗口 / 视觉的解析规则（D43）。抽成纯函数是为了能测：
+/// 优先级 = 显式配置 > 内置表 > 兜底；查不到时绝不猜一个大窗口。
+fn resolve_context(
+    explicit_window: u64,
+    explicit_budget: usize,
+    ratio: f64,
+    info: Option<crate::model_window::Info>,
+) -> (u64, usize) {
+    let window = if explicit_window > 0 {
+        explicit_window
+    } else {
+        info.map(|i| i.context).unwrap_or(0)
+    };
+    let ratio = if ratio.is_finite() { ratio.clamp(0.1, 1.0) } else { default_ctx_ratio() };
+    let budget = if explicit_budget > 0 {
+        explicit_budget
+    } else if window > 0 {
+        (window as f64 * ratio) as usize
+    } else {
+        FALLBACK_CTX_TOKENS
+    };
+    (window, budget)
+}
+
+fn default_ctx_ratio() -> f64 { 0.5 }
+/// 模型认不出来时的兜底预算：宁可小，不要让请求被供应商以 400 顶回来。
+const FALLBACK_CTX_TOKENS: usize = 24_000;
 fn default_ws_keep_days() -> u64 { 7 }
 fn default_ws_max_mb() -> u64 { 256 }
 fn default_backoff() -> u64 { 1000 }
@@ -702,7 +739,14 @@ pub struct Config {
     pub policy: ApprovalPolicy,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
+    /// 历史/上下文的 token 预算（已按窗口 × 比例算好，不会是 0）
     pub context_budget_tokens: usize,
+    /// 模型窗口（0 = 认不出这个模型）。`/usage` 与每轮上下文占比都要用。
+    pub context_window: u64,
+    /// 内置模型表查到的能力（窗口/输出/输入模态）；认不出则为 None
+    pub model_info: Option<crate::model_window::Info>,
+    /// 这个窗口是怎么来的（精确命中 / 同名均值(3 家) / 未知），启动行会打印
+    pub model_window_source: String,
     pub skills_dir: String,
     pub distill_prompt: String,
     pub playbooks_dir: String,
@@ -1014,6 +1058,37 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         read_secret(&api_key_inline, &api_key_file, "模型 api key")?
     };
 
+    // ---- 模型窗口 / 上下文预算 / 视觉能力（D43）----
+    //
+    // 预算不再硬编码 24k：窗口来自内置快照表（models.dev，脚本生成），
+    // 预算 = 窗口 × ratio。三者的优先级都是"显式配置 > 表 > 兜底"，
+    // 绝不因为查不到就猜一个大窗口——猜大了就是供应商 400。
+    // 省略 model 时，预设会补一个默认模型（zai / opencode-go）；不先解析的话查表拿到空串，
+    // 预算会直接落回 24k 兜底——"我明明用的是 1M 的模型却只有 24k"就是这么来的。
+    let model_id = model
+        .clone()
+        .or_else(|| crate::any_driver::preset(&provider).map(|p| p.model.to_owned()))
+        .unwrap_or_default();
+    let picked = crate::model_pick::pick(&provider, &model_id);
+    let info = picked.map(|p| p.info);
+    let (context_window, context_budget_tokens) = resolve_context(
+        file.engine.context_window,
+        file.actor.context_budget_tokens,
+        file.engine.context_ratio,
+        info,
+    );
+    let model_source = picked.map(|p| p.describe()).unwrap_or_else(|| "未知（兜底）".into());
+    if info.is_none() && file.engine.context_window == 0 {
+        eprintln!(
+            "config: 内置表里没有 {provider}/{model_id} 的上下文窗口，历史预算退回 {FALLBACK_CTX_TOKENS}；\
+             需要更大就在 [engine] 写 context_window = <窗口 token>"
+        );
+    }
+    let vision = file
+        .vision
+        .enabled
+        .unwrap_or_else(|| info.is_some_and(|i| i.supports_image()));
+
     // 核心段写死，配置只能在其后追加（见 system_prompt.rs 顶部说明）。
     // 显式配置但文件不存在 → 报错，不静默跳过（否则你以为改生效了，其实没有）。
     let append = match prompt_append_file {
@@ -1043,7 +1118,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         token,
         provider,
         base_url,
-        model,
+        model: (!model_id.is_empty()).then(|| model_id.clone()),
         api_key,
         llm_proxy,
         system_prompt,
@@ -1074,8 +1149,10 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         },
         max_retries: file.engine.max_retries,
         retry_backoff_ms: file.engine.retry_backoff_ms,
-        // 粗估：中英混排约 3 字符/token
-        context_budget_tokens: file.actor.context_budget_tokens,
+        context_budget_tokens,
+        context_window,
+        model_info: info,
+        model_window_source: model_source,
         skills_dir: file
             .skills
             .dir
@@ -1254,7 +1331,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
             .library
             .dir
             .unwrap_or_else(|| format!("{home}/.local/share/chuan/files")),
-        vision: file.vision.enabled,
+        vision,
         proxy: harness_capabilities::ProxyConfig {
             // 没写配置就沿用标准环境变量（守护进程通常从 systemd 环境继承）
             url: file
@@ -1296,6 +1373,39 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A（D43）：预算跟着模型窗口走，而不是永远 24k。
+    #[test]
+    fn context_budget_follows_window() {
+        let info = crate::model_pick::pick("opencode-go", "deepseek-v4.1-flash").unwrap().info;
+        assert_eq!(info.context, 1_000_000);
+        let (window, budget) = resolve_context(0, 0, 0.5, Some(info));
+        assert_eq!(window, 1_000_000);
+        assert_eq!(budget, 500_000);
+
+        // 显式窗口 > 表；显式预算 > 窗口
+        let (window, _) = resolve_context(200_000, 0, 0.5, Some(info));
+        assert_eq!(window, 200_000);
+        let (_, budget) = resolve_context(0, 12_000, 0.5, Some(info));
+        assert_eq!(budget, 12_000);
+
+        // 认不出的模型：退回兜底，不猜大窗口
+        let (window, budget) = resolve_context(0, 0, 0.5, None);
+        assert_eq!(window, 0);
+        assert_eq!(budget, FALLBACK_CTX_TOKENS);
+
+        // 部署里实际在用的两个模型都要能认出来，且视觉能力跟着表走
+        let glm = crate::model_pick::pick("zai", "glm-5.3-flash").unwrap().info;
+        assert_eq!(glm.context, 1_000_000);
+        assert!(glm.supports_image(), "glm-5.3-flash 是原生多模态，视觉应自动打开");
+        assert_eq!(resolve_context(0, 0, 0.5, Some(glm)).1, 500_000);
+
+        // 比例越界要收口（写 0 或 3 都不该把预算算成 0 或整窗）
+        let (_, a) = resolve_context(1_000_000, 0, 0.0, None);
+        assert_eq!(a, 100_000);
+        let (_, b) = resolve_context(1_000_000, 0, 9.0, None);
+        assert_eq!(b, 1_000_000);
+    }
 
     #[test]
     fn expands_tilde() {

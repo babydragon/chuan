@@ -8,6 +8,8 @@ mod any_driver;
 mod backup;
 mod command_admin;
 mod config;
+mod model_pick;
+mod model_window;
 mod offsets;
 mod system_prompt;
 mod workspace_gc;
@@ -613,6 +615,30 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         );
     }
     println!(
+        "context: 窗口 {} · 历史预算 {} · 来源 {}{}",
+        if cfg.context_window > 0 {
+            cfg.context_window.to_string()
+        } else {
+            "未知（用兜底 24000）".to_owned()
+        },
+        cfg.context_budget_tokens,
+        cfg.model_window_source,
+        cfg.model_info.map(|i| {
+            let mut caps = vec!["文本"];
+            if i.supports_image() {
+                caps.push("图片");
+            }
+            if i.supports_video() {
+                caps.push("视频");
+            }
+            if i.supports_audio() {
+                caps.push("音频");
+            }
+            format!(" · 模型能力：{}", caps.join("/"))
+        })
+        .unwrap_or_default()
+    );
+    println!(
         "vision: {}",
         if cfg.vision {
             "on（图片会作为多模态内容发给模型厂商，≤4 张/轮）"
@@ -646,6 +672,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             system_prompt: cfg.system_prompt.clone(),
             policy: cfg.policy.clone(),
             context_budget_tokens: cfg.context_budget_tokens,
+            context_window: cfg.context_window,
             skill_source: Some(Arc::clone(&skills) as Arc<dyn harness_kernel::SkillSource>),
             tool_source: if mcp.is_empty() {
                 None
