@@ -53,6 +53,14 @@ pub fn remaining(limit: u64, used: u64) -> Option<u64> {
     (limit > 0).then(|| limit.saturating_sub(used))
 }
 
+/// 最近 N 个自然日之前的同一时刻（滚动窗口，含此刻）。
+///
+/// 用滚动而不是"从今天 0 点往前数"：`/usage` 问的是"最近 3 天用了多少"，
+/// 凌晨 0:05 查和 23:55 查不该差出整整一天。
+pub fn recent_days(now: Timestamp, days: u32) -> Timestamp {
+    now - (days.max(1) as i64) * 86_400_000
+}
+
 /// 当前时间窗的起点（本地日 / 本地月）。
 pub fn windows(now: Timestamp, tz_min: i32) -> (Timestamp, Timestamp) {
     (
@@ -67,6 +75,15 @@ mod tests {
 
     fn total(p: u64, c: u64) -> UsageTotal {
         UsageTotal { prompt_tokens: p, completion_tokens: c, ..Default::default() }
+    }
+
+    #[test]
+    fn recent_days_is_rolling() {
+        let now = 1_793_000_000_000;
+        assert_eq!(recent_days(now, 3), now - 3 * 86_400_000);
+        assert_eq!(recent_days(now, 7), now - 7 * 86_400_000);
+        // 0 视为 1，避免"最近 0 天"等于只算此刻
+        assert_eq!(recent_days(now, 0), now - 86_400_000);
     }
 
     #[test]

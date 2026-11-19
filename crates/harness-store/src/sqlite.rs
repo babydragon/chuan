@@ -1517,7 +1517,8 @@ impl ReadTx for SqliteRead {
                         COALESCE(SUM(completion_tokens),0),
                         COALESCE(SUM(cache_hit_tokens),0),
                         COALESCE(SUM(cache_write_tokens),0),
-                        COALESCE(SUM(cost_est),0)
+                        COALESCE(SUM(cost_est),0),
+                        COUNT(*)
                  FROM usage_rollup WHERE at>=?1 GROUP BY agent",
             )
             .map_err(map_err)?;
@@ -1531,6 +1532,7 @@ impl ReadTx for SqliteRead {
                         cache_hit_tokens: r.get::<_, i64>(3)? as u64,
                         cache_write_tokens: r.get::<_, i64>(4)? as u64,
                         cost_est: r.get::<_, f64>(5)?,
+                        requests: r.get::<_, i64>(6)? as u64,
                     },
                 ))
             })
@@ -1548,14 +1550,15 @@ impl ReadTx for SqliteRead {
     }
 
     async fn usage_total(&mut self, since: Timestamp) -> Result<UsageTotal, StoreError> {
-        let (p, c, hit, write, cost): (i64, i64, i64, i64, f64) = self
+        let (p, c, hit, write, cost, requests): (i64, i64, i64, i64, f64, i64) = self
             .conn
             .query_row(
                 "SELECT COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
                         COALESCE(SUM(cache_hit_tokens),0), COALESCE(SUM(cache_write_tokens),0),
-                        COALESCE(SUM(cost_est),0) FROM usage_rollup WHERE at>=?1",
+                        COALESCE(SUM(cost_est),0), COUNT(*)
+                 FROM usage_rollup WHERE at>=?1",
                 params![since],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .map_err(map_err)?;
         Ok(UsageTotal {
@@ -1564,6 +1567,7 @@ impl ReadTx for SqliteRead {
             cache_hit_tokens: hit as u64,
             cache_write_tokens: write as u64,
             cost_est: cost,
+            requests: requests as u64,
         })
     }
 
@@ -1579,7 +1583,8 @@ impl ReadTx for SqliteRead {
                         COALESCE(SUM(completion_tokens),0),
                         COALESCE(SUM(cache_hit_tokens),0),
                         COALESCE(SUM(cache_write_tokens),0),
-                        COALESCE(SUM(cost_est),0)
+                        COALESCE(SUM(cost_est),0),
+                        COUNT(*)
                  FROM usage_rollup WHERE at>=?1 GROUP BY model
                  ORDER BY SUM(prompt_tokens)+SUM(completion_tokens) DESC",
             )
@@ -1594,6 +1599,7 @@ impl ReadTx for SqliteRead {
                         cache_hit_tokens: r.get::<_, i64>(3)? as u64,
                         cache_write_tokens: r.get::<_, i64>(4)? as u64,
                         cost_est: r.get::<_, f64>(5)?,
+                        requests: r.get::<_, i64>(6)? as u64,
                     },
                 ))
             })

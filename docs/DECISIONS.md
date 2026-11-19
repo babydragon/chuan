@@ -321,7 +321,8 @@ MITM（自签 CA 进沙盒信任库）；要覆盖两条 lane 就得在离线 ne
    与 `engine` 都写死），`/usage` 遇到 0 明说"金额未配"，不假装免费。
    钱的兜底交给**服务商自己的窗口**：402/429 归为 `EngineError::Quota{message, retry_after_s}`，
    直接停 run、不自动重试，并把"额度已用尽 + 约多久可再试"回给主人（5 小时 / 每周 / 每月口径由服务商给）。
-5. 观测：`/usage`（今日/本月，按 agent 与 conv 分）、`/agents`（运行中子 agent，可取消）、
+5. 观测：`/usage`（今日 / 最近 3 天 / 最近 7 天 / 本月，按 agent 与 conv 分；每行带请求次数与
+   平均输入——命中率低时先看这两个数）、`/agents`（运行中子 agent，可取消）、
    `/tasks`（后台任务进度）。
 6. **缓存命中单独记账**（schema V7）：`usage_rollup` / `usage.recorded` 增 `cache_hit_tokens` 与
    `cache_write_tokens`，只存原始 token，命中率查询时算；`/usage` 按模型分行展示，跨模型不平均。

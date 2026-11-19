@@ -174,11 +174,24 @@ pub struct UsageTotal {
     pub cache_hit_tokens: u64,
     pub cache_write_tokens: u64,
     pub cost_est: f64,
+    /// 模型请求次数（含重试，与 `usage.recorded` 的条数一致）。
+    /// 命中率与平均输入都要靠它才有意义：只看总量分不清"跑了很多小请求"
+    /// 与"跑了几个大请求"。
+    pub requests: u64,
 }
 
 impl UsageTotal {
     pub fn tokens(&self) -> u64 {
         self.prompt_tokens + self.completion_tokens
+    }
+
+    /// 平均每次请求的输入量。太小通常意味着每次都在开新话题（前缀重复不了）。
+    pub fn avg_prompt(&self) -> u64 {
+        if self.requests == 0 {
+            0
+        } else {
+            self.prompt_tokens / self.requests
+        }
     }
 
     /// 缓存命中率 = 命中 / 输入。三种主流口径的 `prompt_tokens` 都含命中部分，

@@ -986,7 +986,7 @@ latency_ms, tokens_in, tokens_out, cost_est
 | 命令 | 输出 | 状态 |
 |---|---|---|
 | `/prompt` | 打印实际生效的 system 指令（核心段 + 追加段，3000 字/条） | ✅ |
-| `/usage` | 今日 / 本月 token、额度、子 agent 拆分（金额待 `[pricing]`） | ✅ |
+| `/usage` | 今日 / 最近 3 天 / 最近 7 天 / 本月 token 与**缓存命中率**、请求次数与平均输入、额度、子 agent 拆分、按模型分行（金额待 `[pricing]`） | ✅ |
 | `/agents` | 运行中的子 agent（任务首行、已耗时、当前轮次/工具）；`cancel <id>`、`show <id>` 看子会话最近正文与工具轨迹 | ✅ |
 | `/tasks` | 后台任务（pending / running / done / interrupted）；`/tasks cancel <id>`；`/tasks retry <id>`（带上次进展重排） | ✅ |
 | `/cancel` | 前台 run + 本会话的 pending/running 后台任务一起停，回报数量 | ✅ |

@@ -1529,8 +1529,10 @@ async fn actor_answers_slash_usage() {
     Arc::new(actor).run(rx, CancellationToken::new()).await.unwrap();
 
     let msg = channel.delivered.lock().unwrap()[0].clone();
-    assert!(msg.contains("今日"), "{msg}");
-    assert!(msg.contains("本月"), "{msg}");
+    // 四个窗口都要在：只看"今日"分不清"今天才开始"还是"一直很省"
+    for label in ["今日", "最近 3 天", "最近 7 天", "本月"] {
+        assert!(msg.contains(label), "缺 {label}：{msg}");
+    }
     // 没配价格时必须说清楚，不能让 0 看起来像"免费"
     assert!(msg.contains("金额未统计"), "{msg}");
 }

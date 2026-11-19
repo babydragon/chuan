@@ -118,8 +118,19 @@ fn usage_line(label: &str, u: &crate::record::UsageTotal, limit: u64) -> String 
     } else {
         String::new()
     };
+    // 次数与平均输入：命中率高低要跟它们一起看——同样的命中率，
+    // "20 次 × 2k" 和 "3 次 × 60k" 是完全不同的两种用法。
+    let calls = if u.requests > 0 {
+        format!(
+            " · {} 次 · 均 {} 输入",
+            u.requests,
+            short_tokens(u.avg_prompt())
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{label}：{} 输入 / {} 输出 · {money}{quota}{}",
+        "{label}：{} 输入 / {} 输出 · {money}{quota}{}{calls}",
         short_tokens(u.prompt_tokens),
         short_tokens(u.completion_tokens),
         cache_suffix(u)
@@ -846,7 +857,7 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                      /status — 查看状态\n\
                      /facts — 查看长期记忆\n\
                      /reminders — 查看/取消定时任务\n\
-                     /usage — 今日与本月用量\n\
+                     /usage — 今日 / 最近 3 天 / 最近 7 天 / 本月用量\n\
                      /prompt — 查看实际生效的 system 指令\n\
                      /agents — 查看/取消运行中的子 agent\n\
                      /tasks — 查看/取消后台任务\n\
@@ -1352,25 +1363,30 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 let now = crate::ids::now_ms();
                 let (day_start, month_start) =
                     crate::budget::windows(now, self.cfg.tz_offset_min);
-                let zero = || crate::record::UsageTotal {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cache_hit_tokens: 0,
-                    cache_write_tokens: 0,
-                    cost_est: 0.0,
-                };
-                let (day, month, split, by_model) = match self.store.begin_read().await {
-                    Ok(mut rd) => (
-                        rd.usage_total(day_start).await.unwrap_or_else(|_| zero()),
-                        rd.usage_total(month_start).await.unwrap_or_else(|_| zero()),
-                        rd.usage_split(day_start).await.unwrap_or_default(),
-                        rd.usage_by_model(day_start).await.unwrap_or_default(),
-                    ),
-                    Err(_) => (zero(), zero(), Default::default(), Vec::new()),
-                };
+                // 滚动窗口：凌晨 0:05 与 23:55 查"最近 3 天"应该答同一个量级，
+                // 所以不用"今天 0 点往前数 N 天"。
+                let d3_start = crate::budget::recent_days(now, 3);
+                let d7_start = crate::budget::recent_days(now, 7);
+                let zero = || crate::record::UsageTotal::default();
+                let (day, d3, d7, month, split, by_model) =
+                    match self.store.begin_read().await {
+                        Ok(mut rd) => (
+                            rd.usage_total(day_start).await.unwrap_or_else(|_| zero()),
+                            rd.usage_total(d3_start).await.unwrap_or_else(|_| zero()),
+                            rd.usage_total(d7_start).await.unwrap_or_else(|_| zero()),
+                            rd.usage_total(month_start).await.unwrap_or_else(|_| zero()),
+                            rd.usage_split(day_start).await.unwrap_or_default(),
+                            rd.usage_by_model(day_start).await.unwrap_or_default(),
+                        ),
+                        Err(_) => {
+                            (zero(), zero(), zero(), zero(), Default::default(), Vec::new())
+                        }
+                    };
                 let mut text = format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}\n{}",
                     usage_line("今日", &day, self.cfg.budget.daily_tokens),
+                    usage_line("最近 3 天", &d3, 0),
+                    usage_line("最近 7 天", &d7, 0),
                     usage_line("本月", &month, self.cfg.budget.monthly_tokens)
                 );
                 let agent_tokens = split.agent.tokens();
@@ -4090,6 +4106,7 @@ mod tests {
             cache_hit_tokens: 12_400,
             cache_write_tokens: 0,
             cost_est: 0.0,
+            requests: 0,
         };
         assert_eq!(cache_suffix(&with_cache), " · 缓存命中 62.0%（12.4k/20.0k）");
         let line = usage_line("今日", &with_cache, 0);
@@ -4103,9 +4120,32 @@ mod tests {
             cache_hit_tokens: 0,
             cache_write_tokens: 0,
             cost_est: 0.0,
+            requests: 0,
         };
         assert!(cache_suffix(&no_cache).is_empty());
         assert!(!usage_line("今日", &no_cache, 0).contains("缓存命中"));
+    }
+
+    /// 次数与平均输入是判断"命中率为什么低"的两个关键数：
+    /// 同样的命中率，"20 次 × 2k" 和 "3 次 × 60k" 是两种完全不同的用法。
+    #[test]
+    fn usage_line_shows_requests_and_avg_prompt() {
+        let u = UsageTotal {
+            prompt_tokens: 100_000,
+            completion_tokens: 5_000,
+            cache_hit_tokens: 40_000,
+            cache_write_tokens: 0,
+            cost_est: 0.0,
+            requests: 20,
+        };
+        let line = usage_line("最近 7 天", &u, 0);
+        assert!(line.contains("20 次"), "{line}");
+        assert!(line.contains("均 5.0k 输入"), "{line}");
+        assert!(line.contains("缓存命中 40.0%"), "{line}");
+
+        // 次数未知（老账本 / 没上报）时不许写"0 次"——那会把"没统计"说成"没调用"
+        let unknown = UsageTotal::default();
+        assert!(!usage_line("今日", &unknown, 0).contains("次"), "{}", usage_line("今日", &unknown, 0));
     }
 
     #[test]
@@ -4116,6 +4156,7 @@ mod tests {
             cache_hit_tokens: 800,
             cache_write_tokens: 0,
             cost_est: 0.0,
+            requests: 0,
         };
         let b = UsageTotal {
             prompt_tokens: 1_000,
@@ -4123,6 +4164,7 @@ mod tests {
             cache_hit_tokens: 100,
             cache_write_tokens: 0,
             cost_est: 0.0,
+            requests: 0,
         };
         assert!(model_usage_line("glm-5.3-flash", &a).contains("80.0%"));
         assert!(model_usage_line("deepseek-v4.1-flash", &b).contains("10.0%"));

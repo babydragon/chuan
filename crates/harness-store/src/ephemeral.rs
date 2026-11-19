@@ -538,6 +538,7 @@ impl ReadTx for EphemeralRead {
             slot.cache_hit_tokens += u.cache_hit_tokens as u64;
             slot.cache_write_tokens += u.cache_write_tokens as u64;
             slot.cost_est += u.cost_est;
+            slot.requests += 1;
         }
         Ok(split)
     }
@@ -551,6 +552,7 @@ impl ReadTx for EphemeralRead {
                 t.cache_hit_tokens += u.cache_hit_tokens as u64;
                 t.cache_write_tokens += u.cache_write_tokens as u64;
                 t.cost_est += u.cost_est;
+                t.requests += 1;
             }
         }
         Ok(t)
@@ -571,6 +573,7 @@ impl ReadTx for EphemeralRead {
             slot.cache_hit_tokens += u.cache_hit_tokens as u64;
             slot.cache_write_tokens += u.cache_write_tokens as u64;
             slot.cost_est += u.cost_est;
+            slot.requests += 1;
         }
         let mut out: Vec<(String, UsageTotal)> = by_model.into_iter().collect();
         out.sort_by(|a, b| b.1.tokens().cmp(&a.1.tokens()));
