@@ -22,7 +22,7 @@ stale_after_s = 300
 token_file = "~/.config/chuan/secrets/telegram_token"
 
 [engine]
-provider = "zai"                     # echo | zai | opencode-go
+provider = "zai"                     # echo | zai | opencode-go | openai（通用，需 base_url+model）
 model    = "glm-5.3-flash"
 api_key_file = "~/.config/chuan/secrets/zai_key"
 # system 指令两段式（D21）：核心段写死 → 本项追加。只能追加，不能替换核心。
@@ -33,6 +33,10 @@ api_key_file = "~/.config/chuan/secrets/zai_key"
 # base_url = "..."                   # 覆盖预设；以 /chat/completions 结尾则原样用
 # proxy = "http://127.0.0.1:7890"    # 模型走代理；不写=直连
 # system_prompt_file = "~/.config/chuan/prompts/system.md"
+# 上下文窗口：不写 = 查内置表（models.dev 快照，见 §1.1）。认不出这个模型时才需要手写。
+# context_window = 1000000
+# 自动预算占窗口的比例（0.1–1.0，默认 0.5）：留一半吸收标称窗口与实际可用量的偏差。
+# context_ratio = 0.5
 
 [actor]
 max_turns = 8
@@ -41,8 +45,9 @@ wall_clock_ms = 0
 # workspace 清理：/ws 是草稿区，不是档案库；0 = 该维度不设限
 workspace_keep_days = 7
 workspace_max_mb = 256
-# 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）；中文按 1 字≈1 token 估算
-context_budget_tokens = 24000
+# 一轮的 token 总预算（system + 工具说明 + 历史 + 当前消息）；中文按 1 字≈1 token 估算。
+# 0 = 自动：按模型窗口 × [engine] context_ratio（D43）。显式写数字则优先，用于临时收紧。
+context_budget_tokens = 0
 workspace = "~/.local/share/chuan/workspaces"
 
 [lanes]
@@ -310,14 +315,61 @@ file    = { file = ["/ws"] }
 `argv[0]` 必须绝对路径。`install`（包名是开放域）与 `host_elevated`（双真相）不进表，
 理由与触发条件见 `DECISIONS.md` D31 §12。
 
+### 1.1 内置模型表（窗口 / 输出 / 输入模态）
+
+`apps/home/src/model_window.rs` 是 **models.dev 的离线快照**，由脚本生成、随二进制编译进去。
+运行期**不联网**查表：出网只有两条路（不变量 9），启动时偷偷请求 models.dev 会绕过审计。
+
+```bash
+python3 scripts/gen-model-windows.py                 # 联网拉 api.json 并重写表
+python3 scripts/gen-model-windows.py --input api.json # 用本地快照（403 时这么办）
+```
+
+表里只有数据；"provider 对不上怎么退"在 `apps/home/src/model_pick.rs`，四级：
+**① provider+model 精确 → ② 同 provider 去版本（`-1017`/日期/`-latest`）→
+③ 同名跨 provider 均值 → ④ 去版本同名跨 provider 均值**，都不中才退回兜底。
+provider 有别名表（`zhipu/glm → zai`、`dashscope/bailian/qwen → alibaba`、`kimi → moonshotai` 等），
+model 侧也接受 `vendor/` 前缀、`-1017` 日期尾巴、`:free` 变体这类写法；
+启动行会写清是哪种命中（`来源 精确匹配` / `来源 同名均值(3 家)` / `来源 未知（兜底）`）。
+均值和实测不符就覆盖：
+
+```toml
+[engine]
+context_window = 262144    # 只有这一家的真实窗口是 256k 时，一行覆盖
+```
+
+**默认覆盖 38 个第一方提供方 / 867 个模型**（中国厂商及其订阅入口、主流海外厂商、
+opencode 系列）。刻意**不收**聚合站与中转站（openrouter / nano-gpt / llmgateway / vercel / kilo …）：
+它们列的九成是别家的同一个模型，收进来只会撑大文件并把均值带偏——用它们的人走
+"provider 对不上 → 同名模型均值"这条回退即可。同理不收 amazon-bedrock / azure（id 带区域命名空间）。
+要临时加：`python3 scripts/gen-model-windows.py --providers a,b,c`。
+
+只收对话模型：输出不含 text 的（画图、语音合成）和窗口 < 4096 的（embedding / whisper /
+prompt-guard）在生成阶段就被滤掉，免得"窗口可疑"的断言变成噪音。
+
+这三项数据的用途：
+
+1. `[actor] context_budget_tokens = 0` 时按 `窗口 × context_ratio` 算历史预算（D43）；
+2. `[vision] enabled` 不写时，按"输入模态是否含图片"自动开关；
+3. 每轮结束那行"上下文 x%"的分母（`config` 启动行会打印窗口与能力，认不出会明说）。
+
+**用中转站 / 云厂商兼容模式**：`provider = "openai"` + 显式 `base_url` 与 `model`（走标准
+OpenAI 兼容面，不加任何厂商专属头）。表里认不出这个 `model` 时按"同名均值"或兜底处理，
+启动行会写明是哪一种。
+
+**换模型后如果启动行显示"窗口 未知（用兜底 24000）"**：先重跑脚本；models.dev 还没有它，
+就在 `[engine] context_window` 写死一个数。不要靠"看起来没报错"推断它生效了。
+
 ## 视觉（图片理解）
 
 ```toml
 [vision]
-enabled = true     # 默认 false
+# enabled = true      # 不写 = 自动（内置模型表里该模型输入含图片就开）
 ```
 
 - 开启后，聊天里的图片（jpeg/png/webp）作为多模态内容随当轮消息发给模型，**能被"看见"**；
+- 默认按模型能力自动判断：表来自 `models.dev` 快照（`apps/home/src/model_window.rs`），
+  认不出模型时不猜，按"关"处理并只给路径；
 - 限制：每轮最多 4 张、单张 ≤4MB；历史里只保留 `/media/...` 路径，旧图不会重复上传；
 - 隐私：**开这个等于把图片发给模型提供商**。家里有小孩照片，想清楚再开；
 - 关闭时模型只拿到文件路径，会明确说"看不到图片内容"。

@@ -1397,3 +1397,105 @@ socket。当前 agent 车道并发为 1，可接受；真要做并行技能时�
 4. 审批卡包含 base、method、path、动作与凭据文件；批准后同进程可用；
 5. 重启后 `services.d` 片段仍能还原同样的授权（TOML 回环测试）；
 6. `network: true` + `services` 的清单无法安装。
+
+---
+
+## D42 · 历史裁剪按"结论优先"降级：先折叠工具输出，再整轮丢弃
+
+**背景**：历史是一个定长滑窗（`context::select` 从尾部累加到预算）。工具输出和结论
+**按同一个单价计费**，所以一次 `kb_read` 读几页 PDF 就能把"上一轮已经答完的结论"挤出窗口，
+模型于是重查一遍、甚至重新推导出另一个口径（2026-11-18 真实会话：田字格 13 个字与课课贴
+词语已核对完成，两轮之后模型又从头查表）。`DESIGN.md` L4 写的是「超限降级（清工具输出 →
+摘要 → 拒绝）」，但代码只实现了最后一级。
+
+**决定**（`crates/harness-kernel/src/context.rs`）：
+1. **最近 8 轮原文不动**（`KEEP_RECENT_TURNS`，与默认 `max_turns=8` 对齐）——
+   正在进行的工作不能被自己折叠；
+2. 更早轮次的 `msg.tool_result` 折叠成一行引用：**保留 `call_id`**（与 assistant 的
+   `tool_calls` 配对，缺一条 provider 直接 400）与 spill 路径（原文还能 `read`/`exec` 取回）；
+   同时把旧 `tool_calls` 的参数裁成 `{"_elided": true}`——保留"调过什么"，
+   不保留整段脚本参数（那往往比结论还大）；
+3. 仍超预算才整轮丢弃，但把被丢轮次的**提问与结论原文截断**（每行 ≤400 字、总量 ≤预算 1/8）
+   压成一条 `Synthetic` 放在最前。**不用模型生成摘要**：截断不会编造，也不多花一次请求。
+
+**为什么不是"直接上 LLM 摘要"**：压缩本身会丢信息，而现在的浪费主要来自"工具过程挤掉结论"，
+不是"结论太多"。先把窗口用对（见 ROADMAP §7.4 的 A/C），压缩留到真正不够用时再做。
+
+**非目标**：精确分词；跨 run 的语义记忆（那是 doc/`remember` 的事）；把历史裁到与模型窗口
+无关的固定值。
+
+**代价**：被折叠的工具输出不能再被模型直接引用，需要重新取一遍（但那时它本来就已被丢弃）。
+折叠后 assistant 的旧参数不再完整，模型若想"原样重跑那次调用"需要重新构造。
+
+**验收**：
+1. 旧轮次一次 12k 字工具输出 + 一条 200 字结论，在预算不足时**结论原文保留**、工具输出变引用
+   （`context::tests::old_tool_output_elided_before_conclusion`）；
+2. 折叠后的 `tool_result` 仍带 `call_id`（`elided_tool_keeps_call_id`）；
+3. 最近 8 轮永不被折叠（`recent_turns_never_elided`）；
+4. 硬丢整轮时，被丢的结论从摘要里看得到（`dropped_turns_leave_conclusions_in_summary`）；
+5. 半个 assistant(tool_calls) 与 tool_result 永不被拆开（`keeps_whole_turns_only`）。
+
+---
+
+## D43 · 预算跟着模型窗口走：内置能力表 + 自动预算 + 每轮上下文占比
+
+**背景**：`context_budget_tokens` 默认写死 24000，而目标模型（`deepseek-v4.1-flash` /
+`glm-5.3-flash`）窗口是 **1 000 000** —— 只用了 2.4%。同时 `[vision] enabled` 也要人手工开，
+换模型就得记得改两处；结果就是"模型明明能看 100 万，系统只肯给 2.4 万"，
+复杂任务反复失忆（D42 只能重新分配这 2.4 万，解决不了总量）。
+
+**决定**：
+1. **内置能力表** `apps/home/src/model_window.rs`：models.dev 的离线快照，
+   记 `(provider, model) → 窗口 / 输出上限 / 输入模态位掩码`。
+   由 `scripts/gen-model-windows.py` 生成并提交，**运行期不联网**。
+   理由：不变量 9（出网只有两条路且都留痕）——启动时静默请求 models.dev 会绕过审计；
+   生成脚本是离线工具，不进沙盒、不进账本，不需要审批。
+   表里**只有数据**；provider 对不上时怎么回退属于策略，在 `apps/home/src/model_pick.rs`
+   （改策略不用重跑脚本）。
+2. **匹配四级**（`model_pick.rs`，从严到宽）：
+   ① provider + model 精确；② 同 provider、model 去版本尾巴（`-1017` / 日期 / `-latest`）；
+   ③ 同名模型跨 provider 取**均值**；④ 去版本后同名跨 provider 取均值。
+   再对不上就 `None` → 兜底预算并明说认不出。
+   取均值而不是最小：同一模型各家标称通常一致，个别标低是它自己的限制；取最小会把
+   "其实能用 1M"的环境按 128k 跑。真被某家顶到 400 时用 `[engine] context_window` 一行覆盖。
+   provider 另有一张**别名表**（`zhipu/zhipuai/bigmodel → zai`、`dashscope/bailian/qwen → alibaba`、
+   `kimi → moonshotai` …），让"配置里写的名字"和 models.dev 的 id 对得上。
+   模态在聚合时取**并集**（同一模型的家族能力），个别 provider 不接受时按实测改
+   `[vision] enabled = false`。
+   **表的覆盖范围是"第一方厂商"**（默认 38 家 / 867 个模型：中国厂商及其订阅入口、主流海外厂商、
+   opencode 系列），**不收**聚合站与中转站（openrouter / nano-gpt / llmgateway / vercel / kilo …）：
+   它们列的九成是别家的同一模型，收进来只会撑大生成文件并把均值带偏；用它们的人走
+   ③/④ 级回退。amazon-bedrock / azure 同因（id 带区域命名空间）不收。
+   生成阶段同时滤掉非对话模型（输出不含 text、窗口 < 4096）。
+3. **预算自动**：`[actor] context_budget_tokens = 0`（新默认）= `窗口 × [engine] context_ratio`；
+   `context_ratio` 默认 0.5（留一半吸收"标称窗口 vs 实际可用量"与输出预留的偏差）。
+   显式写预算或 `[engine] context_window` 仍然优先——优先级是"配置 > 表 > 兜底 24000"，
+   查不到模型就退回兜底并**在启动行明说**，绝不猜一个大窗口（猜大了就是供应商 400）。
+4. **视觉自动**：`[vision] enabled` 不写时按"输入模态含图片"开关；认不出模型按"关"。
+   多模态能力（图片/视频/音频）都记在表里，将来加视频输入不必再动配置。
+5. **历史明细窗口跟着预算走**（`runner.rs`）：`recent_messages` 的边界数从写死 50 改为
+   `clamp(预算 / 2000, 50, 300)`。一次 8 回合的 run 就吃掉 9 个边界，50 会让"能装多少轮"
+   先于 token 预算成为天花板。
+6. **每轮报上下文占比**：终稿末尾一行 `· 上下文 12%（118k / 1M）`，
+   数值 = 最后一次模型请求的 `prompt_tokens`（provider 回报的真实用量，不是本地估算）。
+   分母是表里的窗口；窗口未知时只报绝对量、不编比例。用途：主人自己看着数决定
+   "什么时候开新会话 / 什么时候该压缩"，也为以后评估压缩收益留了基线。
+   文案在 `copy.rs`（`context_footer`），不进 system prompt。
+
+**非目标**：运行期联网刷新表（违反不变量 9）；把窗口写进 system prompt（那是提示词污染）；
+按 token 精确计费（`[pricing]` 仍未做）；为每家厂商维护一个 adapter（通用入口是
+`provider = "openai"` + 显式 `base_url`/`model`，走标准 OpenAI 兼容面）。
+
+**代价**：表会过期——新模型/新窗口需要重跑脚本才有自动值；不重跑就落回兜底并提示。
+预算变大后单轮成本与首字延迟上升（预填更大），靠 `context_ratio` 与 `/usage` 观察调。
+
+**验收**：
+1. `provider=opencode-go / model=deepseek-v4.1-flash` 不写任何预算 → 预算 500000、视觉 on
+   （`config::tests::context_budget_follows_window`、`model_pick::tests::*`）；
+2. 认不出的模型 → 窗口 0、预算 24000，且启动行与日志都说清楚原因；
+3. 显式 `context_window` / `context_budget_tokens` 覆盖自动值；
+   provider 写别名（`zhipuai`/`dashscope`）或干脆对不上时，仍能按 model 命中
+   （`model_pick::tests::provider_alias_maps_to_table_id`、`unknown_provider_falls_back_to_model_average`）；
+4. 每轮终稿只有**最后一条分片**带占比行，且窗口未知时不出现百分比
+   （`render::tests::footer_only_on_last_shard`、`copy::tests::context_footer_*`）；
+5. 小预算下历史仍不会退回到会话开头（`runner_flow::history_keeps_latest_turn_in_long_conversation`）。
