@@ -42,6 +42,8 @@ pub struct TurnRenderer {
     send_after: Timestamp,
     /// 定稿最后一条消息上的按钮（如「沉淀为 Skill」）
     trailing: Vec<Vec<Button>>,
+    /// 终稿末尾的一行小注（这一轮用了多少上下文）。空 = 不显示。
+    footer: Option<String>,
 }
 
 impl TurnRenderer {
@@ -59,6 +61,7 @@ impl TurnRenderer {
             last_sent: None,
             send_after: 0,
             trailing: Vec::new(),
+            footer: None,
         }
     }
 
@@ -286,6 +289,10 @@ impl Renderer for TurnRenderer {
         self.text = text;
     }
 
+    fn set_footer(&mut self, footer: String) {
+        self.footer = if footer.trim().is_empty() { None } else { Some(footer) };
+    }
+
     fn finish(&mut self, status: RunStatus) -> Vec<RenderAction> {
         let text = std::mem::take(&mut self.text);
         // 阶段状态只用于过程展示，终稿一律丢弃，避免停留在"第 N 轮 · 生成中"
@@ -335,6 +342,11 @@ impl Renderer for TurnRenderer {
             let mut blocks = if i == 0 { head.clone() } else { Vec::new() };
             blocks.push(Block::Paragraph(shard));
             let last = i + 1 == total;
+            // 小注只挂在最后一条：分片消息中间插一行会把正文切断。
+            if let (true, Some(f)) = (last, &self.footer) {
+                blocks.push(Block::Paragraph(f.clone()));
+            }
+
             let view = View {
                 shard: i as u16,
                 is_last: last,
@@ -512,9 +524,30 @@ mod tests {
         assert!(matches!(acts[0], RenderAction::Send(_)), "定稿必须发一条");
     }
 
+    /// 上下文占比只挂在最后一条分片：中间插一行会把正文切断。
     #[test]
-    fn skips_edit_when_nothing_changed() {
-        let mut r = TurnRenderer::new(caps());
+    fn footer_only_on_last_shard() {
+        let mut r = TurnRenderer::new(Caps { max_text: 600, ..caps() });
+        r.replace_text("正".repeat(1_500));
+        r.set_footer("· 上下文 12%（118k / 1M）".into());
+        let acts = r.finish(RunStatus::Done);
+        assert!(acts.len() > 1, "应分成多条");
+        let last = acts.len();
+        for (i, a) in acts.iter().enumerate() {
+            let view = match a {
+                RenderAction::Send(v) | RenderAction::Edit(v) => v,
+                RenderAction::None => panic!("finish 不该返回 None"),
+            };
+            let has = view
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Paragraph(t) if t.contains("上下文")));
+            assert_eq!(has, i + 1 == last, "只有最后一条带小注");
+        }
+    }
+
+    #[test]
+    fn skips_edit_when_nothing_changed() {        let mut r = TurnRenderer::new(caps());
         r.push(RenderEvent::Stream(StreamEvent::TurnStarted { turn_no: 1 }));
         assert!(matches!(r.flush(0), RenderAction::Send(_)));
         assert!(matches!(r.flush(1000), RenderAction::None), "内容没变不该 edit");
@@ -523,8 +556,7 @@ mod tests {
 
     /// 429 退避之后，同一份快照要能再发出去（不能因为签名已记录就永远丢掉）。
     #[test]
-    fn retries_after_rate_limit_backoff() {
-        let mut r = TurnRenderer::new(caps());
+    fn retries_after_rate_limit_backoff() {        let mut r = TurnRenderer::new(caps());
         r.push(RenderEvent::Stream(StreamEvent::TextDelta("x".into())));
         assert!(matches!(r.flush(0), RenderAction::Send(_)));
         r.on_sent(MsgRef("m1".into()));

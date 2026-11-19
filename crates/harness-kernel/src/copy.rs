@@ -46,6 +46,44 @@ pub const OUT_OF_TIME: &str =
 /// `/usage` 的金额一栏：没配价格时别假装免费，也别甩配置键。
 pub const MONEY_UNKNOWN: &str = "金额未统计";
 
+/// 终稿末尾的一行"这一轮用了多少上下文"（TUI / GUI 里常见的占比）。
+///
+/// 为什么要给人看：历史和窗口的关系一直只有内核自己知道，主人只能等到"模型开始失忆"
+/// 或者任务被裁掉才发现。有了这行，什么时候该开新会话、什么时候该压缩，是可以看着数
+/// 决定的，而不是猜。窗口未知（内置表认不出模型）时只报绝对量，不给假比例。
+pub fn context_footer(used: u64, window: u64) -> Option<String> {
+    if used == 0 {
+        return None;
+    }
+    if window == 0 {
+        return Some(format!("· 上下文 {}", compact_tokens(used)));
+    }
+    let pct = used as f64 * 100.0 / window as f64;
+    let pct = if pct < 9.95 { format!("{pct:.1}%") } else { format!("{pct:.0}%") };
+    Some(format!(
+        "· 上下文 {pct}（{} / {}）",
+        compact_tokens(used),
+        compact_tokens(window)
+    ))
+}
+
+/// 大数字的口语写法：118k / 1M。别写 8 位数字，读起来费劲。
+fn compact_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        if (m - m.round()).abs() < 0.05 {
+            format!("{:.0}M", m)
+        } else {
+            format!("{m:.1}M")
+        }
+    } else if n >= 1_000 {
+        let k = n as f64 / 1_000.0;
+        format!("{k:.0}k")
+    } else {
+        n.to_string()
+    }
+}
+
 /// 审批：只有更高权限的账号能批（D30 §2）。
 pub const NOT_APPROVER: &str = "这个需要更高权限的账号来确认。";
 
@@ -141,6 +179,8 @@ mod tests {
             OUT_OF_TIME.to_owned(),
             MONEY_UNKNOWN.to_owned(),
             quota_exhausted("约 5 分钟后可再试", "upstream said: quota"),
+            context_footer(118_000, 1_000_000).unwrap(),
+            context_footer(900, 0).unwrap(),
         ]
     }
 
@@ -176,6 +216,25 @@ mod tests {
                 assert!(!s.contains(bad), "文案里不该出现 {bad:?}：{s}");
             }
         }
+    }
+
+    #[test]
+    fn context_footer_shows_ratio_and_absolute() {
+        let f = context_footer(118_000, 1_000_000).unwrap();
+        assert!(f.contains("12%"), "{f}");
+        // 10% 以下保留一位小数：2.4% 与 2% 对"该不该开新会话"是两种判断
+        let low = context_footer(24_000, 1_000_000).unwrap();
+        assert!(low.contains("2.4%"), "{low}");
+        assert!(f.contains("118k / 1M"), "{f}");
+    }
+
+    #[test]
+    fn context_footer_without_window_has_no_fake_ratio() {
+        let f = context_footer(900, 0).unwrap();
+        assert!(!f.contains('%'), "窗口未知时不该编一个比例：{f}");
+        assert!(f.contains("900"), "{f}");
+        // 没有用量就不显示（供应商没回报 usage）
+        assert_eq!(context_footer(0, 1_000_000), None);
     }
 
     #[test]

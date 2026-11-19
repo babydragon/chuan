@@ -115,6 +115,10 @@ pub trait Renderer: Send {
     fn set_trailing_buttons(&mut self, buttons: Vec<Vec<Button>>) {
         let _ = buttons;
     }
+    /// 终稿末尾的一行小注（这一轮用了多少上下文）；空的 = 不要。
+    fn set_footer(&mut self, footer: String) {
+        let _ = footer;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

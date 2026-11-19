@@ -495,6 +495,7 @@ async fn actor_turns_inbound_into_reply() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -566,6 +567,7 @@ async fn final_message_is_retried_after_rate_limit_window() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -635,6 +637,7 @@ async fn actor_answers_slash_status() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -724,6 +727,7 @@ async fn over_budget_blocks_run_with_visible_message() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -815,6 +819,7 @@ async fn over_budget_blocks_delegation() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -878,6 +883,7 @@ fn task_actor(
             system_prompt: "SYS".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             agents: harness_kernel::AgentLimits {
                 background_idle_s: idle_s,
@@ -1193,6 +1199,7 @@ async fn agents_show_dumps_child_transcript() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -1259,6 +1266,7 @@ async fn actor_answers_slash_agents() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -1328,6 +1336,7 @@ async fn path_like_command_is_treated_as_text() {
             system_prompt: "SYS".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -1411,6 +1420,7 @@ async fn actor_answers_slash_prompt() {
             system_prompt: "CORE-MARK 我的追加段".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -1478,6 +1488,7 @@ async fn actor_answers_slash_usage() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -1654,6 +1665,7 @@ async fn role_shapes_child_prompt_tools_and_model() {
             system_prompt: "SYS-BASE".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             agents: harness_kernel::AgentLimits {
                 // 白名单给两件（echo / selfmod），角色再收窄到 echo：
@@ -1770,6 +1782,7 @@ async fn role_catalog_is_visible_and_hot_loaded() {
             system_prompt: "SYS".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             agents: harness_kernel::AgentLimits {
                 tools: vec!["echo".into()],
@@ -1948,6 +1961,7 @@ async fn spawn_extracts_pending_actions() {
             system_prompt: "SYS".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2057,6 +2071,7 @@ async fn child_agent_is_isolated_and_cannot_self_modify() {
             system_prompt: "SYS".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             agents: AgentLimits {
                 max_per_run: 2,
@@ -2177,6 +2192,7 @@ async fn approval_gate_allows_after_callback() {
                 ..Default::default()
             },
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2332,6 +2348,7 @@ async fn done_run_with_writes_offers_publish_button() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2404,6 +2421,7 @@ async fn skill_button_starts_distill_run() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2523,6 +2541,7 @@ async fn clicking_publish_button_removes_keyboard() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2723,6 +2742,7 @@ async fn run_one_tool_call(
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2821,6 +2841,7 @@ async fn slash_facts_empty_and_help_lists_commands() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -2893,6 +2914,7 @@ async fn due_reminder_fires_once_and_rearms() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3028,6 +3050,7 @@ async fn pinned_reminder_runs_skill_without_model() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3131,6 +3154,7 @@ async fn static_reminder_sends_text_only() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3253,6 +3277,7 @@ async fn approval_card_uses_tool_hint() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3341,6 +3366,7 @@ async fn reminders_are_per_user() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3472,6 +3498,7 @@ async fn pinned_reminder_with_polish_passes_data_to_model() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3573,6 +3600,7 @@ async fn tool_catalog_is_injected_into_system_prompt() {
             system_prompt: "BASE".into(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3660,6 +3688,7 @@ fn actor_with_registry(
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3874,6 +3903,7 @@ async fn two_channels_do_not_cross_talk() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -3948,6 +3978,7 @@ async fn unbound_address_gets_unauthorized_without_running() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4051,6 +4082,7 @@ async fn short_code_approval_with_human_readable_card() {
                 ..Default::default()
             },
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4182,6 +4214,7 @@ async fn bare_media_waits_for_instruction() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4254,6 +4287,7 @@ async fn pending_media_merges_into_next_text() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4407,6 +4441,7 @@ async fn member_hits_ceiling_without_a_card() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4478,6 +4513,7 @@ async fn non_owner_cannot_approve() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4608,6 +4644,7 @@ async fn member_runs_a_command_entry_without_a_card() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4728,6 +4765,7 @@ async fn unknown_command_entry_is_blocked() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -4901,6 +4939,7 @@ async fn proposal_is_installed_only_after_owner_approves() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -5038,6 +5077,7 @@ async fn member_sets_reminder_without_a_card() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -5121,6 +5161,7 @@ async fn repeated_blocks_notify_owner_once() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -5215,6 +5256,7 @@ async fn member_can_schedule_a_model_reminder_but_owner_is_told() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -5320,6 +5362,7 @@ async fn scheduled_run_skips_approval_and_tells_owner_once() {
             system_prompt: String::new(),
             policy: harness_kernel::ApprovalPolicy::default(),
             context_budget_tokens: 100_000,
+            context_window: 0,
             lanes: lanes().clone(),
             // 这些用例验证的是"后台任务跑完通知"，不测唤醒：关掉它，
             // 否则多起一轮 run 会让合成消息落在首个 run 边界之前被分页跳过。
@@ -5455,6 +5498,9 @@ async fn history_keeps_latest_turn_in_long_conversation() {
     let mut req = request();
     req.text = "第六十一轮的提问".into();
     req.run = RunId::from("r1");
+    // 明细窗口跟着预算走（D43）：预算 5k → 边界数取下限 50，正好复现
+    // "50 轮之后窗口不该退回到会话开头"这个老毛病。
+    req.context_budget_tokens = 5_000;
     let pair = EventSink::channel(32);
     runner.run(req, pair.sink, CancellationToken::new()).await.unwrap();
 

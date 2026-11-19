@@ -52,6 +52,9 @@ pub struct RunRequest {
 pub struct RunOutcome {
     pub text: String,
     pub status: RunStatus,
+    /// 最后一次模型请求的 prompt token 数 = 这一轮真正用掉的上下文。
+    /// 0 = 拿不到（供应商没回报 usage）。用来算"占窗口多少"，不参与账务。
+    pub context_tokens: u64,
     /// 本轮实际发起过的工具名（按调用顺序）。用于判断"这轮有没有产出"，
     /// 比看渲染事件可靠：渲染只是展示，这里才是账本事实。
     pub tools: Vec<String>,
@@ -180,7 +183,15 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
             let mut rd = self.store.begin_read().await?;
             // 取**最近**的若干 turn：用 `messages(0, n)` 会拿到会话开头的前 n 轮，
             // 超过 n 轮之后用户刚问的那句就被切掉了（模型只能接着上一段编）。
-            rd.recent_messages(conv.clone(), 50).await?
+            //
+            // 边界数跟着预算走（D43）：一次 8 回合的 run 就吃掉 9 个边界，
+            // 写死 50 会让"能装多少轮"先于 token 预算成为天花板。
+            //
+            // 上限 300 是给 SBC 留的余量：每个边界最多带一条 12k 字的工具输出，
+            // 每次 run 都要全读一遍，1000 个边界在最坏情况下是几十 MB 的 IO 与内存。
+            // 典型一轮 2–4k token，300 个边界已经超过 50 万预算能装下的量。
+            let boundaries = (req.context_budget_tokens / 2_000).clamp(50, 300) as u16;
+            rd.recent_messages(conv.clone(), boundaries).await?
         };
         let (history, trimmed) = crate::context::select(&history, req.context_budget_tokens);
         if trimmed > 0 {
@@ -221,6 +232,8 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
 
         let mut turn_no: u32 = 0;
         let mut recorded_usage: usize = 0;
+        // 最后一次请求的 prompt token：只有它能表示"这一轮真实占了多少上下文"
+        let mut context_tokens: u64 = 0;
         // token 预算只提醒两档，避免每轮都唠叨
         let mut warned_half = false;
         let mut warned_near = false;
@@ -283,6 +296,9 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                 turn.step().await
             };
             self.record_usage(&mut *turn, &conv, &run, &mut recorded_usage).await?;
+            if let Some(last) = turn.usage().records.last() {
+                context_tokens = last.prompt_tokens as u64;
+            }
             if let Some(limit) = req.token_budget {
                 let used: u64 = turn
                     .usage()
@@ -376,7 +392,12 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
                         said.push(text);
                     }
                     let text = join_said(&said);
-                    return Ok(RunOutcome { text, status: RunStatus::Done, tools: used });
+                    return Ok(RunOutcome {
+                        text,
+                        status: RunStatus::Done,
+                        context_tokens,
+                        tools: used,
+                    });
                 }
                 Ok(Step::Tools { text, calls }) => {
                     if !text.trim().is_empty() {
@@ -747,7 +768,7 @@ impl<'a, S: Store, D: TurnDriver> Runner<'a, S, D> {
         })
         .await?;
         tx.commit().await?;
-        Ok(RunOutcome { text, status, tools: Vec::new() })
+        Ok(RunOutcome { text, status, context_tokens: 0, tools: Vec::new() })
     }
 }
 

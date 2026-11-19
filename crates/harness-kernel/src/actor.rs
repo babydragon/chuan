@@ -149,8 +149,10 @@ pub struct ActorConfig {
     pub workspace_root: String,
     /// 审批策略：按执行域判定，`extra_tools` 可额外加严
     pub policy: crate::policy::ApprovalPolicy,
-    /// 上下文预算（估算字符数）
+    /// 上下文预算（token，已按模型窗口算好）
     pub context_budget_tokens: usize,
+    /// 模型窗口（token，0 = 未知）。只用于把"这一轮用了多少"换算成百分比。
+    pub context_window: u64,
     /// 并发车道（D11）。所有 run 共享同一组信号量。
     pub lanes: crate::lanes::Lanes,
     /// 子 agent 闸门与默认预算（D19/D20）
@@ -1922,6 +1924,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let status = match &outcome {
             Ok(o) => {
                 renderer.replace_text(o.text.clone());
+                // 成功的那一轮才报"用了多少"：失败/取消时最后一次请求的 prompt 不代表结论。
+                if o.status == RunStatus::Done {
+                    if let Some(f) = crate::copy::context_footer(o.context_tokens, self.cfg.context_window)
+                    {
+                        renderer.set_footer(f);
+                    }
+                }
                 o.status.clone()
             }
             Err(_) => RunStatus::Failed,
