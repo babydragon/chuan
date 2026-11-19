@@ -104,6 +104,13 @@
 > 「同家去版本 → 同名均值」回退，`[vision]` 随之自动开关（D43）。
 > 每轮终稿末尾多一行「上下文 12%（118k / 1M）」；新增通用 `provider = "openai"`
 > （自填 `base_url` 与 `model`，任意 OpenAI 兼容端点，含云厂商兼容模式与中转站）。
+> **0.3.0-rc.5**（修复 + 观测）：流式 chunk 里的**显式 null** 不再让整轮 run 失败——
+> `opencode-go / deepseek-v4.1-flash` 首个 chunk 会发 `"tool_calls": null`，而 serde 的
+> `default` 只兜缺字段、不兜 null，表现为 `bad chunk: invalid type: null, expected a sequence`；
+> 顺带给 `choices` / `delta` 一起加固。示例配置不再写死 `context_budget_tokens = 24000`
+> （会静默盖掉"按窗口自动"），启动行标出预算来源。`/usage` 增加**最近 3 天 / 最近 7 天**，
+> 每行带请求次数与平均输入，用于判断缓存命中率为什么低。
+> CI 的四个 action 升到 Node 24 运行时。
 
 ---
 
