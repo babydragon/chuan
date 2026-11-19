@@ -17,7 +17,7 @@ jobs:
     name: test (x86_64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -58,7 +58,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -68,6 +68,8 @@ jobs:
         with:
           key: ${{ matrix.arch }}
 
+      # setup-zig 上游最新 v2.2.1 仍是 node20（仓库里没有 node24 的 release）：
+      # 保留会产生一条"Node 20 deprecated"提示，功能不受影响，等上游升级再跟。
       - uses: mlugg/setup-zig@v2
 
       - uses: taiki-e/install-action@v2
@@ -84,7 +86,7 @@ jobs:
             | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3
 
       - name: 上传二进制
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chuan-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/chuan
@@ -99,9 +101,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -132,7 +134,7 @@ jobs:
           cat SHA256SUMS
 
       - name: 创建 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: chuan ${{ github.ref_name }}
           # 版本号带 `-` 即视为预发布（v0.2.0-rc.1 / v0.2.0-beta.1）
