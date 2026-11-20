@@ -50,6 +50,8 @@
       `curl` 直连 exit=6、走代理 exit=7，与"无网卡"一致）
 - [x] 联网 lane（`lan_exec` / `network: true` 技能）能看到网卡，且 **DNS 可用**
       （**2026-10-27 实测**：`getent hosts github.com` → `20.205.243.166`，2.5s）
+- [ ] 联网 lane 里 `/py/bin/python3` 可用：`install_deps` 装的包在**调试内网设备时**也能 import
+      （`lan_exec` 挂只读 `/py` `/node`；离线 lane 已由 `runtime_venv_is_visible_in_sandbox` 守卫）
 - [x] `[sandbox] mounts` 挂 `/run/cups` 后，沙盒内 `lpstat -e` 可见打印机（只读）
       （**2026-10-27 实测**：`lpstat -r` → `scheduler is running`；`lpstat -e` → `B7520DW` `T435W`；
       默认队列 `B7520DW`；离线 `exec` 里即可用，说明走的是 socket 不是网络）

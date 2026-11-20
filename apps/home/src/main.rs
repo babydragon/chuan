@@ -425,9 +425,12 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     tools.register(Arc::new(ReadTool));
     tools.register(Arc::new(WriteTool));
     tools.register(Arc::new(ExecTool::sandboxed().with_proxy(cfg.proxy.clone())));
-    // 内网调试 lane：有网卡，逐条审批；看不到宿主文件
-    let lan_env: Arc<dyn harness_kernel::ExecutionEnv> =
-        Arc::new(sandbox.lan(&cfg.workspace, cfg.sandbox_mounts.clone()));
+    // 内网调试 lane：有网卡，逐条审批；看不到宿主文件，但能读只读运行时（/py、/node）
+    let lan_env: Arc<dyn harness_kernel::ExecutionEnv> = Arc::new(sandbox.lan(
+        &cfg.workspace,
+        cfg.sandbox_mounts.clone(),
+        &cfg.runtime_dir,
+    ));
     tools.register(Arc::new(ExecTool::lan(Arc::clone(&lan_env)).with_proxy(cfg.proxy.clone())));
     // 命令条目（D31）：同一条 lane，但不经 shell、参数域封闭，命中即免审批
     tools.register(Arc::new(LanCommandTool::new(

@@ -383,12 +383,22 @@ impl SandboxProfile {
             .with_masked_dir(&self.secrets)
     }
 
-    /// 内网调试 lane：保留网卡（逐条审批），只看 workspace 与授权挂载；
-    /// 不挂 inbox/skills/media/运行时。
-    pub fn lan(&self, workspace: impl Into<PathBuf>, mounts: Vec<Mount>) -> BwrapEnv {
+    /// 内网调试 lane：保留网卡（逐条审批），只看 workspace、授权挂载与只读运行时；
+    /// 不挂 inbox/skills/media。
+    ///
+    /// 运行时**只读**挂 `/py` `/node`，与离线 lane、`skill_net` 一致：否则"联网调试
+    /// 内网设备"与"用 `install_deps` 装好的包"互斥，模型只能退回系统 python 或往
+    /// `/ws` 里塞一份 pip 包。`/py` 里只有第三方包与 venv 配置，不含凭据。
+    pub fn lan(
+        &self,
+        workspace: impl Into<PathBuf>,
+        mounts: Vec<Mount>,
+        runtime: impl Into<PathBuf>,
+    ) -> BwrapEnv {
         BwrapEnv::new(workspace)
             .with_network(true)
             .with_mounts(mounts)
+            .with_runtime(runtime, false)
             .with_masked_dir(&self.secrets)
     }
 

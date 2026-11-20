@@ -811,12 +811,15 @@ fn profile_offline_args_are_hermetic() {
     assert!(args.windows(2).any(|w| w[0] == "--remount-ro" && w[1] == p(secrets.path())));
 }
 
-/// 内网 lane：保留网卡，但只有 workspace 与显式授权挂载。
+/// 内网 lane：保留网卡；只有 workspace、显式授权挂载与**只读**运行时。
 #[test]
-fn profile_lan_keeps_net_and_drops_default_mounts() {
+fn profile_lan_keeps_net_and_readonly_runtime() {
     let ws = tempfile::tempdir().unwrap();
     let extra = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
     let secrets = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(runtime.path().join("py/bin")).unwrap();
+    std::fs::create_dir_all(runtime.path().join("node")).unwrap();
     let env = SandboxProfile::new(secrets.path()).lan(
         ws.path(),
         vec![Mount {
@@ -824,6 +827,7 @@ fn profile_lan_keeps_net_and_drops_default_mounts() {
             dst: "/run/extra".into(),
             ro: true,
         }],
+        runtime.path(),
     );
     let args = preview(&env);
 
@@ -831,7 +835,14 @@ fn profile_lan_keeps_net_and_drops_default_mounts() {
     assert!(!has_flag(&args, "--unshare-net"), "lan 必须保留网卡");
     assert!(has_flag(&args, "--unshare-pid"));
     assert!(has_pair(&args, "--ro-bind", &extra.path().display().to_string(), "/run/extra"));
-    for p in ["/inbox", "/skills", "/media", "/rt", "/py", "/node"] {
+    // 已装的包必须和网卡在同一套环境里，否则"联网调试内网设备"和 install_deps 互斥
+    assert!(has_pair(&args, "--ro-bind", &runtime.path().join("py").display().to_string(), "/py"));
+    assert!(has_pair(&args, "--ro-bind", &runtime.path().join("node").display().to_string(), "/node"));
+    assert!(
+        args.iter().any(|a| a.starts_with("/py/bin:/usr/local/bin")),
+        "PATH 应含 /py/bin"
+    );
+    for p in ["/inbox", "/skills", "/media", "/rt"] {
         assert!(!has_flag(&args, p), "lan 不该挂 {p}");
     }
     // 有网 + 能读 /etc ⇒ 必须遮凭据目录

@@ -558,6 +558,10 @@ pub trait ExecutionEnv: Send + Sync {
 沙盒的默认 lane 永不联网；外部数据有两条路：宿主 `web_fetch` 代取（拒绝内网/回环、逐次审计），
 或技能声明 `network: true` 走独立联网 lane（`lan_exec` 同款）。凭据由宿主注入，不进上下文。
 
+运行时（`install_deps` 装进去的包）在**每条沙盒 lane 里都只读可见**：离线 `exec`、`network: true`
+技能、`lan_exec` 都挂 `/py` `/node`；装包 lane 是唯一把运行时整块可写挂到 `/rt` 的（`/rt/py` 与
+`/py` 是同一目录的两个视图）。`lan` 不挂 `/inbox` `/skills` `/media`。
+
 **技能服务网关（D41）**：技能需要调有鉴权的命名服务时，声明 `skill.json.services`；
 `run_skill` 在 `/ws/.g/<id>/` 下为每个服务建一个 unix socket，路径通过 stdin 的 `_gateway`
 传给脚本。协议是一行 JSON：
