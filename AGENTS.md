@@ -180,3 +180,45 @@ apps/<name>/            # 薄二进制 crate + config/prompts/skills/evals
 
 图：`docs/architecture.png`（源 `docs/architecture.dot`）。
 沙盒验证脚本：`deploy/verify-sandbox.sh`。
+
+---
+
+## 10. 发布流程（默认 rc，主人确认后转正式版）
+
+版本号形态 `v<major>.<minor>.<patch>`，预发布在末尾加 `-rc.<N>`（如 `v0.3.0-rc.6`）；
+同一个 minor 内 `N` 递增，正式版发布后这一轮 rc 结束。发布包含 commit / tag / push，
+**只有主人明确要求时才能执行**（见 §6.5）；平时只准备改动与验证，不自行推 tag。
+
+### 10.1 平时：只发 rc 预发布
+
+1. `Cargo.toml` 的 `[workspace.package] version` 改为新的 `X.Y.Z-rc.N`
+   （`cargo check` 会同步 `Cargo.lock`）；`docs/README.md` 追加一条本版说明，
+   `docs/ROADMAP.md` 的「预发布到」指向新 tag。
+2. 验证全绿：`cargo test --workspace --all-targets`、`python3 scripts/check-layering.py`、
+   `bash scripts/check-install.sh`。
+3. 提交 `chore(release): vX.Y.Z-rc.N（一句话）`，打同名 tag，push 提交与 tag。
+4. 发布由 CI 完成：`.github/workflows/ci.yml` 的 `release` job 交叉编译两个架构并创建
+   GitHub Release；tag 里带 `-` 时自动标为 Pre-release，不占 `latest`。
+   **不要手工 `gh release create`**——资产（tar.gz / install.sh / SHA256SUMS）由 CI 产出。
+
+### 10.2 正式版：主人确认后，从最近一个 rc 转
+
+1. 不夹带功能改动，只收版本号：`version` 改为 `X.Y.Z`；`docs/README.md` 写「X.Y.Z（正式）」
+   汇总本轮 rc；`docs/ROADMAP.md` 的正式版列表追加。
+2. 重新提交 `chore(release): vX.Y.Z（正式版）`，打 tag `vX.Y.Z`，push 提交与 tag。
+   **必须重新提交、重新打 tag**：直接给 rc 的提交补一个正式 tag，二进制里的版本号仍是 rc。
+3. 等 CI 跑完：Release 已生成且不是 Pre-release、`make_latest` 指向它、两个架构的包与
+   `install.sh` / `SHA256SUMS` 齐全。
+
+### 10.3 正式版发布成功后：清理预发布
+
+1. 核对正式版 Release 与 `latest` 正常后，删除此前遗留的 rc 预发布条目（本次即
+   `v0.3.0-rc.5`、`v0.3.0-rc.6` 两个），连同远程 tag：
+
+   ```bash
+   gh release delete vX.Y.Z-rc.N --yes --cleanup-tag
+   git tag -d vX.Y.Z-rc.N
+   ```
+
+2. Releases 列表只保留正式版（`v0.1.0`、`v0.2.0`、`v0.3.0` 这类），预发布不再出现。
+3. 删除不可逆：先确认正式版资产与 `latest`，再删；**正式版的 tag 永远不删**。

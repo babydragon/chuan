@@ -116,6 +116,10 @@
 > 只能退回系统 python 或往 `/ws` 塞一份 pip 包。同时修掉该车道描述里从离线分支照抄的
 > `/inbox` `/skills` `/media` 路径表（实际都没挂）——模型正是照着它去用 `/py`、撞空后
 > 提议往宿主 python 里 `pip install --break-system-packages`。
+> **0.3.0（正式）**：汇总 rc.1–rc.6——技能服务网关（D41）与内置 `service-gateway` 规程、
+> 配置 `Content-Type` 不再重复、上下文结论优先裁剪（D42）与按模型窗口自动预算/占比（D43）、
+> 流式 chunk 显式 null 加固、`/usage` 四窗口、内网 lane 只读挂载运行时。
+> 板上逐条验收仍以 `SBC-VERIFY.md` 为准。
 
 ---
 
