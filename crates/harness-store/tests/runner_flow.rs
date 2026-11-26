@@ -376,6 +376,10 @@ struct FakeChannel {
     cleared: Mutex<Vec<String>>,
     /// 接下来 N 次 deliver 返回 429（用来验证限流后仍能送达）
     fail_deliver_times: Mutex<usize>,
+    /// 接下来 N 次 deliver 返回"平台暂时不可用"（502 那类）
+    transient_deliver_times: Mutex<usize>,
+    /// deliver 永久返回不可重试错误（验证失败提示会留底）
+    reject_deliver: Mutex<bool>,
     /// 状态反应：(message_id, emoji)；emoji 为空表示清空（D24）
     reactions: Mutex<Vec<(String, String)>>,
     /// 让 react 永远失败（验证 best-effort）
@@ -413,6 +417,16 @@ impl harness_kernel::Channel for FakeChannel {
         Ok(())
     }
     async fn deliver(&self, _c: &str, view: View) -> Result<MsgRef, ChannelError> {
+        if *self.reject_deliver.lock().unwrap() {
+            return Err(ChannelError::BadRequest("can't parse entities".into()));
+        }
+        {
+            let mut left = self.transient_deliver_times.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(ChannelError::Transient("Bad Gateway".into()));
+            }
+        }
         {
             let mut left = self.fail_deliver_times.lock().unwrap();
             if *left > 0 {
@@ -5520,4 +5534,146 @@ async fn history_keeps_latest_turn_in_long_conversation() {
         !texts.contains(&"早先的问题"),
         "历史窗口不该退回到会话开头：{texts:?}"
     );
+}
+
+fn actors_cfg() -> ActorConfig {
+    ActorConfig {
+        memory_inject_limit: 1000,
+        model: "m".into(),
+        max_turns: 4,
+        wall_clock_ms: 20_000,
+        workspace_root: "/tmp/ws".into(),
+        system_prompt: String::new(),
+        policy: harness_kernel::ApprovalPolicy::default(),
+        context_budget_tokens: 100_000,
+        context_window: 0,
+        lanes: lanes().clone(),
+        agents: harness_kernel::AgentLimits {
+            resume_on_done: false,
+            ..Default::default()
+        },
+        skill_source: None,
+        tool_source: None,
+        distill_prompt: String::new(),
+        tz_offset_min: 480,
+        host_paths: None,
+        vision: false,
+        proxy_hint: None,
+        budget: Default::default(),
+        roles: None,
+        identity: std::sync::Arc::new(harness_kernel::Directory::default()),
+        commands: None,
+    }
+}
+
+fn inbound_text(conv: &str, text: &str, key: &str) -> Inbound {
+    Inbound {
+        channel: harness_kernel::ChannelId("fake".into()),
+        conversation: conv.into(),
+        actor: "42".into(),
+        kind: InboundKind::Text,
+        text: Some(text.into()),
+        dedupe_key: key.into(),
+        callback_id: None,
+        msg: None,
+        received_at: 0,
+        attachments: Vec::new(),
+    }
+}
+
+/// 网关抖动（502）只影响"这一拍"，绝不能把整轮 run 杀掉。
+#[tokio::test]
+async fn transient_send_failure_does_not_kill_the_run() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = FakeDriver::new(vec![Step::Done {
+        text: "终点还是到了".into(),
+        finish: FinishReason::Stop,
+    }]);
+    let channel = Arc::new(FakeChannel::default());
+    // 3 次 = deliver_with_retry 的全部尝试：第一次 Send 必然失败并被降级成 Deferred
+    *channel.transient_deliver_times.lock().unwrap() = 3;
+
+    let actor = ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        actors_cfg(),
+        None,
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(inbound_text("1000", "说点什么", "u-502")).await.unwrap();
+    drop(tx);
+    Arc::new(actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    let sent = channel.delivered.lock().unwrap();
+    assert!(
+        sent.iter().any(|t| t.contains("终点还是到了")),
+        "502 之后 run 必须继续并送达终稿: {sent:?}"
+    );
+    assert!(harness_kernel::notice::list(&*store).await.is_empty(), "送达了就不该留失败提示");
+}
+
+/// 终稿彻底送不出去时，必须留一句"没送到"的提示（正文丢了可以重问，静默才是问题）。
+#[tokio::test]
+async fn failed_final_delivery_queues_a_notice() {
+    let store = Arc::new(EphemeralStore::new());
+    let driver = FakeDriver::new(vec![Step::Done {
+        text: "这段送不出去".into(),
+        finish: FinishReason::Stop,
+    }]);
+    let channel = Arc::new(FakeChannel::default());
+    *channel.reject_deliver.lock().unwrap() = true;
+
+    let actor = ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        actors_cfg(),
+        None,
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(inbound_text("1000", "说点什么", "u-drop")).await.unwrap();
+    drop(tx);
+    Arc::new(actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    let notices = harness_kernel::notice::list(&*store).await;
+    assert_eq!(notices.len(), 1, "终稿没送到必须留底");
+    assert_eq!(notices[0].channel, "fake");
+    assert_eq!(notices[0].conversation, "1000");
+    assert_eq!(notices[0].text, harness_kernel::copy::REPLY_DROPPED);
+}
+
+/// 连"出错了"那句话都发不出去时：外层兜底留一句提示，不能让用户完全没线索。
+#[tokio::test]
+async fn lost_error_reply_queues_a_notice() {
+    let store = Arc::new(EphemeralStore::new());
+    // 没有任何 step：模型调用会失败 → run 失败 → 失败说明也发不出去
+    let driver = FakeDriver::new(Vec::new());
+    let channel = Arc::new(FakeChannel::default());
+    *channel.reject_deliver.lock().unwrap() = true;
+
+    let actor = ConversationActor::new(
+        Arc::clone(&store),
+        Arc::new(driver),
+        Arc::new(harness_kernel::ToolRegistry::new()),
+        Arc::new(NoopEnv),
+        Arc::clone(&channel) as Arc<dyn harness_kernel::Channel>,
+        actors_cfg(),
+        None,
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(inbound_text("1000", "说点什么", "u-lost")).await.unwrap();
+    drop(tx);
+    Arc::new(actor).run(rx, CancellationToken::new()).await.unwrap();
+
+    let notices = harness_kernel::notice::list(&*store).await;
+    assert_eq!(notices.len(), 1, "失败说明没发出去时必须留底");
+    assert_eq!(notices[0].text, harness_kernel::copy::RUN_DROPPED);
 }

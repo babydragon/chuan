@@ -23,6 +23,12 @@ pub struct FakeApi {
     pub rate_limit_once: Mutex<Option<u32>>,
     /// 下一次编辑返回 429
     pub rate_limit_edit_once: Mutex<Option<u32>>,
+    /// 接下来 N 次 `send_message` 返回"平台暂时不可用"（502 那类）
+    pub transient_sends: Mutex<usize>,
+    /// 接下来 N 次 `edit_message` 返回"平台暂时不可用"
+    pub transient_edits: Mutex<usize>,
+    /// 下一次 `get_updates` 返回 502
+    pub unavailable_poll_once: Mutex<bool>,
     next_msg_id: AtomicI64,
 }
 
@@ -43,6 +49,9 @@ impl Api for FakeApi {
     }
 
     async fn get_updates(&self, _offset: i64, _timeout_s: u32) -> Result<Vec<Update>, ApiError> {
+        if std::mem::take(&mut *self.unavailable_poll_once.lock().unwrap()) {
+            return Err(ApiError::Unavailable("Bad Gateway (502)".into()));
+        }
         if let Some(ms) = self.rate_limit_once.lock().unwrap().take() {
             return Err(ApiError::RetryAfter(ms));
         }
@@ -57,6 +66,13 @@ impl Api for FakeApi {
     }
 
     async fn send_message(&self, chat: i64, text: &str, _html: bool) -> Result<MsgRef, ApiError> {
+        {
+            let mut left = self.transient_sends.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(ApiError::Unavailable("Bad Gateway (502)".into()));
+            }
+        }
         self.sent.lock().unwrap().push((chat, text.to_owned()));
         let id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
         Ok(MsgRef(id.to_string()))
@@ -71,6 +87,13 @@ impl Api for FakeApi {
     ) -> Result<EditOutcome, ApiError> {
         if *self.deny_edit.lock().unwrap() {
             return Ok(EditOutcome::TooOld);
+        }
+        {
+            let mut left = self.transient_edits.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(ApiError::Unavailable("Bad Gateway (502)".into()));
+            }
         }
         if let Some(ms) = self.rate_limit_edit_once.lock().unwrap().take() {
             return Err(ApiError::RetryAfter(ms));

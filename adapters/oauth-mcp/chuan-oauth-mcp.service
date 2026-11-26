@@ -1,18 +1,29 @@
 [Unit]
 Description=chuan oauth-mcp (OAuth provider helper)
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 User=chuan
 Group=chuan
-ExecStart=/usr/local/bin/chuan oauth-mcp serve --dir /var/lib/chuan/oauth --host 127.0.0.1 --port 8790
+ExecStart=/usr/local/bin/chuan oauth-mcp serve --dir /var/lib/chuan/oauth --providers-dir /etc/chuan/oauth/providers.d --host 127.0.0.1 --port 8790
 Restart=on-failure
 RestartSec=2
+# opentunnel 按 XDG 目录找 identity/状态，system 单元默认没有 XDG_RUNTIME_DIR，
+# 会退回到共享 /tmp 并拒绝使用（它要求 0700 且属主是当前用户）。给它一个私有的。
+Environment=HOME=/var/lib/chuan
+RuntimeDirectory=chuan-oauth
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/chuan-oauth
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# oauth/：pending、tokens、access_token、回调结果；
+# .local/：bootstrap 写的 tunnel 标记与 opentunnel 的日志/续期证书。
 ReadWritePaths=/var/lib/chuan/oauth
+# 没有 bootstrap 过 OpenTunnel 时 .local 不存在；带 - 前缀才不会让单元起不来
+ReadWritePaths=-/var/lib/chuan/.local
 
 [Install]
 WantedBy=multi-user.target

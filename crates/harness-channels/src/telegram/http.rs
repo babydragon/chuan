@@ -93,8 +93,15 @@ impl HttpApi {
             .await
             .map_err(|e| ApiError::Transport(e.to_string()))?;
         if !resp.status().is_success() {
+            let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(ApiError::BadRequest(format!("{method}: {body}")));
+            let msg = format!("{method}: {body}");
+            // 上传也会撞上网关错误：5xx 是"暂时不可用"，不是内容不合法
+            return Err(if status.is_server_error() {
+                ApiError::Unavailable(msg)
+            } else {
+                ApiError::BadRequest(msg)
+            });
         }
         let v: serde_json::Value = resp
             .json()
@@ -112,23 +119,50 @@ impl HttpApi {
             .await
             .map_err(|e| ApiError::Transport(e.to_string()))?;
         let status = resp.status();
-        let v: serde_json::Value = resp
-            .json()
+        // 先读成文本再解析：502/503 时 Telegram（或其前面的网关）常返回 HTML 错误页，
+        // 直接 `json()` 只会得到 "bad json"，把"平台暂时不可用"误判成协议错误。
+        let body = resp
+            .text()
             .await
-            .map_err(|e| ApiError::Transport(format!("bad json: {e}")))?;
-        if v["ok"].as_bool().unwrap_or(false) {
-            return Ok(v);
-        }
-        let desc = v["description"].as_str().unwrap_or_default().to_owned();
-        if status.as_u16() == 429 {
-            let retry = v["parameters"]["retry_after"].as_u64().unwrap_or(1) as u32;
-            return Err(ApiError::RetryAfter(retry * 1000));
-        }
-        if desc.contains("message is not modified") {
-            return Err(ApiError::NotModified);
-        }
-        Err(ApiError::BadRequest(desc))
+            .map_err(|e| ApiError::Transport(format!("读响应失败: {e}")))?;
+        decode(status.as_u16(), &body)
     }
+}
+
+/// Bot API 响应 → `ApiError`。纯函数，便于按状态码/错误页形态做回归测试
+/// （真实事故：502 被当成 `BadRequest`，一次网关抖动把整轮 run 打死）。
+fn decode(status: u16, body: &str) -> Result<serde_json::Value, ApiError> {
+    let server_error = (500..600).contains(&status);
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(if server_error {
+                let brief: String = body.chars().take(120).collect();
+                ApiError::Unavailable(format!("HTTP {status}: {brief}"))
+            } else {
+                ApiError::Transport(format!("bad json: {e}"))
+            });
+        }
+    };
+    if v["ok"].as_bool().unwrap_or(false) {
+        return Ok(v);
+    }
+    let desc = v["description"].as_str().unwrap_or_default().to_owned();
+    if status == 429 {
+        let retry = v["parameters"]["retry_after"].as_u64().unwrap_or(1) as u32;
+        return Err(ApiError::RetryAfter(retry * 1000));
+    }
+    if desc.contains("message is not modified") {
+        return Err(ApiError::NotModified);
+    }
+    // 有的网关会把 502 包成 `{"ok":false,"error_code":502,...}`，HTTP 状态却是 200，
+    // 所以两个来源都要看，不能只看 `status`。
+    let err_code = v["error_code"].as_i64().unwrap_or(0);
+    if server_error || (500..600).contains(&err_code) {
+        let detail = if desc.is_empty() { format!("HTTP {status}") } else { format!("{desc} ({status})") };
+        return Err(ApiError::Unavailable(detail));
+    }
+    Err(ApiError::BadRequest(desc))
 }
 
 #[async_trait]
@@ -376,5 +410,45 @@ impl Api for HttpApi {
         self.post("answerCallbackQuery", json!({ "callback_query_id": id, "text": text }))
             .await
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+    use crate::telegram::api::ApiError;
+
+    #[test]
+    fn gateway_5xx_is_transient_not_bad_request() {
+        // 真实事故原样：Telegram 曾返回 502 + Bad Gateway
+        let e = decode(502, r#"{"ok":false,"error_code":502,"description":"Bad Gateway"}"#)
+            .unwrap_err();
+        assert!(matches!(e, ApiError::Unavailable(_)), "{e:?}");
+
+        // 网关错误页不是 JSON，也必须归到"暂时不可用"
+        let e = decode(502, "<html>502 Bad Gateway</html>").unwrap_err();
+        assert!(matches!(e, ApiError::Unavailable(_)), "{e:?}");
+
+        // 有的代理把 502 塞进 200 的 body 里
+        let e = decode(200, r#"{"ok":false,"error_code":502,"description":"Bad Gateway"}"#)
+            .unwrap_err();
+        assert!(matches!(e, ApiError::Unavailable(_)), "{e:?}");
+    }
+
+    #[test]
+    fn real_bad_requests_stay_permanent() {
+        let e = decode(
+            400,
+            r#"{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(e, ApiError::BadRequest(_)), "{e:?}");
+    }
+
+    #[test]
+    fn rate_limit_keeps_its_window() {
+        let e = decode(429, r#"{"ok":false,"error_code":429,"parameters":{"retry_after":5}}"#)
+            .unwrap_err();
+        assert!(matches!(e, ApiError::RetryAfter(5_000)), "{e:?}");
     }
 }

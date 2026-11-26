@@ -134,7 +134,12 @@ impl HttpApi {
             .await
             .map_err(|e| ApiError::Transport(format!("{path}: 读响应失败 {e}")))?;
         if !status.is_success() {
-            return Err(ApiError::BadRequest(format!("{path} HTTP {status}: {text}")));
+            let msg = format!("{path} HTTP {status}: {text}");
+            return Err(if status.is_server_error() {
+                ApiError::Unavailable(msg)
+            } else {
+                ApiError::BadRequest(msg)
+            });
         }
         // 实测存在 HTTP 200 + 空 body（`WEIXIN.md` F5），按失败处理但保留原文
         if text.trim().is_empty() {
@@ -325,7 +330,12 @@ impl Api for HttpApi {
         let status = resp.status();
         let text = resp.text().await.map_err(|e| ApiError::Transport(e.to_string()))?;
         if !status.is_success() {
-            return Err(ApiError::BadRequest(format!("getupdates HTTP {status}: {text}")));
+            let msg = format!("getupdates HTTP {status}: {text}");
+            return Err(if status.is_server_error() {
+                ApiError::Unavailable(msg)
+            } else {
+                ApiError::BadRequest(msg)
+            });
         }
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| ApiError::Transport(format!("getupdates 非 JSON: {e}")))?;

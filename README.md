@@ -325,6 +325,35 @@ MCP 服务 `dida`（用 mcp(server="dida", tool=…, args=…) 调用）：
 - 不跟随重定向；响应按 `text/event-stream` 或 JSON 两种解析；
 - 服务连不上只告警，不阻塞启动（其它工具照常可用）。
 
+### OAuth 授权（第三方 MCP / API）
+
+需要走 OAuth 的服务（例如 Cloudflare 的 `mcp.cloudflare.com`）用本地 helper 拿 token，
+**凭据不进上下文**。服务定义放 `services.d`，provider manifest 放配置目录，
+**都不改 `chuan.toml`**：
+
+```bash
+# 服务定义：文件名即服务名（chuan 启动时加载）
+sudo tee /etc/chuan/services.d/oauth.toml >/dev/null <<'EOF'
+kind = "mcp"
+base = "http://127.0.0.1:8790/mcp"
+token_file = "/var/lib/chuan/oauth/mcp-token"
+tools = ["auth_begin", "auth_status", "auth_refresh"]
+EOF
+
+# provider manifest：配置放 /etc/chuan，状态放 /var/lib/chuan
+sudo mkdir -p /etc/chuan/oauth/providers.d
+sudo cp <provider>.toml /etc/chuan/oauth/providers.d/
+```
+
+1. helper 是 `chuan oauth-mcp serve`，单独跑一个常驻服务（`--with-opentunnel` 会一起装）；
+2. 让 agent 调 `auth_begin`，它返回一条公开授权链接，经当前通道发给你；
+3. 回调两种模式：**手动粘贴**（默认；浏览器打不开 `127.0.0.1` 时把地址栏 URL 交给
+   `chuan oauth-mcp finish` 的 stdin），或 **OpenTunnel 自动回调**（可选组件，
+   安装时加 `--with-opentunnel --bootstrap-oauth-tunnel`，同意后自动完成）；
+4. 授权完成后重启 chuan，让它重新拉该服务的工具目录。
+
+完整步骤（安装、tunnel 检查、manifest 全文、排查表）：`adapters/oauth-mcp/README.md`。
+
 ### 大响应的处理
 
 `http` / `web_fetch` 用同一套策略，**按内容类型决定给什么**：

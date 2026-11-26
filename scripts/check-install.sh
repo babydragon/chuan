@@ -20,6 +20,7 @@ mkdir -p "$REL" "$WORK/pkg" "$WORK/client"
 cp "$REPO_ROOT/deploy/install.sh" "$WORK/pkg/install.sh"
 printf '#!/bin/sh\necho fake\n' > "$WORK/pkg/chuan"
 cp "$REPO_ROOT/deploy/chuan.toml.example" "$WORK/pkg/"
+cp "$REPO_ROOT/adapters/oauth-mcp/chuan-oauth-mcp.service" "$WORK/pkg/"
 cp "$REPO_ROOT/deploy/chuan.service" "$REPO_ROOT/deploy/chuan-backup.service" \
    "$REPO_ROOT/deploy/chuan-backup.timer" "$REPO_ROOT/deploy/chuan-hostd.service" "$WORK/pkg/"
 cp -r "$REPO_ROOT/deploy/commands" "$WORK/pkg/commands"
@@ -82,7 +83,16 @@ run_case proxy_after --proxy http://127.0.0.1:9
 # 3. --proxy=URL
 run_case proxy_eq --proxy=http://127.0.0.1:9
 
-# 4. --proxy 缺参数要报错退出（不能静默继续）
+# 4. 可选组件开关必须透传给包内脚本：外层只下载，漏传会静默装成"没有 OpenTunnel"
+run_case opentunnel --with-opentunnel --opentunnel-bin "$WORK/pkg/chuan" --bootstrap-oauth-tunnel
+grep -q "pkg/chuan /usr/local/lib/chuan/opentunnel/opentunnel" "$WORK/opentunnel.log" \
+  || fail "opentunnel：--with-opentunnel/--opentunnel-bin 没透传到包内脚本"
+grep -q "跳过 OAuth tunnel bootstrap" "$WORK/opentunnel.log" \
+  || fail "opentunnel：--bootstrap-oauth-tunnel 没透传到包内脚本"
+grep -q "systemd/system/chuan-oauth-mcp.service" "$WORK/opentunnel.log" \
+  || fail "opentunnel：OAuth helper 单元没被安装"
+
+# 5. --proxy 缺参数要报错退出（不能静默继续）
 set +e
 ( cd "$WORK/client" && bash install.sh --proxy ) > "$WORK/argerr.log" 2>&1
 rc=$?
@@ -90,12 +100,12 @@ set -e
 [[ $rc -eq 2 ]] || fail "--proxy 缺参数应退出码 2，实际 $rc"
 grep -q "需要参数" "$WORK/argerr.log" || fail "--proxy 缺参数没有提示"
 
-# 5. 临时目录要清理干净（不能因为改成 bash 调用而泄漏；$WORK 自己不算）
+# 6. 临时目录要清理干净（不能因为改成 bash 调用而泄漏；$WORK 自己不算）
 leftover=$(ls -d /tmp/tmp.* 2>/dev/null | grep -v "^$WORK\$" | wc -l || true)
 leftover=${leftover//[!0-9]/}
 [[ "$leftover" == "0" ]] || fail "临时目录残留 $leftover 个：$(ls -d /tmp/tmp.* | grep -v "^$WORK\$" | head -3)"
 
-# 6. 上面那条 unit 断言本身要能报错，否则是"永远通过"的摆设
+# 7. 上面那条 unit 断言本身要能报错，否则是"永远通过"的摆设
 t="$WORK/rw"; mkdir -p "$t"
 printf '[host.path]\n"/srv/data" = { mode = "rw" }\n# "/srv/skip" = { mode = "rw" }\n' > "$t/c.toml"
 printf 'ReadWritePaths=/var/lib/chuan\n' > "$t/unit"
@@ -176,4 +186,4 @@ else
   echo "skip: 没有免密 sudo，跳过真装校验"
 fi
 
-echo "install.sh OK（4 组用例 + 权限校正）"
+echo "install.sh OK（5 组用例 + 权限校正）"

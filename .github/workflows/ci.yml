@@ -179,6 +179,7 @@ jobs:
             mkdir -p "$dist"
             cp "artifacts/chuan-$arch/chuan" "$dist/chuan"
             cp deploy/install.sh deploy/bootstrap-oauth-tunnel.sh \
+               adapters/oauth-mcp/chuan-oauth-mcp.service \
                deploy/chuan.toml.example \
                deploy/chuan.service deploy/chuan-hostd.service \
                deploy/chuan-backup.service deploy/chuan-backup.timer \

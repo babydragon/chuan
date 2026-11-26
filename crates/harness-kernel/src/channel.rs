@@ -60,12 +60,39 @@ pub struct Inbound {
 pub enum ChannelError {
     #[error("rate limited, retry after {retry_after_ms}ms")]
     RateLimited { retry_after_ms: u32 },
+    /// 平台侧暂时不可用（5xx / 网关错误 / 连接被重置）。
+    ///
+    /// 与 `BadRequest` 的分界：这不是内容或权限的问题，**退避后重试通常能成**。
+    /// 曾经把 Telegram 的 502 归类成 `BadRequest`，一次网关抖动就把整轮 run 打死
+    /// （把"界面画不出来"当成了"任务失败"）。
+    #[error("transient: {0}")]
+    Transient(String),
     #[error("transport: {0}")]
     Transport(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("closed")]
     Closed,
+}
+
+impl ChannelError {
+    /// 是否值得退避后重试。`BadRequest`（内容/参数错）与 `Closed` 不算。
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited { .. } | Self::Transient(_) | Self::Transport(_)
+        )
+    }
+
+    /// 建议的退避毫秒数：429 用平台给的窗口，其它瞬态错误用固定短退避。
+    /// 返回 `None` 表示不该重试。
+    pub fn retry_hint_ms(&self) -> Option<u32> {
+        match self {
+            Self::RateLimited { retry_after_ms } => Some(*retry_after_ms),
+            Self::Transient(_) | Self::Transport(_) => Some(1_000),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]

@@ -15,6 +15,7 @@ pub mod ids;
 pub mod lanes;
 pub mod leak;
 pub mod identity;
+pub mod notice;
 pub mod policy;
 pub mod record;
 pub mod retriever;

@@ -123,6 +123,10 @@
 > **0.4.0-rc.1**：通道适配器协议 v1 + Echo TUI（D44）、OAuth helper 内置（D45：provider manifest、
 > 手动/OpenTunnel 回调、本地 MCP `serve`）、多通道投递（D46）、安装脚本可选 OpenTunnel riscv 资产。
 > 加密与安全加强留到正式版之后。
+> **0.4.0-rc.2**：OpenTunnel 一键可用——下载分支透传可选开关（rc.1 会静默丢掉）、bootstrap
+> 去掉 python3 且 marker 丢失能重建、`--providers-dir` 让 provider manifest 回到配置目录
+> `/etc/chuan/oauth/providers.d`（D48）、`--with-opentunnel` 顺带装 helper 单元；
+> 通道 5xx 不再丢消息（D47：投递失败不决定 run 成败 + `notice` 补发）。
 > **扩展机制（设计，未实现）**：通道适配器走旁路进程 + UDS（D44），OAuth 走独立 helper +
 > 中继回调 + `token_file`（D45）；内核不加插件 ABI。**协议 v1 + Echo TUI 已实现**（`adapters/echo/`）；
 > **OAuth 手动粘贴版已跑通**（DCR/PKCE/refresh/token_file，`adapters/oauth-mcp/`），

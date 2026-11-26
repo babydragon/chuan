@@ -203,7 +203,7 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
                 Err(ApiError::RetryAfter(ms)) => {
                     tokio::time::sleep(Duration::from_millis(ms as u64)).await;
                 }
-                Err(ApiError::Transport(e)) => {
+                Err(ApiError::Transport(e)) | Err(ApiError::Unavailable(e)) => {
                     tracing::warn!(error = %e, "telegram poll failed, backing off");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
@@ -384,6 +384,7 @@ impl<A: Api + 'static> Channel for TelegramChannel<A> {
 fn map_err(e: ApiError) -> ChannelError {
     match e {
         ApiError::RetryAfter(ms) => ChannelError::RateLimited { retry_after_ms: ms },
+        ApiError::Unavailable(d) => ChannelError::Transient(d),
         ApiError::Transport(t) => ChannelError::Transport(t),
         ApiError::BadRequest(b) => ChannelError::BadRequest(b),
         ApiError::NotModified => ChannelError::BadRequest("not modified".into()),

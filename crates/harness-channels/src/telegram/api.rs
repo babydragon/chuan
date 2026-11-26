@@ -99,6 +99,10 @@ pub enum ApiError {
     RetryAfter(u32),
     #[error("not modified")]
     NotModified,
+    /// 平台侧暂时不可用（502/503/504、网关返回的非 JSON 错误页）。
+    /// 必须与 `BadRequest` 分开：前者退避后重试能成，后者重试多少次都一样。
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("transport: {0}")]

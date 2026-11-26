@@ -891,11 +891,15 @@ fn tunnel_info() -> Value {
     }
 }
 
-fn manifest_for(base: &Path, provider: &str, explicit: Option<&Path>) -> Result<Manifest, String> {
+fn manifest_for(
+    providers: &Path,
+    provider: &str,
+    explicit: Option<&Path>,
+) -> Result<Manifest, String> {
     if let Some(p) = explicit {
         return read_manifest(p);
     }
-    let p = base.join("providers.d").join(format!("{provider}.toml"));
+    let p = providers.join(format!("{provider}.toml"));
     if p.exists() {
         return read_manifest(&p);
     }
@@ -975,6 +979,7 @@ fn mcp_tools(allow_revoke: bool) -> Value {
 fn mcp_dispatch(
     rt: &tokio::runtime::Runtime,
     base: &Path,
+    providers: &Path,
     provider: &str,
     method: &str,
     params: &Value,
@@ -1005,7 +1010,7 @@ fn mcp_dispatch(
                 .get("provider")
                 .and_then(Value::as_str)
                 .unwrap_or(provider);
-            let manifest = match manifest_for(base, p, None) {
+            let manifest = match manifest_for(providers, p, None) {
                 Ok(m) => m,
                 Err(e) => return Err(e),
             };
@@ -1071,6 +1076,7 @@ fn http_response(code: u16, body: Value) -> tiny_http::Response<std::io::Cursor<
 
 fn serve(
     base: PathBuf,
+    providers: PathBuf,
     host: &str,
     port: u16,
     token_path: &Path,
@@ -1121,6 +1127,7 @@ fn serve(
         match mcp_dispatch(
             &rt,
             &base,
+            &providers,
             DEFAULT_PROVIDER,
             method,
             msg.get("params").unwrap_or(&Value::Null),
@@ -1145,7 +1152,7 @@ fn serve(
 
 fn usage() -> String {
     "用法：chuan oauth-mcp <manifest validate|plan <file> | begin|finish|status|refresh | serve> \
-     [--provider ID] [--dir DIR] [--manifest FILE] [--token-file FILE] \
+     [--provider ID] [--dir DIR] [--providers-dir DIR] [--manifest FILE] [--token-file FILE] \
      [--host 127.0.0.1] [--port 8790] [--allow-revoke]"
         .into()
 }
@@ -1153,6 +1160,7 @@ fn usage() -> String {
 pub async fn run(args: &[String]) -> Result<(), String> {
     let mut provider = DEFAULT_PROVIDER.to_owned();
     let mut base = default_base();
+    let mut providers_dir: Option<PathBuf> = None;
     let mut manifest_path: Option<PathBuf> = None;
     let mut token_file: Option<PathBuf> = None;
     let mut host = "127.0.0.1".to_owned();
@@ -1169,6 +1177,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
             "--dir" => {
                 i += 1;
                 base = PathBuf::from(args.get(i).ok_or("--dir 需要参数")?);
+            }
+            "--providers-dir" => {
+                i += 1;
+                providers_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--providers-dir 需要参数")?,
+                ));
             }
             "--manifest" => {
                 i += 1;
@@ -1198,6 +1212,9 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     if positional.is_empty() {
         return Err(usage());
     }
+    // provider manifest 是配置，不是状态：默认跟着状态目录（兼容旧安装），
+    // 部署时用 --providers-dir 指到 <配置目录>/oauth/providers.d。
+    let providers_dir = providers_dir.unwrap_or_else(|| base.join("providers.d"));
     if positional[0] == "manifest" {
         let cmd = positional.get(1).ok_or("manifest 需要 validate 或 plan")?;
         let file = positional.get(2).ok_or("manifest 需要文件路径")?;
@@ -1227,10 +1244,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     if positional[0] == "serve" {
         let token_path = token_file.unwrap_or_else(|| base.join("mcp-token"));
         let base_for_serve = base.clone();
+        let providers_for_serve = providers_dir.clone();
         let host_for_serve = host.clone();
         tokio::task::spawn_blocking(move || {
             serve(
                 base_for_serve,
+                providers_for_serve,
                 &host_for_serve,
                 port,
                 &token_path,
@@ -1242,20 +1261,7 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let manifest = if let Some(p) = manifest_path {
-        read_manifest(&p)?
-    } else {
-        let p = base
-            .join("providers.d")
-            .join(format!("{consumer}.toml", consumer = provider));
-        if p.exists() {
-            read_manifest(&p)?
-        } else if provider == DEFAULT_PROVIDER {
-            toml::from_str(DEFAULT_MANIFEST).map_err(|e| e.to_string())?
-        } else {
-            return Err(format!("找不到 manifest：{}", p.display()));
-        }
-    };
+    let manifest = manifest_for(&providers_dir, &provider, manifest_path.as_deref())?;
     if provider != manifest.id {
         return Err(format!(
             "provider {provider} 与 manifest id {} 不一致",

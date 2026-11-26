@@ -57,9 +57,30 @@ chown "$SVC_USER:$SVC_GROUP" "$config/opentunnel/$PROFILE.toml"
 chmod 0600 "$config/opentunnel/$PROFILE.toml"
 
 identity="$data/opentunnel/$PROFILE/tunnel.json"
+
+# marker 是 helper 判断"能不能自动回调"的唯一依据，任何时候都要和 identity 对齐：
+# 删掉 marker 后重跑本脚本必须能恢复，否则 helper 会一直报 needs_bootstrap。
+# 不用 python3：目标板不一定装；这里只是给 helper 读的几个字段。
+write_marker() {
+  local host="$1"
+  cat > "$state/opentunnel.json" <<EOF
+{
+  "hostname": "$host",
+  "profile": "$PROFILE",
+  "callback": "http://127.0.0.1:$PORT/cb",
+  "url": "https://auth.$host/cb",
+  "created_at": $(date +%s)
+}
+EOF
+  chown "$SVC_USER:$SVC_GROUP" "$state/opentunnel.json"
+  chmod 0600 "$state/opentunnel.json"
+}
+
 if [[ -f "$identity" ]]; then
   host="$(sed -n 's/.*"hostname": *"\([^"]*\)".*/\1/p' "$identity" | head -1)"
-  say "已存在 tunnel：https://auth.$host/cb"
+  [[ -n "$host" ]] || die "tunnel.json 里没有 hostname：$identity"
+  write_marker "$host"
+  say "已存在 tunnel：https://auth.$host/cb（marker 已对齐）"
   exit 0
 fi
 
@@ -103,18 +124,5 @@ as_user "$BIN" --profile "$PROFILE" down >>"$log" 2>&1 || true
 host="$(sed -n 's/.*"hostname": *"\([^"]*\)".*/\1/p' "$identity" | head -1)"
 [[ -n "$host" ]] || { say "tunnel.json 里没有 hostname；日志：$log"; exit 1; }
 
-python3 - "$state/opentunnel.json" "$host" "$PROFILE" "$PORT" <<'PY'
-import json, sys, time
-path, host, profile, port = sys.argv[1:5]
-with open(path, "w", encoding="utf-8") as f:
-    json.dump({
-        "hostname": host,
-        "profile": profile,
-        "callback": f"http://127.0.0.1:{port}/cb",
-        "url": f"https://auth.{host}/cb",
-        "created_at": int(time.time()),
-    }, f, ensure_ascii=False, indent=2)
-PY
-chown "$SVC_USER:$SVC_GROUP" "$state/opentunnel.json"
-chmod 0600 "$state/opentunnel.json"
+write_marker "$host"
 say "tunnel 已就绪：https://auth.$host/cb（serve 尚未启动）"

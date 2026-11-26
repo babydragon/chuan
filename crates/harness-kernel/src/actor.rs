@@ -502,8 +502,15 @@ impl RunEnd {
 /// `Confirm`（这一次动作）仍是短 TTL——过去那一下过期就不该再执行。
 const PERMISSION_TTL_S: u64 = 86_400;
 
-const FINAL_ATTEMPTS: usize = 3;
+const FINAL_ATTEMPTS: usize = 8;
 const FINAL_WAIT_CAP_MS: u64 = 60_000;
+/// 终稿总等待预算：超过这个时间就认输，排一条"回复没能送到"的补发提示。
+const FINAL_TOTAL_MS: u64 = 90_000;
+
+/// 普通提示（命令回复、错误说明）的重试：比终稿短，别让一条提示堵住后面的消息。
+const REPLY_ATTEMPTS: usize = 3;
+const REPLY_BUDGET_MS: u64 = 20_000;
+const REPLY_WAIT_CAP_MS: u64 = 10_000;
 
 impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     /// 历史预算 = 总预算 − system − 工具 schema − 输出/当前消息预留。
@@ -525,7 +532,10 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         self.cfg.context_budget_tokens.saturating_sub(reserve).max(1_000)
     }
 
-    /// 终稿必须尽量送达：被限流就按 retry_after 等窗口再发，而不是丢掉。
+    /// 终稿要送达：失败时按窗口退避重发，总预算内仍不行才放弃。
+    ///
+    /// 和流式过程中的"这一拍"不同，终稿是**用户唯一会读到的内容**，
+    /// 值得多等一会儿；但也不能无限等——超时后由调用方排一条"没送到"的提示。
     async fn apply_final(
         &self,
         ch: &dyn Channel,
@@ -533,26 +543,42 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         renderer: &mut TurnRenderer,
         action: RenderAction,
     ) -> bool {
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
+        let mut waited = 0u64;
+        for attempt in 1..=FINAL_ATTEMPTS {
             match apply_action(ch, conversation, renderer, action.clone()).await {
                 Ok(ActionOutcome::Done) => return true,
-                Ok(ActionOutcome::Deferred { retry_after_ms }) => {
-                    if attempt >= FINAL_ATTEMPTS {
-                        tracing::error!(retry_after_ms, attempt, "终稿仍被限流，放弃发送");
+                Ok(ActionOutcome::Deferred { retry_after_ms })
+                | Err(ChannelError::RateLimited { retry_after_ms }) => {
+                    let wait = (retry_after_ms as u64).min(FINAL_WAIT_CAP_MS);
+                    if !self.final_wait(attempt, wait, &mut waited).await {
                         return false;
                     }
-                    let wait = (retry_after_ms as u64).min(FINAL_WAIT_CAP_MS);
-                    tracing::warn!(retry_after_ms, wait, attempt, "终稿被限流，等窗口后重发");
-                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+                Err(e) if e.is_transient() => {
+                    let wait = (e.retry_hint_ms().unwrap_or(1_000) as u64).min(FINAL_WAIT_CAP_MS);
+                    if !self.final_wait(attempt, wait, &mut waited).await {
+                        return false;
+                    }
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "终稿发送失败");
+                    tracing::error!(error = %e, "终稿发送失败（不可重试）");
                     return false;
                 }
             }
         }
+        false
+    }
+
+    /// 终稿重试的等待；返回 `false` 表示预算用尽，放弃。
+    async fn final_wait(&self, attempt: usize, wait: u64, waited: &mut u64) -> bool {
+        if attempt >= FINAL_ATTEMPTS || *waited + wait > FINAL_TOTAL_MS {
+            tracing::error!(attempt, waited = *waited, "终稿仍未能送达，放弃");
+            return false;
+        }
+        tracing::warn!(attempt, wait, "终稿发送失败，等窗口后重发");
+        *waited += wait;
+        tokio::time::sleep(Duration::from_millis(wait)).await;
+        true
     }
 }
 
@@ -632,6 +658,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             tracing::warn!(tasks = resumed, "后台任务被重启打断，已通知主人");
         }
         let mut tasks = tokio::task::JoinSet::new();
+        // 启动先补发：进程被杀之前排下的"没送到"提示，现在通道已经能用了。
+        self.drain_notices(None).await;
+        // 每两分钟扫一次补发队列；通道长时间抽风时，用户也能在几分钟内看到一句解释。
+        let mut notice_tick = tokio::time::interval(Duration::from_secs(120));
+        notice_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // 每个会话的"在跑 + 排队"计数。只在 `run()` 里维护：入站全从这里进，
         // 拿它判"是不是排队"比看 `runs` 可靠（`runs` 要等拿到锁才写入，同批消息会漏判）。
         let mut inflight: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>> =
@@ -639,8 +670,11 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
+                _ = notice_tick.tick() => { self.drain_notices(None).await; }
                 msg = inbound.recv() => {
                     let Some(mut inb) = msg else { break };
+                    // 先补发这个会话的旧提示：让用户在等新回复之前就知道上一次出了什么事。
+                    self.drain_notices(Some((&inb.channel.0, &inb.conversation))).await;
                     // 只有"人在说话"才算前台活动。查状态、取消这类指令不该把后台任务饿死
                     // （真实事故：用户每分钟 /tasks 一次，任务一直 pending）。
                     // 授权只认 `[identity]` 绑定（D26）：一人多账号 / 多人都是多条绑定，
@@ -1575,7 +1609,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
         let ch = self.channel_for(&inb.channel);
         let msg = inb.msg.clone();
         let conv = inb.conversation.clone();
+        let channel = inb.channel.0.clone();
         let res = self.handle_run_inner(inb).await;
+        // 走到这里还失败，说明连"出错了"那句话都没发出去（`?` 早退只剩通道错误）。
+        // 留底，等通道恢复后补发——静默失败是最难被发现的一类问题。
+        if res.is_err() {
+            crate::notice::enqueue(&*self.store, &channel, &conv, crate::copy::RUN_DROPPED).await;
+        }
         let emoji = match &res {
             Ok(RunEnd::Done) => EMOJI_OK,
             Ok(RunEnd::Failed) | Ok(RunEnd::Blocked) | Err(_) => EMOJI_FAIL,
@@ -1918,13 +1958,13 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                         child_shown = false;
                     }
                     let action = renderer.flush(now_ms());
-                    if let Err(e) = apply_action(&*ch, &inb.conversation, &mut renderer, action).await {
-                        if matches!(e, ChannelError::RateLimited { .. }) {
-                            // 进度刷新发不出去不是失败：跳过这一拍，run 继续跑
-                            tracing::warn!(error = %e, "进度刷新被限流，跳过本轮");
-                        } else {
-                            return Err(e);
-                        }
+                    // 进度是"画给人看的过程"：画不出来不该让任务死掉。
+                    // 429/5xx 已在 apply_action 里变成 Deferred；这里兜住其余错误
+                    // （通道关闭、参数被拒），继续跑，结论还能进账本和补发队列。
+                    if let Err(e) =
+                        apply_action(&*ch, &inb.conversation, &mut renderer, action).await
+                    {
+                        tracing::warn!(error = %e, "进度刷新失败，跳过本轮");
                     }
                 }
             }
@@ -1970,10 +2010,23 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
                 }]]);
             }
         }
+        let mut final_ok = true;
         for action in renderer.finish(status) {
             if !self.apply_final(&*ch, &inb.conversation, &mut renderer, action).await {
+                final_ok = false;
                 break;
             }
+        }
+        // 终稿没能送达：不保存正文（用户接受"丢了再问"），但必须留一句话，
+        // 否则界面上既没有答案也没有解释，只能靠用户自己翻日志才能发现。
+        if !final_ok {
+            crate::notice::enqueue(
+                &*self.store,
+                &inb.channel.0,
+                &inb.conversation,
+                crate::copy::REPLY_DROPPED,
+            )
+            .await;
         }
         // 记住按钮挂在哪条消息上：点击后要把它撤掉，别让过期按钮留在对话里
         if !from_skill_button && wrote_files && role == ActorRole::Owner {
@@ -2527,6 +2580,23 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
     }
 
     async fn reply(&self, channel: &str, conversation: &str, text: &str) -> Result<(), ChannelError> {
+        self.deliver_text(channel, conversation, text, REPLY_ATTEMPTS, REPLY_BUDGET_MS)
+            .await
+    }
+
+    /// 纯文本投递（命令回复、审批提示、失败说明都走这里）。
+    ///
+    /// 单次 `deliver` 遇到 429/5xx 会按窗口退避重发：提示如果第一次就丢，
+    /// 用户看到的就是"发了消息没反应"，而且没有任何线索可循。
+    async fn deliver_text(
+        &self,
+        channel: &str,
+        conversation: &str,
+        text: &str,
+        attempts: usize,
+        budget_ms: u64,
+    ) -> Result<(), ChannelError> {
+        let ch = self.channel_for(&ChannelId(channel.to_owned()));
         let view = View {
             shard: 0,
             is_last: true,
@@ -2534,10 +2604,38 @@ impl<S: Store, D: TurnDriver> ConversationActor<S, D> {
             status: None,
             buttons: Vec::new(),
         };
-        self.channel_for(&ChannelId(channel.to_owned()))
-            .deliver(conversation, view)
-            .await
-            .map(|_| ())
+        let mut waited = 0u64;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match ch.deliver(conversation, view.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.is_transient() && attempt < attempts => {
+                    let wait = (e.retry_hint_ms().unwrap_or(1_000) as u64).min(REPLY_WAIT_CAP_MS);
+                    if waited + wait > budget_ms {
+                        return Err(e);
+                    }
+                    waited += wait;
+                    tracing::warn!(error = %e, attempt, wait, "提示发送失败，退避后重试");
+                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// 把之前没送出去的失败提示补发一遍（`only` 限定某个会话）。
+    async fn drain_notices(&self, only: Option<(&str, &str)>) {
+        let n = crate::notice::drain(
+            &*self.store,
+            &self.channels,
+            only,
+            crate::ids::now_ms(),
+        )
+        .await;
+        if n > 0 {
+            tracing::info!(count = n, "失败提示已补发");
+        }
     }
 }
 

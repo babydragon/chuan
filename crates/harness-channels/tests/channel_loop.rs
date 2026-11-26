@@ -249,3 +249,90 @@ async fn sends_files_and_images() {
     let files = api.files.lock().unwrap().clone();
     assert_eq!(files, vec!["报告.pdf".to_string(), "预览.png".to_string()]);
 }
+
+/// 轮询遇到 502（Bad Gateway）只是"这一拍没拿到"，退避后继续。
+#[tokio::test]
+async fn survives_bad_gateway_while_polling() {
+    let api = Arc::new(FakeApi::new());
+    *api.unavailable_poll_once.lock().unwrap() = true;
+    api.push_update(update(1, 42, "after-502", 0));
+
+    let offsets = Arc::new(MemoryOffsets::default());
+    let ch = TelegramChannel::new(
+        Arc::clone(&api),
+        offsets as _,
+        TelegramConfig {
+            media_dir: std::env::temp_dir().join("chuan-test-media"),
+            stale_after_s: 300,
+        },
+    );
+    let (tx, mut rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    let h = tokio::spawn(async move { ch.run(tx, c2).await });
+    let got = tokio::time::timeout(Duration::from_secs(6), rx.recv()).await;
+    cancel.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(1), h).await;
+
+    let got = got.expect("502 之后应继续轮询").expect("应收到消息");
+    assert_eq!(got.text.as_deref(), Some("after-502"));
+}
+
+/// 发消息遇到 502：有界重试，不能上抛（上抛会把整轮 run 打死）。
+#[tokio::test]
+async fn transient_send_is_retried() {
+    use harness_kernel::ActionOutcome;
+
+    let api = Arc::new(FakeApi::new());
+    *api.transient_sends.lock().unwrap() = 2;
+    let offsets = Arc::new(MemoryOffsets::default());
+    let ch = TelegramChannel::new(Arc::clone(&api), offsets as _, TelegramConfig::default());
+    let mut renderer = TurnRenderer::new(Caps {
+        edit: true,
+        buttons: true,
+        markdown: true,
+        max_text: 4096,
+        min_edit_interval_ms: 1000,
+    });
+
+    renderer.push(harness_kernel::RenderEvent::Stream(StreamEvent::TextDelta(
+        "网关抖动也要送到".into(),
+    )));
+    let action = renderer.flush(0);
+    let outcome = harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+    assert_eq!(outcome, ActionOutcome::Done);
+    assert_eq!(api.sent.lock().unwrap().len(), 1);
+}
+
+/// 编辑遇到 502：这一拍放弃（Deferred），run 继续；下一拍同一份快照能补上。
+#[tokio::test]
+async fn transient_edit_defers_instead_of_failing() {
+    use harness_kernel::ActionOutcome;
+
+    let api = Arc::new(FakeApi::new());
+    let offsets = Arc::new(MemoryOffsets::default());
+    let ch = TelegramChannel::new(Arc::clone(&api), offsets as _, TelegramConfig::default());
+    let mut renderer = TurnRenderer::new(Caps {
+        edit: true,
+        buttons: true,
+        markdown: true,
+        max_text: 4096,
+        min_edit_interval_ms: 1000,
+    });
+
+    renderer.push(harness_kernel::RenderEvent::Stream(StreamEvent::TextDelta("第一段".into())));
+    let action = renderer.flush(0);
+    harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+
+    *api.transient_edits.lock().unwrap() = 1;
+    renderer.push(harness_kernel::RenderEvent::Stream(StreamEvent::TextDelta("第二段".into())));
+    let action = renderer.flush(2000);
+    let outcome = harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+    assert_eq!(outcome, ActionOutcome::Deferred { retry_after_ms: 1_000 });
+    assert!(api.edited.lock().unwrap().is_empty());
+
+    let action = renderer.flush(2000 + 1_000 + 1_000);
+    assert!(matches!(action, RenderAction::Edit(_)), "退避结束后应重发同一份快照");
+    harness_kernel::apply_action(&ch, "1000", &mut renderer, action).await.unwrap();
+    assert_eq!(api.edited.lock().unwrap().len(), 1);
+}

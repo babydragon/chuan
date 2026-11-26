@@ -152,6 +152,8 @@ manifest 只选模式，不写死公网 URL；实际 URL 由 OpenTunnel identity
 Rust 版已内置为 `chuan oauth-mcp`：
 
 - `manifest validate/plan`
+- `--providers-dir` 指定 manifest 目录；部署时由单元传 `<config>/oauth/providers.d`，
+  不写时退回状态目录下的 `<dir>/providers.d`（兼容旧安装）
 - `begin / finish / status / refresh`（手动粘贴回调）
 - 本地 MCP `serve`（`auth_begin / auth_status / auth_refresh`，`auth_revoke` 默认不注册）
 - manifest `callback.mode = "opentunnel"` 时，`auth_begin` 会起本地回调监听 + `opentunnel serve`，

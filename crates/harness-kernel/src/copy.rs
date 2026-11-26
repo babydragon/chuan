@@ -43,6 +43,19 @@ pub const STALLED: &str = "⏱ 任务卡住了：好几分钟没有任何进展�
 pub const OUT_OF_TIME: &str =
     "⏱ 这次做的时间/回合用完了，已经停下。\n下一步：把任务拆小一点，或让我分几段做——已经完成的部分还在。";
 
+/// 通道（聊天软件）暂时不可用，导致这一轮**没跑起来**：内容没有生成。
+/// 不能用"出错了：bad request: Bad Gateway"这种系统报错——用户只需要知道"等会儿重发"。
+pub const RUN_DROPPED: &str =
+    "⚠️ 这条没处理完：聊天软件那边暂时没响应。等一会儿重发一次就行。";
+
+/// 跑完了，但终稿没能送到：让人知道"东西在，只是没显示"，而不是以为我没理他。
+pub const REPLY_DROPPED: &str =
+    "⚠️ 这条的结果没能送到：聊天软件那边暂时没响应。需要的话再问我一次。";
+
+/// 进程重启打断了上一轮：账本里已经标成 interrupted，用户那边也得有一句话。
+pub const RESTART_INTERRUPTED: &str =
+    "⚠️ 上次有一条消息还没处理完，程序重启把它打断了。需要的话请再发一次。";
+
 /// `/usage` 的金额一栏：没配价格时别假装免费，也别甩配置键。
 pub const MONEY_UNKNOWN: &str = "金额未统计";
 
@@ -177,6 +190,9 @@ mod tests {
             AUTH_FAILED.to_owned(),
             STALLED.to_owned(),
             OUT_OF_TIME.to_owned(),
+            RUN_DROPPED.to_owned(),
+            REPLY_DROPPED.to_owned(),
+            RESTART_INTERRUPTED.to_owned(),
             MONEY_UNKNOWN.to_owned(),
             quota_exhausted("约 5 分钟后可再试", "upstream said: quota"),
             context_footer(118_000, 1_000_000).unwrap(),

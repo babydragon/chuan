@@ -235,13 +235,14 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     if recovered > 0 {
         println!("recovered {recovered} unfinished tool call(s)");
     }
-    // 被杀掉的 run 补一条 interrupted，账本里不留"永远不结束"的 run
+    // 被杀掉的 run 补一条 interrupted，账本里不留"永远不结束"的 run；
+    // 同时给用户留一句提示——重启导致的静默丢失，事后没人能发现。
     if let Ok(open) = store.open_runs().await {
         for (conv, run) in open {
             if let Ok(mut tx) = store.begin_write().await {
                 let _ = tx
                     .append(harness_kernel::NewEvent {
-                        conv,
+                        conv: conv.clone(),
                         run: run.clone(),
                         turn: None,
                         kind: harness_kernel::EventKind::RunFinished,
@@ -251,6 +252,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
                     .await;
                 let _ = tx.commit().await;
             }
+            harness_kernel::notice::enqueue_restart(&*store, &conv).await;
         }
     }
 

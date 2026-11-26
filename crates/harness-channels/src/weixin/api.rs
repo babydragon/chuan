@@ -10,6 +10,9 @@ use serde::Deserialize;
 pub enum ApiError {
     #[error("transport: {0}")]
     Transport(String),
+    /// 平台侧暂时不可用（5xx / 网关错误）。可重试，与内容无关。
+    #[error("unavailable: {0}")]
+    Unavailable(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     /// `ret`/`errcode` = -14：会话失效，只能重新扫码

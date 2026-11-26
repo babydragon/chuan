@@ -420,9 +420,11 @@ pub async fn apply_action<C: Channel + ?Sized>(
                 renderer.on_sent(msg);
                 Ok(ActionOutcome::Done)
             }
-            Err(ChannelError::RateLimited { retry_after_ms }) => {
-                renderer.on_send_failed(retry_after_ms);
-                Ok(ActionOutcome::Deferred { retry_after_ms })
+            Err(e) if e.is_transient() => {
+                let hint = e.retry_hint_ms().unwrap_or(1_000);
+                tracing::warn!(error = %e, retry_after_ms = hint, "发消息失败，稍后重试");
+                renderer.on_send_failed(hint);
+                Ok(ActionOutcome::Deferred { retry_after_ms: hint })
             }
             Err(e) => Err(e),
         },
@@ -433,9 +435,11 @@ pub async fn apply_action<C: Channel + ?Sized>(
                         renderer.on_sent(m);
                         Ok(ActionOutcome::Done)
                     }
-                    Err(ChannelError::RateLimited { retry_after_ms }) => {
-                        renderer.on_send_failed(retry_after_ms);
-                        Ok(ActionOutcome::Deferred { retry_after_ms })
+                    Err(e) if e.is_transient() => {
+                        let hint = e.retry_hint_ms().unwrap_or(1_000);
+                        tracing::warn!(error = %e, retry_after_ms = hint, "发消息失败，稍后重试");
+                        renderer.on_send_failed(hint);
+                        Ok(ActionOutcome::Deferred { retry_after_ms: hint })
                     }
                     Err(e) => Err(e),
                 };
@@ -451,10 +455,12 @@ pub async fn apply_action<C: Channel + ?Sized>(
                     renderer.on_edit_result(outcome);
                     Ok(deferred.unwrap_or(ActionOutcome::Done))
                 }
-                Err(ChannelError::RateLimited { retry_after_ms }) => {
+                Err(e) if e.is_transient() => {
                     // 退化成"这一拍没发出去"，交给 Renderer 的退避窗口
-                    renderer.on_edit_result(EditOutcome::Rejected { retry_after_ms });
-                    Ok(ActionOutcome::Deferred { retry_after_ms })
+                    let hint = e.retry_hint_ms().unwrap_or(1_000);
+                    tracing::warn!(error = %e, retry_after_ms = hint, "编辑消息失败，稍后重试");
+                    renderer.on_edit_result(EditOutcome::Rejected { retry_after_ms: hint });
+                    Ok(ActionOutcome::Deferred { retry_after_ms: hint })
                 }
                 Err(e) => Err(e),
             }
@@ -467,8 +473,10 @@ pub async fn apply_action<C: Channel + ?Sized>(
 const RATE_LIMIT_BACKOFF_CAP_MS: u64 = 2_000;
 const DELIVER_ATTEMPTS: usize = 3;
 
-/// 发消息（不是编辑）时有界重试；仍然被限流就返回 `RateLimited`，
+/// 发消息（不是编辑）时有界重试；仍然失败就返回错误，
 /// 由调用方决定是"下一拍再来"还是"等够窗口再发"。
+///
+/// 429 与 5xx 走同一套退避：对用户来说都只是"这会儿送不到"。
 async fn deliver_with_retry<C: Channel + ?Sized>(
     channel: &C,
     conversation: &str,
@@ -479,9 +487,10 @@ async fn deliver_with_retry<C: Channel + ?Sized>(
         attempt += 1;
         match channel.deliver(conversation, view.clone()).await {
             Ok(m) => return Ok(m),
-            Err(ChannelError::RateLimited { retry_after_ms }) if attempt < DELIVER_ATTEMPTS => {
-                let backoff = (retry_after_ms as u64).min(RATE_LIMIT_BACKOFF_CAP_MS);
-                tracing::warn!(retry_after_ms, backoff, attempt, "发消息被限流，退避后重试");
+            Err(e) if e.is_transient() && attempt < DELIVER_ATTEMPTS => {
+                let hint = e.retry_hint_ms().unwrap_or(1_000) as u64;
+                let backoff = hint.min(RATE_LIMIT_BACKOFF_CAP_MS);
+                tracing::warn!(error = %e, backoff, attempt, "发消息失败，退避后重试");
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
             }
             Err(e) => return Err(e),

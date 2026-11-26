@@ -194,17 +194,17 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 # tools = ["create_task", "list_undone_tasks_by_time_query"]   # 可选：只暴露这些
 
 # Cloudflare 统一 MCP（D45）：OAuth 或最小权限 API Token 都可以；token 每次请求重读。
-# [services.cloudflare]
-# kind = "mcp"
-# base = "https://mcp.cloudflare.com/mcp"
-# token_file = "/etc/chuan/secrets/cloudflare_mcp"   # 一行 token；OAuth helper 会刷新它
+# 按 D48 放 <config>/services.d/cloudflare.toml（文件名即服务名），不用改本文件：
+#   kind = "mcp"
+#   base = "https://mcp.cloudflare.com/mcp"
+#   token_file = "/var/lib/chuan/oauth/cloudflare-mcp/access_token"   # helper 会刷新它
 
-# OAuth 旁路（D45）：helper 自己是一个本地 MCP 服务，暴露 auth_begin/status/refresh。
-# [services.oauth]
-# kind = "mcp"
-# base = "http://127.0.0.1:8790/mcp"
-# token_file = "/var/lib/chuan/oauth/cloudflare-mcp/mcp-token"
-# tools = ["auth_begin", "auth_status", "auth_refresh"]   # auth_revoke 默认不注册
+# OAuth 旁路（D45）：helper 是本地 MCP 服务，暴露 auth_begin/status/refresh。
+# 同样放 <config>/services.d/oauth.toml：
+#   kind = "mcp"
+#   base = "http://127.0.0.1:8790/mcp"
+#   token_file = "/var/lib/chuan/oauth/mcp-token"
+#   tools = ["auth_begin", "auth_status", "auth_refresh"]   # auth_revoke 默认不注册
 
 # ---- 命令条目（D31，可选）----
 # 免审批的内网动作放在 <配置目录>/commands.d/<name>.toml（安装脚本会放 4 条默认打印条目：

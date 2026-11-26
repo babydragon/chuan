@@ -558,6 +558,7 @@ async fn fetch_attachment<A: Api>(
 fn map_err(e: ApiError) -> ChannelError {
     match e {
         ApiError::Transport(t) => ChannelError::Transport(t),
+        ApiError::Unavailable(d) => ChannelError::Transient(d),
         ApiError::BadRequest(b) => ChannelError::BadRequest(b),
         ApiError::SessionExpired => ChannelError::BadRequest("session expired".into()),
     }

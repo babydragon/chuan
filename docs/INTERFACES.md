@@ -52,6 +52,20 @@ pub trait Channel: Send + Sync + 'static {
 3. `NotModified` 当成功、`TooOld` 让 Renderer 换新消息、`Rejected` 全局退避。
    **`update` 的 429 必须返回 `Rejected`，不得上抛 `Err`**：上抛会终止整轮 run（板上事故：43s 的洪水控制把 run 打死，界面停在"正在输入"）。
    `typing` 收到 429 同样按 `retry_after` 退避，否则打字提示每 4s 一次会把洪水控制一直续上。
+4. **错误分级决定"谁来重试"**（D47）：
+   | 变体 | 含义 | 处理 |
+   |---|---|---|
+   | `RateLimited { retry_after_ms }` | 平台洪水控制 | 按窗口退避，可重试 |
+   | `Transient(_)` | 平台 5xx / 网关错误 / 连接重置 | 可重试；实现必须把 5xx 与 400 分开 |
+   | `Transport(_)` | 传输层失败（含读响应失败） | 可重试 |
+   | `BadRequest(_)` | 内容/参数不合法 | **不重试** |
+   | `Closed` | 通道已关闭 | 不重试 |
+   判定与建议窗口由 `ChannelError::is_transient()` / `retry_hint_ms()` 统一给出；
+   适配器只负责**分类**，不自己做长重试。
+5. **界面投递不决定 run 成败**：进度发送/编辑失败只是"这一拍没画出来"，run 继续；
+   终稿重试用尽后写一条 `kind="notice"` 的 doc，由 actor 在下一条入站、启动时、
+   每 2 分钟一拍补发。补发**只送提示，不存正文**——正文丢了可以重问，
+   完全没有反馈才是真正的问题（`notice.rs`）。
 
 ### 1.1 `react` 与 `update` 的分工
 

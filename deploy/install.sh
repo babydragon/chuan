@@ -129,6 +129,11 @@ if [[ -z "${BIN_SRC:-}" || ! -f "${BIN_SRC:-/nonexistent}" ]]; then
     ARGS=()
     [[ $DRY_RUN -eq 1 ]] && ARGS+=(--dry-run)
     [[ $ENABLE -eq 0 ]] && ARGS+=(--no-enable)
+    # 可选组件开关必须原样透传：外层只负责下载，真正安装的是包内脚本。
+    # 曾经漏掉这三项，`curl ... | bash -s -- --with-opentunnel` 会静默装成"没有 OpenTunnel"。
+    [[ $WITH_OPENTUNNEL -eq 1 ]] && ARGS+=(--with-opentunnel)
+    [[ -n "$OPENTUNNEL_BIN_SRC" ]] && ARGS+=(--opentunnel-bin "$OPENTUNNEL_BIN_SRC")
+    [[ $BOOTSTRAP_OAUTH -eq 1 ]] && ARGS+=(--bootstrap-oauth-tunnel)
     # 内层脚本来自已发布的包，可能是旧版（不认识 --proxy），故只用环境变量透传；
     # 它本身只装本地文件、不联网。用 bash 而不是 exec，好让 trap 清掉临时目录。
     [[ -n "$PROXY" ]] && export CHUAN_PROXY="$PROXY"
@@ -236,6 +241,9 @@ install_opentunnel() {
     [[ -n "$PROXY" ]] && curl_cmd+=(-x "$PROXY")
     if ! "${curl_cmd[@]}" -o "$tmp/$file" "$rel/$file"; then
       say "下载 OpenTunnel 失败（可作为可选组件稍后手工安装）；跳过"
+      # 从解开的 tar 安装时没有版本信息，默认会去找 latest——而 latest 可能还没有 OpenTunnel 资产。
+      [[ "$VERSION" == "latest" ]] \
+        && say "提示：从解开的 tar 安装时用 CHUAN_VERSION=<tag> 指定版本，否则会去 latest 找 OpenTunnel"
       rm -rf "$tmp"; return 0
     fi
     if "${curl_cmd[@]}" -o "$tmp/SHA256SUMS" "$rel/SHA256SUMS" 2>/dev/null        && grep -q " $file\$" "$tmp/SHA256SUMS"; then
@@ -292,6 +300,9 @@ if [[ $WITH_OPENTUNNEL -eq 1 ]]; then
   install_opentunnel
 fi
 ensure_dir "$STATE/oauth" 0750 "$SVC_USER" "$SVC_GROUP"
+# provider manifest 是配置（和 services.d 同类），不放状态目录
+ensure_dir "$ETC/oauth" 0750 root "$SVC_GROUP"
+ensure_dir "$ETC/oauth/providers.d" 0750 root "$SVC_GROUP"
 
 # 3b. 默认命令条目（只补缺，不覆盖）
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -394,6 +405,21 @@ else
   rm -f "$tmp_unit"
 fi
 
+# OAuth helper（可选，跟 --with-opentunnel 一起装）：manifest 在配置目录，
+# token/pending 状态在状态目录。它不是 chuan 的硬依赖，失败只警告。
+OAUTH_UNIT="$(asset chuan-oauth-mcp.service)" || true
+if [[ $WITH_OPENTUNNEL -eq 1 ]]; then
+  if [[ -n $OAUTH_UNIT ]]; then
+    if [[ -z $R ]]; then
+      run install -Dm644 -o root -g root "$OAUTH_UNIT" /etc/systemd/system/chuan-oauth-mcp.service
+    else
+      run install -Dm644 -o root -g root "$OAUTH_UNIT" "$UNITDIR/chuan-oauth-mcp.service"
+    fi
+  else
+    say "包里没有 chuan-oauth-mcp.service；跳过 OAuth helper（可稍后按文档手工放）"
+  fi
+fi
+
 if [[ -z $R ]]; then
   run systemctl daemon-reload
   # 宿主执行（D22 L1）：`systemctl --user` 需要 user manager；journalctl 需要 journal 组。
@@ -461,6 +487,7 @@ cat <<NEXT
   /etc/chuan/roles          0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
   /etc/chuan/capabilities   0770 root:$SVC_GROUP   （权限申请草稿，agent 只写这里）
   /etc/chuan/playbooks      0770 root:$SVC_GROUP   （agent 沉淀的规范，可写、热加载）
+  /etc/chuan/oauth          0750 root:$SVC_GROUP   （OAuth helper 的 provider manifest：providers.d/）
   /var/lib/chuan            0750 $SVC_USER:$SVC_GROUP
   /var/lib/chuan/timers     0750 $SVC_USER:$SVC_GROUP  （宿主 lane 的监控脚本；[host.path] 已授权）
 
@@ -475,6 +502,11 @@ cat <<NEXT
     chuan.toml 的 [host.path]，不用再动 unit；其它位置才需要 ReadWritePaths
   - 授权表就在本配置文件（改完热加载，不用重启）；默认表见 chuan.toml 的 [host] 段
 
+OAuth（可选）：
+  - `--with-opentunnel` 会额外装 chuan-oauth-mcp.service 与 OpenTunnel，并创建回调 tunnel；
+  - provider manifest 放 /etc/chuan/oauth/providers.d/（配置，不是状态）；
+  - chuan 侧的服务定义放 /etc/chuan/services.d/<name>.toml，**不用改 chuan.toml**。
+
 代理说明：
   - 下载/安装阶段：--proxy 或 CHUAN_PROXY / https_proxy
   - 运行阶段：写在 /etc/chuan/chuan.toml 的 [proxy] url（Telegram、web_fetch、
@@ -482,6 +514,16 @@ cat <<NEXT
 NEXT
 
 if [[ -z $R ]]; then
+  # helper 要先于 chuan 起来（chuan 启动时拉 MCP 工具目录）。
+  if [[ $ENABLE -eq 1 && $WITH_OPENTUNNEL -eq 1 && -n $OAUTH_UNIT ]]; then
+    run systemctl reset-failed chuan-oauth-mcp.service || true
+    run systemctl enable chuan-oauth-mcp.service
+    if systemctl is-active --quiet chuan-oauth-mcp.service; then
+      run systemctl restart chuan-oauth-mcp.service
+    else
+      run systemctl start chuan-oauth-mcp.service
+    fi
+  fi
   if [[ $ENABLE -eq 1 ]]; then
     run systemctl enable --now chuan.service
     run systemctl enable --now chuan-backup.timer
