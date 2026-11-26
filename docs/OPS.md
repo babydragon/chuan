@@ -772,6 +772,14 @@ Environment=CHUAN_KEY_FILE=%d/zai_key
 - `chuan backup` **不包含**该目录；恢复后需要重新授权。
 - 提供方限制（测试态 7 天、长期不用、改密撤销、令牌上限）见 `EXTENSIONS.md §2.9` 与附录 A。
 
+**实现状态（0.4.0-rc.3）**：目录是 `<state>/oauth/<provider>/`（不是上面的
+`/var/lib/chuan-oauth/<provider>-<account>/`）；provider 清单在
+`<config>/oauth/providers.d/<id>.toml`（D48：配置进 `/etc/chuan`，状态进 `/var/lib/chuan`）。
+`chuan oauth-mcp serve` 每 60 秒检查一次，剩余有效期不足 10 分钟就用 refresh token 换新
+（失败记 journald，同一 provider 至少隔 15 分钟再试），**不需要人催**。
+接入流程由 agent 走 `oauth_manifest` → `auth_begin` → `service add` 完成，全程不需要
+SSH 或重启（`playbook(topic="oauth-provider")`）。
+
 ## 3. systemd 单元
 
 ```ini
@@ -890,6 +898,7 @@ ProtectControlGroups=yes
 | LLM 5xx / 超时 | 3 | 1s → 2s → 4s，±20% jitter | ✅（每次成功或失败都记 usage/attempt） |
 | LLM 流中断（已收到部分） | 1 | 立即重发整轮，丢弃半截文本 | ✅ |
 | TG 429 | — | 按 `retry_after` 全局等待，不做次数上限 | 否 |
+| OAuth access token | — | helper 每 60s 检查，剩余 <10 分钟自动刷新 | 否 |
 | TG / 微信 5xx（502/503/504） | 3（单次投递内） | 1s 起，单次封顶 2s | 否 |
 | 终稿投递 | 8 | 按窗口退避，总预算 90s | 否 |
 | 普通提示（命令回复/错误说明） | 3 | 单次封顶 10s，总预算 20s | 否 |

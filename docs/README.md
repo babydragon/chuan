@@ -127,6 +127,10 @@
 > 去掉 python3 且 marker 丢失能重建、`--providers-dir` 让 provider manifest 回到配置目录
 > `/etc/chuan/oauth/providers.d`（D48）、`--with-opentunnel` 顺带装 helper 单元；
 > 通道 5xx 不再丢消息（D47：投递失败不决定 run 成败 + `notice` 补发）。
+> **0.4.0-rc.3**：OAuth 接入不再需要运维动作（D49）——`oauth_manifest` 工具装 provider 清单
+> （SelfModify 审批、helper 每次调用重读）、helper 每 60s 检查并自动续期、
+> `service add` 接受 `<state>/oauth/` 下的 token、安装期生成 `services.d/oauth.toml`；
+> 新增内置规程 `oauth-provider`，agent 按「清单 → 授权 → 注册」跑完，不改 `chuan.toml`、不重启。
 > **扩展机制（设计，未实现）**：通道适配器走旁路进程 + UDS（D44），OAuth 走独立 helper +
 > 中继回调 + `token_file`（D45）；内核不加插件 ABI。**协议 v1 + Echo TUI 已实现**（`adapters/echo/`）；
 > **OAuth 手动粘贴版已跑通**（DCR/PKCE/refresh/token_file，`adapters/oauth-mcp/`），

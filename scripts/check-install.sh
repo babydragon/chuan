@@ -91,6 +91,8 @@ grep -q "跳过 OAuth tunnel bootstrap" "$WORK/opentunnel.log" \
   || fail "opentunnel：--bootstrap-oauth-tunnel 没透传到包内脚本"
 grep -q "systemd/system/chuan-oauth-mcp.service" "$WORK/opentunnel.log" \
   || fail "opentunnel：OAuth helper 单元没被安装"
+grep -q "services.d/oauth.toml" "$WORK/opentunnel.log" \
+  || fail "opentunnel：helper 的 oauth 服务定义没生成"
 
 # 5. --proxy 缺参数要报错退出（不能静默继续）
 set +e

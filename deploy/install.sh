@@ -302,7 +302,32 @@ fi
 ensure_dir "$STATE/oauth" 0750 "$SVC_USER" "$SVC_GROUP"
 # provider manifest 是配置（和 services.d 同类），不放状态目录
 ensure_dir "$ETC/oauth" 0750 root "$SVC_GROUP"
-ensure_dir "$ETC/oauth/providers.d" 0750 root "$SVC_GROUP"
+# providers.d 要给服务用户写权限：清单由 agent 起草、主人批准后由核心进程落盘
+# （与 services.d 同理；沙盒与宿主 lane 都看不到 /etc，写入口只有工具）。
+ensure_dir "$ETC/oauth/providers.d" 0770 root "$SVC_GROUP"
+
+# OAuth helper 的服务定义（安装期数据；D48：不写 chuan.toml）。
+# 只补缺不覆盖：token_file 与 tools 是 helper 的契约，改了会连不上。
+if [[ $WITH_OPENTUNNEL -eq 1 ]]; then
+  oauth_svc="$ETC/services.d/oauth.toml"
+  if [[ -f "$oauth_svc" ]]; then
+    say "$oauth_svc 已存在，保持不变"
+  elif [[ $DRY_RUN -eq 1 ]]; then
+    echo "  + 写 $oauth_svc（本地 OAuth helper 服务定义）"
+  else
+    cat > "$oauth_svc" <<'OAUTH_SVC'
+# 本地 OAuth helper：auth_begin / auth_status / auth_refresh。
+# 由安装脚本生成；helper 写出的 token 在 <state>/oauth/<provider>/ 下。
+kind = "mcp"
+base = "http://127.0.0.1:8790/mcp"
+token_file = "/var/lib/chuan/oauth/mcp-token"
+tools = ["auth_begin", "auth_status", "auth_refresh"]
+OAUTH_SVC
+    chown root:"$SVC_GROUP" "$oauth_svc"
+    chmod 0640 "$oauth_svc"
+    say "已生成 $oauth_svc（helper 的本地 MCP 服务定义）"
+  fi
+fi
 
 # 3b. 默认命令条目（只补缺，不覆盖）
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -487,7 +512,7 @@ cat <<NEXT
   /etc/chuan/roles          0770 root:$SVC_GROUP   （子 agent 角色，agent 可写、热加载）
   /etc/chuan/capabilities   0770 root:$SVC_GROUP   （权限申请草稿，agent 只写这里）
   /etc/chuan/playbooks      0770 root:$SVC_GROUP   （agent 沉淀的规范，可写、热加载）
-  /etc/chuan/oauth          0750 root:$SVC_GROUP   （OAuth helper 的 provider manifest：providers.d/）
+  /etc/chuan/oauth          0750 root:$SVC_GROUP   （OAuth helper；providers.d/ 0770，agent 走审批写）
   /var/lib/chuan            0750 $SVC_USER:$SVC_GROUP
   /var/lib/chuan/timers     0750 $SVC_USER:$SVC_GROUP  （宿主 lane 的监控脚本；[host.path] 已授权）
 

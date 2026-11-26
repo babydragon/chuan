@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "chuan"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "harness-capabilities"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "harness-channels"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "aes",
  "async-trait",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "harness-kernel"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "harness-observe"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "harness-kernel",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "harness-store"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "harness-capabilities",

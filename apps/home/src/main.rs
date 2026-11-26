@@ -24,7 +24,7 @@ use harness_capabilities::{
     HttpServiceTool, InstallTool, KeepTool, McpCallTool, McpHub,
     KbFileTool, KbForgetTool, KbIngestTool, KbListTool, KbOutlineSetTool, KbOutlineTool,
     KbReadTool, KbSearchTool, KbSelectTool, PublishPlaybookTool, RollbackPlaybookTool,
-    NetLogTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
+    NetLogTool, OauthManifestTool, PlaybookTool, PublishSkillTool, ReadTool, RememberTool, RemindersTool, RemindTool,
     RoleTool,
     RollbackSkillTool, RunSkillTool, SandboxProfile, SendFileTool, ServiceTool, SkillCatalog, SysTool, TaskTool,
     WebFetchTool,
@@ -506,6 +506,12 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
     }
     let http_svc = HttpServiceTool::with_proxy(cfg.services.clone(), &cfg.net_log, &cfg.proxy)?;
     tools.register(Arc::clone(&http_svc) as Arc<dyn harness_kernel::Tool>);
+    // OAuth helper 把 access_token 写在 <state>/oauth/<provider>/ 下；
+    // 那是第二个合法凭据来源（helper 可写、核心只读），`service add` 要认它。
+    let state_root = std::path::Path::new(&cfg.db)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/chuan"));
     tools.register(
         ServiceTool::new(
             cfg.config_dir.join("services.d"),
@@ -513,8 +519,15 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
             Arc::clone(&mcp),
             Arc::clone(&http_svc),
         )
+        .with_oauth_root(state_root.join("oauth"))
         .with_proxy(cfg.proxy.clone()),
     );
+    // OAuth provider 清单（改自身 → 审批）：装完不用重启，helper 每次调用都重读。
+    // 目录跟 services.d 同级（D48）：配置在 <config>，token 状态在 <state>。
+    tools.register(OauthManifestTool::new(
+        cfg.config_dir.join("oauth/providers.d"),
+        state_root.join("oauth"),
+    ));
     tools.register(NetLogTool::new(&cfg.net_log));
     let playbook_builtins = vec![
         ("import-skill", crate::system_prompt::IMPORT),
@@ -524,6 +537,7 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
         ("capability", crate::system_prompt::CAPABILITY),
         ("timer", crate::system_prompt::TIMER),
         ("service-gateway", crate::system_prompt::SERVICE_GATEWAY),
+        ("oauth-provider", crate::system_prompt::OAUTH_PROVIDER),
     ];
     let playbook_topics: Vec<&'static str> = playbook_builtins.iter().map(|(k, _)| *k).collect();
     tools.register(PlaybookTool::new(&cfg.playbooks_dir, playbook_builtins));

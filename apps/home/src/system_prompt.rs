@@ -183,6 +183,9 @@ pub const TIMER: &str = include_str!("../playbooks/timer.md");
 /// `playbooks/service-gateway.md` 覆盖。
 pub const SERVICE_GATEWAY: &str = include_str!("../playbooks/service-gateway.md");
 
+/// OAuth 服务自助接入：清单 → 授权 → service add，全程不需要 SSH/重启。
+pub const OAUTH_PROVIDER: &str = include_str!("../playbooks/oauth-provider.md");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +222,31 @@ mod tests {
 
     /// 服务网关的 SOP 必须自带完整流程：凭据格式、开通参数、脚本协议、安装与排错。
     /// 之前只写了工具描述，agent 被问"怎么配"时只能含糊其辞（真实事故）。
+    /// OAuth 规程要能让 agent 独立跑完"清单 → 授权 → 注册"，并且不该教它让主人重启。
+    #[test]
+    fn oauth_provider_playbook_covers_flow() {
+        for needle in [
+            "oauth_manifest(action=\"install\"",
+            "auth_begin",
+            "auth_status",
+            "service(action=\"add\"",
+            "先授权、后",
+            "不要重启",
+            "/var/lib/chuan/oauth/",
+        ] {
+            assert!(
+                OAUTH_PROVIDER.contains(needle),
+                "oauth-provider 规程缺了 {needle}"
+            );
+        }
+        for banned in ["10.84.", "velop", "192.168."] {
+            assert!(
+                !OAUTH_PROVIDER.contains(banned),
+                "oauth-provider 规程里混进了具体环境：{banned}"
+            );
+        }
+    }
+
     #[test]
     fn service_gateway_playbook_covers_flow() {
         for needle in [

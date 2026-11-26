@@ -345,14 +345,17 @@ sudo mkdir -p /etc/chuan/oauth/providers.d
 sudo cp <provider>.toml /etc/chuan/oauth/providers.d/
 ```
 
-1. helper 是 `chuan oauth-mcp serve`，单独跑一个常驻服务（`--with-opentunnel` 会一起装）；
-2. 让 agent 调 `auth_begin`，它返回一条公开授权链接，经当前通道发给你；
-3. 回调两种模式：**手动粘贴**（默认；浏览器打不开 `127.0.0.1` 时把地址栏 URL 交给
-   `chuan oauth-mcp finish` 的 stdin），或 **OpenTunnel 自动回调**（可选组件，
-   安装时加 `--with-opentunnel --bootstrap-oauth-tunnel`，同意后自动完成）；
-4. 授权完成后重启 chuan，让它重新拉该服务的工具目录。
+1. helper 是 `chuan oauth-mcp serve`，单独跑一个常驻服务（`--with-opentunnel` 会一起装，
+   并生成上面的 `oauth` 服务定义）；token 由它持有，**每 60 秒检查、剩余不足 10 分钟自动刷新**；
+2. agent 起草 provider 清单并用 `oauth_manifest(action="install")` 装进
+   `/etc/chuan/oauth/providers.d/`（走 self_modify 审批；helper 每次调用都重读，**不用重启**）；
+3. agent 调 `auth_begin` 拿一条公开授权链接，经当前通道发给你；你点完同意就结束
+   （OpenTunnel 可选组件负责公网回调；没有它就走手动粘贴）；
+4. agent 再用 `service(action="add", kind="mcp", …)` 把服务接进核心——**先授权、后注册**，
+   成功后立即生效并写入 `services.d/`，同样不用重启。
 
-完整步骤（安装、tunnel 检查、manifest 全文、排查表）：`adapters/oauth-mcp/README.md`。
+完整步骤、排查表与手工兜底：`adapters/oauth-mcp/README.md`；agent 侧的流程规范：
+`playbook(topic="oauth-provider")`。
 
 ### 大响应的处理
 

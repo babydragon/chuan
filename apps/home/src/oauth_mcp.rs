@@ -976,6 +976,92 @@ fn mcp_tools(allow_revoke: bool) -> Value {
     json!({"tools": tools})
 }
 
+/// 自动刷新：helper 是唯一持有 refresh_token 的进程，它不刷就没人刷。
+///
+/// 目标机是"部署在家里、只通过通道说话"的环境：让主人每小时记着来一句
+/// "刷新 token" 是不现实的。这里每 60s 看一次，剩余有效期不足 10 分钟就换；
+/// 失败不重试得太勤（同一 provider 至少隔 15 分钟），把原因写进 journald。
+const REFRESH_TICK_S: u64 = 60;
+const REFRESH_AHEAD_S: i64 = 600;
+const REFRESH_RETRY_S: i64 = 900;
+
+/// providers 目录里的 manifest + 内置默认 provider（去重）。
+fn provider_ids(providers: &Path) -> Vec<String> {
+    let mut ids = vec![DEFAULT_PROVIDER.to_owned()];
+    if let Ok(rd) = std::fs::read_dir(providers) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("toml") {
+                continue;
+            }
+            if let Some(id) = p.file_stem().and_then(|s| s.to_str()) {
+                if !ids.iter().any(|x| x == id) {
+                    ids.push(id.to_owned());
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// 后台刷新线程：只在 `serve` 里起（一次性命令退出后线程会跟着死）。
+fn spawn_refresher(base: PathBuf, providers: PathBuf) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("oauth-mcp: 自动刷新线程起不来：{e}");
+                return;
+            }
+        };
+        let mut last_fail: std::collections::HashMap<String, i64> = Default::default();
+        loop {
+            for id in provider_ids(&providers) {
+                let Ok(manifest) = manifest_for(&providers, &id, None) else {
+                    continue;
+                };
+                if !manifest.token.refresh {
+                    continue;
+                }
+                let Ok(ctx) = Ctx::new(base.clone(), id.clone(), manifest, None) else {
+                    continue;
+                };
+                let Some(tokens) = read_json(&ctx.dir.join("tokens.json")) else {
+                    continue;
+                };
+                if tokens
+                    .get("refresh_token")
+                    .and_then(Value::as_str)
+                    .is_none()
+                {
+                    continue;
+                }
+                let expires = tokens.get("expires_at").and_then(Value::as_i64).unwrap_or(0);
+                if expires - now() > REFRESH_AHEAD_S {
+                    continue;
+                }
+                if last_fail.get(&id).map(|t| now() - t < REFRESH_RETRY_S) == Some(true) {
+                    continue;
+                }
+                match rt.block_on(ctx.refresh()) {
+                    Ok(_) => {
+                        last_fail.remove(&id);
+                        eprintln!("oauth-mcp: 已自动刷新 {id}");
+                    }
+                    Err(e) => {
+                        last_fail.insert(id.clone(), now());
+                        eprintln!("oauth-mcp: 自动刷新 {id} 失败：{e}（{} 分钟后再试）", REFRESH_RETRY_S / 60);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(REFRESH_TICK_S));
+        }
+    });
+}
+
 fn mcp_dispatch(
     rt: &tokio::runtime::Runtime,
     base: &Path,
@@ -1091,6 +1177,8 @@ fn serve(
         .map_err(|e| format!("监听 {host}:{port} 失败：{e}"))?;
     eprintln!("oauth-mcp listening on http://{host}:{port}/mcp");
     eprintln!("local token file: {}", token_path.display());
+    eprintln!("providers dir: {}", providers.display());
+    spawn_refresher(base.clone(), providers.clone());
     for mut req in server.incoming_requests() {
         let authorized = req
             .headers()

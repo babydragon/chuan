@@ -22,6 +22,10 @@ chuan oauth-mcp serve --dir /tmp/oauth-test --port 8790
 不写则退回 `<dir>/providers.d`（旧安装的兼容路径）。
 
 `serve` 首次会生成 `<dir>/mcp-token`（0600）；chuan 用它作为本地 MCP 的 Bearer token。
+
+**自动刷新**：`serve` 每 60 秒检查一次清单对应的 token，剩余有效期不足 10 分钟就用
+refresh token 换新（失败写 journald，同一 provider 至少隔 15 分钟再试）。不需要人工续期；
+只有 refresh token 被服务方撤销时才需要重新授权。
 工具：`auth_begin`、`auth_status`、`auth_refresh`；`auth_revoke` 默认不注册
 （等 per-tool 角色策略落地后再开）。
 
@@ -81,13 +85,14 @@ curl -fsSL -x "$P" "https://github.com/babydragon/chuan/releases/download/$V/ins
       --with-opentunnel --bootstrap-oauth-tunnel
 ```
 
-- `--with-opentunnel`：只装二进制到 `/usr/local/lib/chuan/opentunnel/opentunnel`；
+- `--with-opentunnel`：装 OpenTunnel 二进制到 `/usr/local/lib/chuan/opentunnel/opentunnel`，
+  同时装好并启用 `chuan-oauth-mcp.service`、生成 `services.d/oauth.toml`；
 - `--bootstrap-oauth-tunnel`：创建 tunnel 身份与固定 route `auth`，等证书 Ready 后停掉后台服务，
   只留 identity/route（真正授权时再 `serve`）；
 - **从解开的 tar 安装时要自己设 `CHUAN_VERSION=<tag>`**：脚本没有版本信息时会去找
   `latest`，而 `latest` 可能还没有 OpenTunnel 资产；
 - bootstrap 失败**不阻断** chuan 安装，可以稍后重跑；
-- 安装脚本**不装** helper 的 systemd 单元（见第 3 步），只装二进制和 tunnel。
+- 不需要手工写 provider 清单或重启：清单用 `oauth_manifest` 装，helper 每次调用都重读。
 
 ### 2. 确认 tunnel 已创建
 
@@ -114,6 +119,25 @@ sudo CHUAN_USER=chuan CHUAN_GROUP=chuan \
 ```
 
 日志在 `/var/lib/chuan/oauth/opentunnel/bootstrap.log`。
+
+### 2.5 之后的步骤可以由 agent 完成
+
+`--with-opentunnel` 已经装好 helper 单元与 `services.d/oauth.toml`，以下动作都可以在通道里
+让 agent 做，不需要 SSH、不需要重启：
+
+| 动作 | 谁做 | 工具 |
+|---|---|---|
+| 起草 + 安装 provider 清单 | agent（主人审批） | `oauth_manifest(action="install", path="/ws/oauth/<id>.toml")` |
+| 发起授权、把链接发给你 | agent | `mcp(server="oauth", tool="auth_begin")` |
+| 查看授权进度 | agent | `... tool="auth_status"`（不返回 token） |
+| 把服务接进核心 | agent（主人审批） | `service(action="add", kind="mcp", base=…, token_file=…)` |
+| 续期 | helper 自动 | 见上面的「自动刷新」 |
+
+顺序要记住：**先授权、后 `service add`**。token 文件不存在时 `service add` 会握手失败并
+拒绝写配置（不会留下半截状态），重新授权后再 add 一次即可。
+清单装好后 helper 每次调用都重读，所以改清单/加 provider 也不需要重启 helper。
+
+下面的手工步骤保留给"自己动手"或排查场景。
 
 ### 3. helper 常驻服务
 

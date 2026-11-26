@@ -18,6 +18,7 @@ pub mod kb;
 pub mod library;
 pub mod mcp;
 pub mod net;
+pub mod oauth_provider;
 pub mod payload;
 pub mod playbook;
 pub mod services;
@@ -31,6 +32,7 @@ pub mod skills;
 pub mod tools;
 
 pub use admin::ServiceTool;
+pub use oauth_provider::OauthManifestTool;
 pub use grants::{Approval, ArgvGrant, Grants, GrantsCache, Mode, PathGrant};
 pub use elevated::ElevatedClient;
 pub use host::HostEnv;

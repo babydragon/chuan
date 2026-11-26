@@ -18,6 +18,9 @@ pub struct ServiceTool {
     dir: PathBuf,
     /// 凭据只允许放在这个目录下（默认 `<config>/secrets`）
     secrets_root: PathBuf,
+    /// OAuth helper 写的 `access_token` 落在 `<state>/oauth/<provider>/`；
+    /// 它是第二个合法凭据来源（helper 拥有写权限，核心只读）。
+    oauth_root: Option<PathBuf>,
     hub: Arc<McpHub>,
     http: Arc<HttpServiceTool>,
     proxy: crate::proxy::ProxyConfig,
@@ -33,9 +36,23 @@ impl ServiceTool {
         Arc::new(Self {
             dir: dir.into(),
             secrets_root: secrets_root.into(),
+            oauth_root: None,
             hub,
             http,
             proxy: Default::default(),
+        })
+    }
+
+    /// 允许把 OAuth helper 写出的 `<state>/oauth/**` 当 `token_file`。
+    pub fn with_oauth_root(mut self: Arc<Self>, oauth_root: impl Into<PathBuf>) -> Arc<Self> {
+        let _ = &self;
+        Arc::new(Self {
+            dir: self.dir.clone(),
+            secrets_root: self.secrets_root.clone(),
+            oauth_root: Some(oauth_root.into()),
+            hub: Arc::clone(&self.hub),
+            http: Arc::clone(&self.http),
+            proxy: self.proxy.clone(),
         })
     }
 
@@ -45,6 +62,7 @@ impl ServiceTool {
         Arc::new(Self {
             dir: self.dir.clone(),
             secrets_root: self.secrets_root.clone(),
+            oauth_root: self.oauth_root.clone(),
             hub: Arc::clone(&self.hub),
             http: Arc::clone(&self.http),
             proxy,
@@ -80,11 +98,18 @@ impl ServiceTool {
             .secrets_root
             .canonicalize()
             .unwrap_or_else(|_| self.secrets_root.clone());
-        if !canon.starts_with(&root) {
-            return Err(format!(
-                "凭据只能放在 {} 下（收到 {raw}）",
-                root.display()
-            ));
+        let oauth = self
+            .oauth_root
+            .as_ref()
+            .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()));
+        let allowed = canon.starts_with(&root)
+            || oauth.as_ref().map(|r| canon.starts_with(r)).unwrap_or(false);
+        if !allowed {
+            let extra = oauth
+                .as_ref()
+                .map(|r| format!("，或 OAuth 助手写入的 {} 下", r.display()))
+                .unwrap_or_default();
+            return Err(format!("凭据只能放在 {} 下{extra}（收到 {raw}）", root.display()));
         }
         if !canon.is_file() {
             return Err(format!("不是普通文件：{raw}"));
