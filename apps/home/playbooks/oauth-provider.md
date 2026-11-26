@@ -89,8 +89,19 @@ service(action="add", name="<服务名>", kind="mcp",
 ## 5. 收尾
 
 - 告诉主人现在能用什么（例如"可以查域名列表了"），以及 scope 是只读；
-- 要加写权限：覆盖清单（改 `[authorize] scopes`）→ 重新 `auth_begin` → 主人再点一次 →
-  `service add` 同名重加即可（会覆盖片段）；
+- **改已有清单前先读原文**：`oauth_manifest(action="get", id="<id>")`。
+  不要凭记忆重写——manifest 里有 endpoint、callback、opentunnel 路径这些字段，漏一个就失效。
+  （这份工具自己就能读，不需要 host 只读挂载。）
+- **要加权限**（例如要改 DNS 记录）：先确认 scope 名，不要猜——授权服务器的
+  `/.well-known/oauth-authorization-server` 里有 `scopes_supported`（Cloudflare 的 scope 名
+  就是 API Token 权限名 + `.read`/`.write`，如 `dns.write`、`zone.read`）；
+  然后覆盖清单（改 `[authorize] scopes`）→ 重新 `auth_begin` → 主人再点一次同意。
+  授权页**只能收窄、不能扩权**：没写进请求的权限不会出现；主人选「只读」时结果也会比清单少，
+  以 `auth_status` 返回的 scope 为准。
+  重新授权只是原地更新 token 文件，**不用重启 chuan，也不用重新 `service add`**；
+  refresh 不会加权限——要加 scope 必须重新走一次授权。
+- 覆盖清单后同名 `service add` 只用于改 `base`/`token_file`/`tools` 这类服务定义；
+  权限变化不需要动服务。
 - 到期与刷新：helper 自动刷新，剩余不足 10 分钟就换；连续失败会写日志。
   真的失效（`state=expired`、`invalid_grant`）才需要重新授权。
 

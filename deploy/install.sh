@@ -528,7 +528,7 @@ cat <<NEXT
   - 授权表就在本配置文件（改完热加载，不用重启）；默认表见 chuan.toml 的 [host] 段
 
 OAuth（可选）：
-  - `--with-opentunnel` 会额外装 chuan-oauth-mcp.service 与 OpenTunnel，并创建回调 tunnel；
+  - --with-opentunnel 会额外装 chuan-oauth-mcp.service 与 OpenTunnel，并创建回调 tunnel；
   - provider manifest 放 /etc/chuan/oauth/providers.d/（配置，不是状态）；
   - chuan 侧的服务定义放 /etc/chuan/services.d/<name>.toml，**不用改 chuan.toml**。
 

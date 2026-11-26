@@ -131,6 +131,12 @@
 > （SelfModify 审批、helper 每次调用重读）、helper 每 60s 检查并自动续期、
 > `service add` 接受 `<state>/oauth/` 下的 token、安装期生成 `services.d/oauth.toml`；
 > 新增内置规程 `oauth-provider`，agent 按「清单 → 授权 → 注册」跑完，不改 `chuan.toml`、不重启。
+> **0.4.0-rc.4**：修安装脚本结尾提示里的反引号——未加引号的 heredoc 会把它当命令执行，
+> 装完多一行 `--with-opentunnel: 未找到命令`（功能不受影响，只是提示文案被吃掉；
+> `scripts/check-install.sh` 加了回归断言）。`oauth_manifest` 补只读动作 `list`（带 scope）
+> 与 `get`（清单原文，含密钥字面量时拒绝返回），两者免审批——不再需要用 `host` 只读
+> 去 cat 清单；`oauth-provider` 规程补「加权限先查 auth server 的 scopes_supported、
+> 授权页只能收窄」与「改清单前先 get」。
 > **扩展机制（设计，未实现）**：通道适配器走旁路进程 + UDS（D44），OAuth 走独立 helper +
 > 中继回调 + `token_file`（D45）；内核不加插件 ABI。**协议 v1 + Echo TUI 已实现**（`adapters/echo/`）；
 > **OAuth 手动粘贴版已跑通**（DCR/PKCE/refresh/token_file，`adapters/oauth-mcp/`），

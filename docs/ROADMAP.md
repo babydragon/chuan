@@ -10,7 +10,7 @@
 > 正式版：`v0.1.0`、`v0.2.0`、`v0.3.0`（技能服务网关 D41 + `service-gateway` 内置规程 +
 > 请求头重复修复 + 上下文：结论优先裁剪 D42 / 按模型窗口自动预算与占比 D43 +
 > 流式 chunk 的 null 加固 + `/usage` 四窗口 + 内网 lane 也能用已装依赖）；
-> 预发布到 `v0.4.0-rc.3`（通道适配器 D44 + Echo、OAuth helper D45 + OpenTunnel 可选资产、
+> 预发布到 `v0.4.0-rc.4`（通道适配器 D44 + Echo、OAuth helper D45 + OpenTunnel 可选资产、
 > D46 多通道投递、D47 通道失败补发、D48 配置目录优先、D49 OAuth 接入零运维）。
 > 未实现项：per-exec cgroup 限额（见 SBC-VERIFY §10，触发式）；金额口径 `[pricing]`（D20 先只记 token）；
 > OAuth2 令牌交换（D18 非目标）；**宿主执行 P4.6：A 段（host/sys/capability）已实现，B 待上板、C 已实现待验**；

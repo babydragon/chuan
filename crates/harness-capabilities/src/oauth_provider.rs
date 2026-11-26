@@ -42,6 +42,25 @@ impl OauthManifestTool {
         self.dir.join(format!("{id}.toml"))
     }
 
+    /// 读清单原文（改之前先看现有内容，避免覆盖时丢字段）。
+    ///
+    /// 先跑一遍 `reject_secrets`：手工放进去的密钥字面量不能被读进模型上下文。
+    fn show(&self, id: &str) -> Result<String, String> {
+        if !valid_id(id) {
+            return Err("provider id 不合法".into());
+        }
+        let path = self.path_of(id);
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "读不到 {}：{e}（没有文件时用的是内置默认清单，可以自己写一份完整的）",
+                path.display()
+            )
+        })?;
+        let value = read_manifest_text(&text)?;
+        reject_secrets(&value)?;
+        Ok(format!("{}：\n```toml\n{}\n```", path.display(), text.trim()))
+    }
+
     fn list(&self) -> String {
         let mut entries: Vec<(String, PathBuf)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
@@ -79,7 +98,20 @@ impl OauthManifestTool {
                         .and_then(|o| o.get("token_file"))
                         .and_then(Value::as_str)
                         .unwrap_or("（默认）");
-                    out.push_str(&format!("- `{id}`（{kind}，回调 {cb}）→ token: {token}\n"));
+                    let scopes = v
+                        .get("authorize")
+                        .and_then(|a| a.get("scopes"))
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_else(|| "（未声明）".into());
+                    out.push_str(&format!(
+                        "- `{id}`（{kind}，回调 {cb}）scope: {scopes} → token: {token}\n"
+                    ));
                 }
                 Err(e) => out.push_str(&format!("- `{id}`：清单读不出来（{e}）\n")),
             }
@@ -100,7 +132,7 @@ impl Tool for OauthManifestTool {
                 主人批准 → ③ 用 mcp(server=\"oauth\", tool=\"auth_begin\") 拿授权链接发给主人 → \
                 ④ 主人点完授权后，用 service(action=\"add\", kind=\"mcp\") 把服务接进核心\
                 （此时 token 已存在，握手会成功，立即生效）。\n\
-                清单里不能有密钥字面量，只能写 client_secret_file 这类路径。"
+                改已有清单前先 oauth_manifest(action=\"get\", id=...) 读原文，别凭记忆重写（会丢字段）。清单里不能有密钥字面量，只能写 client_secret_file 这类路径。"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -114,9 +146,9 @@ impl Tool for OauthManifestTool {
                         },
                         "required": ["why", "impact"]
                     },
-                    "action": { "type": "string", "enum": ["list", "install", "remove"] },
+                    "action": { "type": "string", "enum": ["list", "get", "install", "remove"] },
                     "path": { "type": "string", "description": "install 时必填：/ws 下的清单草稿" },
-                    "id": { "type": "string", "description": "install/remove 时的 provider id；install 省略则取清单里的 id" }
+                    "id": { "type": "string", "description": "get/remove 时必填；install 省略则取草稿里的 id" }
                 },
                 "required": ["action", "_approval"]
             }),
@@ -130,6 +162,15 @@ impl Tool for OauthManifestTool {
     /// 改的是配置目录：子 agent 不能自己扩权（与 `role` 一致）。
     fn tier(&self) -> u8 {
         1
+    }
+
+    /// 只读动作（list/get）结构上有界：读自己配置目录里的一个文件、不带副作用，
+    /// 不需要主人点卡。install/remove 仍然逐次审批。
+    fn skip_approval(&self, args: &serde_json::Value) -> bool {
+        matches!(
+            args.get("action").and_then(serde_json::Value::as_str),
+            Some("list") | Some("get")
+        )
     }
 
     fn domain(&self) -> harness_kernel::Domain {
@@ -153,6 +194,7 @@ impl Tool for OauthManifestTool {
                 };
                 format!("安装 OAuth provider 清单 `{id}` → {dest}；{state}")
             }
+            "get" => format!("读取 OAuth provider 清单 `{id}`（只读；先看再改）"),
             "remove" => format!("删除 OAuth provider 清单 `{id}`（进回收站，可捞回）"),
             _ => format!("oauth_manifest {action}"),
         })
@@ -174,6 +216,20 @@ impl Tool for OauthManifestTool {
                 doc_writes: Vec::new(),
                 artifacts: Vec::new(),
             }),
+            "get" => {
+                let id = args
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ToolError::new(ErrorCode::InvalidArgs, "需要 id", false))?;
+                let text = self
+                    .show(id)
+                    .map_err(|e| ToolError::new(ErrorCode::NotFound, e, false))?;
+                Ok(ToolOutput {
+                    content: vec![Block::Paragraph(text)],
+                    doc_writes: Vec::new(),
+                    artifacts: Vec::new(),
+                })
+            }
             "install" => {
                 let raw = args
                     .get("path")
@@ -496,6 +552,30 @@ token_file = "/var/lib/chuan/oauth/demo/access_token"
         assert!(validate(&bad, &root()).is_err());
         let bad = GOOD.replace("https://example.com", "http://example.com");
         assert!(validate(&bad, &root()).is_err());
+    }
+
+    #[test]
+    fn show_returns_the_file_and_refuses_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = OauthManifestTool::new(dir.path(), "/var/lib/chuan/oauth");
+        std::fs::write(dir.path().join("demo.toml"), GOOD).unwrap();
+        let text = t.show("demo").unwrap();
+        assert!(text.contains("id = \"demo\""), "{text}");
+        assert!(text.contains("toml"), "{text}");
+
+        let bad = GOOD.replace("[client]\nmode = \"dcr\"", "[client]\nmode = \"dcr\"\nclient_secret = \"x\"");
+        std::fs::write(dir.path().join("demo.toml"), bad).unwrap();
+        let e = t.show("demo").unwrap_err();
+        assert!(e.contains("密钥字面量"), "{e}");
+    }
+
+    #[test]
+    fn only_read_actions_skip_approval() {
+        let t = OauthManifestTool::new("/nonexistent", "/var/lib/chuan/oauth");
+        assert!(t.skip_approval(&json!({"action": "get", "id": "demo"})));
+        assert!(t.skip_approval(&json!({"action": "list"})));
+        assert!(!t.skip_approval(&json!({"action": "install"})));
+        assert!(!t.skip_approval(&json!({"action": "remove"})));
     }
 
     #[test]

@@ -122,6 +122,8 @@ impl Tool for PlaybookTool {
                  取不到时会告诉你这个目录和现有清单——**不要**据此要求主人「再去放一遍」，先看是不是目录不对。\
                  导入/复刻外部技能前取 `import-skill`；沉淀技能前取 `distill`。\
                  技能要调有鉴权的服务（要密码/令牌、内网设备）前取 `service-gateway`，按它配服务与技能。\
+                 接一个需要 OAuth 授权的服务前取 `oauth-provider`：清单 → 授权 → 注册，\
+                 不需要主人 SSH 或重启（用 `oauth_manifest` 与 `service` 工具）。\
                  把一次性的做法变成可复用规范，用 `publish_playbook`（需要主人确认）；改坏了用 `rollback_playbook` 回上一版。",
                 self.dir.display()
             ),
@@ -201,6 +203,16 @@ mod tests {
         let spec = t.spec();
         assert!(spec.description.contains("import-skill"), "{}", spec.description);
         assert!(spec.description.contains("extra"), "{}", spec.description);
+    }
+
+    /// 规程要在工具说明里被点名，否则模型只会看到一串 topic 名，
+    /// 接 OAuth 服务时不一定想到去取它。
+    #[test]
+    fn description_points_at_oauth_provider() {
+        let t = PlaybookTool::new("/nonexistent", vec![("oauth-provider", "内置")]);
+        let spec = t.spec();
+        assert!(spec.description.contains("oauth-provider"), "{}", spec.description);
+        assert!(spec.description.contains("oauth_manifest"), "{}", spec.description);
     }
 
     #[test]

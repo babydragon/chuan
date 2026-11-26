@@ -1676,6 +1676,9 @@ provider manifest、手工写 `services.d` 片段、授权后再 `systemctl rest
 1. **清单安装数据化**：新增 `oauth_manifest` 工具（SelfModify，逐次审批），把清单装进
    `<config>/oauth/providers.d/<id>.toml`；覆盖先备份、删除进回收站、清单里禁止密钥字面量。
    helper **每次调用都重读清单**，所以装/改清单都不需要重启。
+   `list` / `get` 是只读动作（`get` 返回原文，含密钥字面量时拒绝），走 `skip_approval`：
+   它们结构上有界、不产生副作用，不该为了看一眼配置弹卡——否则 agent 只能退回去用
+   `host` 只读挂载整个目录，授权面反而更大。
 2. **服务注册沿用 `service add`**：MCP 先握手成功才写 `services.d/` 片段，因此顺序固定为
    **先授权、后注册**。token 不存在时握手失败且不写配置——不留下"有配置、没凭据"的半截状态。
 3. **凭据来源加一处**：`service add` 的 `token_file` 除了 `<config>/secrets`，也接受

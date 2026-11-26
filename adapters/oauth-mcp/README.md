@@ -127,6 +127,7 @@ sudo CHUAN_USER=chuan CHUAN_GROUP=chuan \
 
 | 动作 | 谁做 | 工具 |
 |---|---|---|
+| 查看/读取已有清单 | agent | `oauth_manifest(action="list")` / `("get", id=…)` |
 | 起草 + 安装 provider 清单 | agent（主人审批） | `oauth_manifest(action="install", path="/ws/oauth/<id>.toml")` |
 | 发起授权、把链接发给你 | agent | `mcp(server="oauth", tool="auth_begin")` |
 | 查看授权进度 | agent | `... tool="auth_status"`（不返回 token） |

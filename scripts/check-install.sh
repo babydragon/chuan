@@ -72,6 +72,10 @@ run_case() {
   # 反引号写在未加引号的 heredoc 里会被当成命令替换真的执行（真实事故：
   # 装完多一行 "Failed to connect to user scope bus"，且那句话变成空）
   grep -q "Failed to connect" "$out" && fail "$name: 结尾提示里有命令替换的残留输出"
+  # 同一个坑的另一种形态（rc.3 真实事故）：NEXT 是**未加引号**的 heredoc，
+  # 里面写反引号会被当成命令替换执行，输出一行 "--with-opentunnel: 未找到命令"。
+  grep -qE "未找到命令|command not found" "$out" \
+    && fail "$name: 结尾提示里的反引号被当成命令执行了（heredoc 没加引号）"
   grep -q "已 enable-linger chuan：systemctl --user 才能用" "$out" \
     || fail "$name: 结尾提示里变量没展开（$(grep -m1 "已 enable-linger" "$out")）"
 }
