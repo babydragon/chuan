@@ -1,0 +1,32 @@
+# Cloudflare MCP（oauth-mcp 的第一个 provider）
+# 这是数据，不是代码；agent 可以起草，主人批准后放到 providers.d/。
+schema = 1
+id = "cloudflare-mcp"
+display = "Cloudflare API MCP"
+kind = "mcp"
+docs_url = "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"
+fetched_at = "2026-11-26"
+
+resource = "https://mcp.cloudflare.com/mcp"
+discovery = "https://mcp.cloudflare.com/.well-known/oauth-protected-resource/mcp"
+
+[client]
+mode = "dcr"
+token_endpoint_auth = "none"
+pkce = "S256"
+
+[authorize]
+scopes = ["user:read", "account:read", "dns.read", "offline_access"]
+
+[token]
+refresh = true
+
+[callback]
+mode = "manual"
+path = "/cb"
+port = 8765
+
+[output]
+service = "cloudflare"
+token_file = "/var/lib/chuan/oauth/cloudflare-mcp/access_token"
+header = "Authorization: Bearer {token}"

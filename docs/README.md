@@ -120,6 +120,15 @@
 > 配置 `Content-Type` 不再重复、上下文结论优先裁剪（D42）与按模型窗口自动预算/占比（D43）、
 > 流式 chunk 显式 null 加固、`/usage` 四窗口、内网 lane 只读挂载运行时。
 > 板上逐条验收仍以 `SBC-VERIFY.md` 为准。
+> **0.4.0-rc.1**：通道适配器协议 v1 + Echo TUI（D44）、OAuth helper 内置（D45：provider manifest、
+> 手动/OpenTunnel 回调、本地 MCP `serve`）、多通道投递（D46）、安装脚本可选 OpenTunnel riscv 资产。
+> 加密与安全加强留到正式版之后。
+> **扩展机制（设计，未实现）**：通道适配器走旁路进程 + UDS（D44），OAuth 走独立 helper +
+> 中继回调 + `token_file`（D45）；内核不加插件 ABI。**协议 v1 + Echo TUI 已实现**（`adapters/echo/`）；
+> **OAuth 手动粘贴版已跑通**（DCR/PKCE/refresh/token_file，`adapters/oauth-mcp/`），
+> 并已提供本地 MCP 服务（`auth_begin/status/refresh`）；
+> 首个真实平台为**微信**（从进程内拆出，未实现）；钉钉调研保留但暂不采用（`DINGTALK.md`）。
+> 多通道投递见 D46；适配器开发约定见 `../adapters/README.md`。
 
 ---
 
@@ -143,6 +152,9 @@
 | 14 | [`VOICE.md`](VOICE.md) | 语音消息**入站**的方案与成本：两平台事实、现状缺口、最小改动集、未验证项 |
 | 15 | [`ASR.md`](ASR.md) | 本地语音识别的可行性（K1/RVV）、模型选型、实测步骤与判据 |
 | 16 | [`MEMORY-RANK.md`](MEMORY-RANK.md) | 长期记忆超过注入上限时怎么挑（设计，未实现） |
+| 17 | [`EXTENSIONS.md`](EXTENSIONS.md) | 通道适配器协议与 OAuth 旁路（设计，未实现） |
+| 18 | [`DINGTALK.md`](DINGTALK.md) | 钉钉通道调研：收发能力、限制、与 webhook 机器人对比（暂不采用） |
+| 19 | [`OAUTH-PROVIDERS.md`](OAUTH-PROVIDERS.md) | OAuth provider manifest：agent 起草、主人批准、helper 执行（设计，未实现） |
 
 图：`architecture.png`（源 `architecture.dot`，同时导出 `.svg`）。
 历史版本与已合并的文档在 `archive/`。

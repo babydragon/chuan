@@ -177,6 +177,9 @@ apps/<name>/            # 薄二进制 crate + config/prompts/skills/evals
 | 9 | `docs/ROADMAP.md` | P0–P5、前置验证 V1–V5、DoD |
 | 10 | `docs/GLOSSARY.md` | 术语与命名标准 |
 | 11 | `docs/SBC-VERIFY.md` | 只能在目标板确认的项（上板逐条勾，含性能与部署） |
+| 12 | `docs/EXTENSIONS.md` | 通道适配器协议与 OAuth 旁路（设计，未实现；D44/D45/D46） |
+| 13 | `docs/DINGTALK.md` | 钉钉通道调研：收发能力、限制、与 webhook 机器人对比（暂不采用） |
+| 14 | `docs/OAUTH-PROVIDERS.md` | OAuth provider manifest：agent 起草、主人批准、helper 执行（设计，未实现） |
 
 图：`docs/architecture.png`（源 `docs/architecture.dot`）。
 沙盒验证脚本：`deploy/verify-sandbox.sh`。

@@ -157,6 +157,16 @@ pub trait Channel: Send + Sync + 'static {
 
 理由见 `DECISIONS.md` D28。
 
+### 1.4 外部适配器（设计，D44）
+
+`Channel` 的第二种实现是“socket 版”：平台代码在独立进程里，经 UDS 与本进程通信。
+方法名、字段、错误码、安全边界与部署方式见 `docs/EXTENSIONS.md §1`。
+
+- 进程内实现（Telegram/微信）与 socket 实现共用同一 `Channel` 语义与一致性测试。
+- 身份映射、审批、Journal、分片与节流仍在本进程；适配器只搬 `Inbound` / `View`。
+- 适配器由主人安装，独立 uid；内核监听 socket，并用 `SO_PEERCRED` 校验对端 uid。
+- 新增平台**不修改 `crates/`**，也不参与 `cargo zigbuild`。
+
 ---
 
 ## 2. Store

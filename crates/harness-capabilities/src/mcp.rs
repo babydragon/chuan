@@ -42,7 +42,10 @@ pub struct McpServer {
     /// 目录形态：`names`（默认，只列名字）/ `full`（名字+描述）/ `summary`（只报数量）
     catalog_mode: String,
     base: String,
-    auth: Option<(String, String)>,
+    /// `(header 名, 值模板)`；值里的 `{token}` 在**每次请求**时从 `token_file` 读取，
+    /// 这样 OAuth 刷新/轮换只改文件，不需要重启核心（D45）。
+    auth_template: Option<(String, String)>,
+    token_file: Option<PathBuf>,
     extra_headers: Vec<(String, String)>,
     client: reqwest::Client,
     session: Mutex<Option<String>>,
@@ -73,25 +76,15 @@ impl McpServer {
             .user_agent("chuan/0.1")
             .build()
             .map_err(|e| format!("HTTP 客户端初始化失败：{e}"))?;
-        let auth = if header.trim().is_empty() {
+        let auth_template = if header.trim().is_empty() {
             None
         } else {
             let (k, v) = header
                 .split_once(':')
                 .ok_or_else(|| format!("header 配置不合法：{header}"))?;
-            let mut v = v.trim().to_owned();
-            if v.contains("{token}") {
-                let file = token_file
-                    .as_ref()
-                    .ok_or("需要 token 但没配 token_file")?;
-                let token = std::fs::read_to_string(file)
-                    .map_err(|e| format!("读取 token 失败：{e}"))?
-                    .trim()
-                    .to_owned();
-                if token.is_empty() {
-                    return Err("token 文件为空".into());
-                }
-                v = v.replace("{token}", &token);
+            let v = v.trim().to_owned();
+            if v.contains("{token}") && token_file.is_none() {
+                return Err("需要 token 但没配 token_file".into());
             }
             Some((k.trim().to_owned(), v))
         };
@@ -100,7 +93,8 @@ impl McpServer {
             allow,
             catalog_mode,
             base: base.into(),
-            auth,
+            auth_template,
+            token_file,
             extra_headers,
             client,
             session: Mutex::new(None),
@@ -109,10 +103,32 @@ impl McpServer {
         }))
     }
 
+    /// 解析本次请求的鉴权头；`{token}` 每次从文件读，刷新后立即生效。
+    fn auth(&self) -> Result<Option<(String, String)>, String> {
+        let Some((name, template)) = &self.auth_template else {
+            return Ok(None);
+        };
+        if !template.contains("{token}") {
+            return Ok(Some((name.clone(), template.clone())));
+        }
+        let file = self
+            .token_file
+            .as_ref()
+            .ok_or("需要 token 但没配 token_file")?;
+        let token = std::fs::read_to_string(file)
+            .map_err(|e| format!("读取 token 失败：{e}"))?
+            .trim()
+            .to_owned();
+        if token.is_empty() {
+            return Err("token 文件为空".into());
+        }
+        Ok(Some((name.clone(), template.replace("{token}", &token))))
+    }
+
     fn redact(&self, text: &str) -> String {
-        match &self.auth {
+        match self.auth().ok().flatten() {
             Some((_, v)) => {
-                let secret = v.rsplit(' ').next().unwrap_or(v);
+                let secret = v.rsplit(' ').next().unwrap_or(&v);
                 if secret.len() < 6 {
                     text.to_owned()
                 } else {
@@ -144,7 +160,7 @@ impl McpServer {
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .header("mcp-protocol-version", PROTOCOL);
-        if let Some((k, v)) = &self.auth {
+        if let Some((k, v)) = self.auth()? {
             req = req.header(k, v);
         }
         for (k, v) in &self.extra_headers {
@@ -161,7 +177,11 @@ impl McpServer {
             .map_err(|e| self.redact(&format!("{method} 请求失败：{e}")))?;
 
         // 服务端在 initialize 时给 session id
-        if let Some(sid) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+        if let Some(sid) = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
             *self.session.lock().unwrap() = Some(sid.to_owned());
         }
 
@@ -194,8 +214,12 @@ impl McpServer {
         let value = if ctype.contains("event-stream") {
             let mut found = None;
             for line in text.lines() {
-                let Some(data) = line.strip_prefix("data:") else { continue };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
+                    continue;
+                };
                 if id.is_none() || v.get("id").and_then(|x| x.as_u64()) == id {
                     found = Some(v);
                 }
@@ -212,7 +236,10 @@ impl McpServer {
                 err.to_string().chars().take(400).collect::<String>()
             )));
         }
-        Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(value
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// initialize + notifications/initialized + tools/list
@@ -244,7 +271,9 @@ impl McpServer {
             .await?;
         let mut tools = Vec::new();
         for t in list["tools"].as_array().cloned().unwrap_or_default() {
-            let Some(name) = t["name"].as_str() else { continue };
+            let Some(name) = t["name"].as_str() else {
+                continue;
+            };
             tools.push(McpToolInfo {
                 name: name.to_owned(),
                 description: t["description"].as_str().unwrap_or("").to_owned(),
@@ -269,11 +298,7 @@ impl McpServer {
         self.tools.lock().unwrap().clone()
     }
 
-    pub async fn call(
-        &self,
-        tool: &str,
-        args: serde_json::Value,
-    ) -> Result<String, String> {
+    pub async fn call(&self, tool: &str, args: serde_json::Value) -> Result<String, String> {
         if !self.tools().iter().any(|t| t.name == tool) {
             return Err(format!("{} 没有工具 {tool}", self.name));
         }
@@ -352,11 +377,15 @@ impl McpHub {
     pub async fn connect_all(&self) {
         let list: Vec<(String, Arc<McpServer>)> = {
             let map = self.servers.read().unwrap();
-            map.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+            map.iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
         };
         for (name, s) in list {
             match s.connect().await {
-                Ok(tools) => tracing::info!(server = %name, tools = tools.len(), "mcp tools loaded"),
+                Ok(tools) => {
+                    tracing::info!(server = %name, tools = tools.len(), "mcp tools loaded")
+                }
                 Err(e) => tracing::warn!(server = %name, error = %e, "mcp connect failed"),
             }
         }
@@ -368,7 +397,9 @@ impl SkillSource for McpHub {
         let mut out = String::new();
         let servers: Vec<(String, Arc<McpServer>)> = {
             let map = self.servers.read().unwrap();
-            map.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect()
+            map.iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
         };
         for (name, s) in &servers {
             let tools = s.tools();
@@ -394,7 +425,11 @@ impl SkillSource for McpHub {
                             ));
                             break;
                         }
-                        let desc = t.description.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let desc = t
+                            .description
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         let desc: String = desc.chars().take(60).collect();
                         out.push_str(&format!("- {}：{}\n", t.name, desc));
                     }
@@ -428,7 +463,10 @@ pub struct McpCallTool {
 
 impl McpCallTool {
     pub fn new(hub: Arc<McpHub>, log: impl Into<PathBuf>) -> Arc<Self> {
-        Arc::new(Self { hub, log: log.into() })
+        Arc::new(Self {
+            hub,
+            log: log.into(),
+        })
     }
 }
 
@@ -534,8 +572,15 @@ impl Tool for McpCallTool {
                 out.push_str(&format!(
                     "- {}（{}）：{}\n",
                     t.name,
-                    if params.is_empty() { "无参数" } else { &params },
-                    t.description.split_whitespace().collect::<Vec<_>>().join(" ")
+                    if params.is_empty() {
+                        "无参数"
+                    } else {
+                        &params
+                    },
+                    t.description
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 ));
             }
             return Ok(ToolOutput {
@@ -544,7 +589,10 @@ impl Tool for McpCallTool {
                 artifacts: Vec::new(),
             });
         }
-        let payload = args.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let payload = args
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
 
         let Some(s) = self.hub.get(server) else {
             return Err(ToolError::new(
@@ -577,5 +625,31 @@ impl Tool for McpCallTool {
             doc_writes: Vec::new(),
             artifacts: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_file_is_read_per_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "one").unwrap();
+        let server = McpServer::new(
+            "test",
+            "https://example.com/mcp",
+            Some(token.clone()),
+            "Authorization: Bearer {token}".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            "names".to_owned(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(server.auth().unwrap().unwrap().1, "Bearer one");
+        std::fs::write(&token, "two").unwrap();
+        assert_eq!(server.auth().unwrap().unwrap().1, "Bearer two");
     }
 }

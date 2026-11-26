@@ -1501,3 +1501,102 @@ socket。当前 agent 车道并发为 1，可接受；真要做并行技能时�
 4. 每轮终稿只有**最后一条分片**带占比行，且窗口未知时不出现百分比
    （`render::tests::footer_only_on_last_shard`、`copy::tests::context_footer_*`）；
 5. 小预算下历史仍不会退回到会话开头（`runner_flow::history_keeps_latest_turn_in_long_conversation`）。
+
+---
+
+## D44 · 扩展走旁路进程，不做内核插件 ABI（设计已定，未实现）
+
+**背景**：接飞书/钉钉这类新通道，现在必须改 Rust、重新交叉编译、重发版本；工具侧已有
+MCP、技能、`[[service]]` 三条不改代码的路。市面上的 WASM（ironclaw）与 npm 插件都依赖
+运行时形态，而本项目是 Rust 单二进制、目标机 riscv64。
+
+**决定**：
+1. **通道走旁路进程**：适配器独立 unit/uid，经 UDS 与内核通信，协议是 JSON-RPC 2.0 子集；
+   内核只实现一个 socket 版 `Channel`，平台代码不进 `crates/`。
+2. **工具不新增插件 ABI**：继续用 MCP（补本地 HTTP/UDS 形态）、技能与 `[[service]]`。
+3. **不做** WASM、原生动态库、`npm require` 内嵌、插件热加载、插件市场。
+4. **信任级别**：适配器是该通道的信任根（它能伪造主人消息），因此只由主人安装、
+   二进制与摘要钉在配置里、独立 uid、`SO_PEERCRED` 校验；身份映射、审批、Journal 仍在内核。
+5. 新增适配器不改 `chuan`、不发版；协议细节见 `docs/EXTENSIONS.md §1`。
+6. 适配器源码放仓库根 `adapters/<id>/`（**不进 Cargo workspace**、不参与交叉编译），
+   自带 README 与 systemd 单元；单独开发与验收约定见 `adapters/README.md`。
+7. **协议验证用 Echo，首个真实平台是微信**：Echo 已实现；微信把现有进程内实现拆成 `adapters/weixin/`，第一阶段复用
+   `harness-channels::weixin`（扫码登录、AES 媒体、游标与 `context_token` 已上板验证），
+   不重写客户端；协议中立性由 `Echo` 适配器与将来的新平台验证。钉钉调研保留在
+   `docs/DINGTALK.md`，因目标群属于学校组织、无法建应用而**暂不采用**。
+
+**理由**：先拿一个已上板验证的通道验证协议，风险最低；平台 SDK 主要在 Python/Go/Java，
+新平台再用对应语言写适配器，不必用 Rust 重写每个平台。进程隔离能用现成的 uid/cgroup/bwrap，
+不必再造一个 WASM 沙盒；协议可版本化，崩溃可独立重启。D12 的
+“不做插件热加载”仍然有效——改配置后重启对应 unit，不是运行期加载。
+
+**代价**：多一层协议与部署；适配器仍属 TCB；需要维护协议版本与一致性测试。
+
+**反悔成本**：中。协议可弃用、适配器可回收；内核不依赖任何具体平台。
+
+**实现状态（2026-11-24）**：M0 已完成——协议 v1、`SocketChannel`、`Echo` TUI 适配器与
+`socket_adapter` 测试；微信拆分与入站限流未实现。见 `docs/EXTENSIONS.md §1.7`。
+
+---
+
+## D45 · OAuth 归旁路 helper：PKCE + 中继回调 + 宿主侧刷新（设计已定，未实现）
+
+**背景**：接入需要用户授权的第三方服务（邮件、云盘、文档等）时，内核只有静态
+`token_file`；沙盒与技能不能持凭据（D18/不变量 14）；目标板在 NAT 后，手机通常与它
+不在同一局域网，loopback 回调不可用。
+
+**决定**：
+1. 授权码流程、PKCE、回调接收、令牌存储与刷新全部放在独立 helper；内核只从
+   `token_file` 读 access token（`http` 服务每次请求重读，零内核改动）。
+2. 回调优先**公网中继**（Cloudflare Worker）+ helper 主动轮询：中继只存 `code`，
+   `claim` 一次性取走，`code_verifier` 从不离开板子——中继无需被信任保存机密。
+3. 无公网时用手动粘贴（stdin 读入），**不把授权码粘回聊天**；授权码进聊天等于进 Journal
+   与模型上下文。
+4. 模型只看到 `auth_begin / auth_status / auth_revoke` 与一条公开链接，永远看不到令牌。
+5. helper 本身就是**本地 MCP 服务**（`oauth-mcp`），provider 是数据：`oauth2`（静态端点 +
+   client_secret + PKCE）与 `mcp`（资源元数据 + DCR；Cloudflare 属于这类）。
+   与 chuan 的衔接先走 `token_file`（MCP 每次请求重读），必要时再做本地代理。
+6. 前置条件是给 MCP 子工具补 per-tool 的域/角色策略；在补齐前，`auth_revoke` 不对成员开放。
+
+**理由**：OAuth 是 provider-specific 的领域流程（D17），不该进内核；中继解决 NAT 与异网；
+PKCE 让“回调经过第三方”不构成机密泄露。
+
+**代价**：多一个可选的云依赖；helper 与提供方政策（测试态 7 天、验证、受限 scope）
+需要运维与文档；多账号要按 `provider + account` 分目录。
+
+**反悔成本**：低。helper 可换实现，`token_file` 接口不变；中继可换成自建端点。
+
+**实现状态（2026-11-24）**：**手动粘贴版 OAuth 已跑通**——DCR → PKCE → 授权码 ->
+token 交换 → refresh → `token_file`，并用该 token 完成 `tools/list`、`whoami`、`GET /zones`；
+chuan 自己的 `McpServer` 读取同一个 `token_file` 也通过。helper 已提供**本地 MCP 服务**
+（`auth_begin / auth_status / auth_refresh`；`auth_revoke` 默认不注册），并有 systemd 单元。
+仍然未做：自动回调（OpenTunnel/Worker）、MCP per-tool 角色策略、生产级目录/权限。
+细节与验收见 `docs/EXTENSIONS.md §2`。
+
+---
+
+## D46 · 多通道投递：账号 1:N，默认同通道，显式跨通道（部分已实现）
+
+**背景**：一个人可能同时绑 Telegram、微信等多个通道。此前 `[identity]` 已按「一个 user 绑多个
+`channel:addr`」设计（D26），`remind` 也支持 `channel` 指定投到本人的另一条绑定（D27）；
+但“主动给别的通道发消息”没有统一语义，`send_file` 只能发当前会话。
+
+**决定**：
+1. 一个 user 可以绑多条 `channel:addr`（已实现）；会话键始终是 `{channel}:{addr}`，
+   同一个人的不同通道仍是不同会话（锁、取消、上下文都按会话走）。
+2. **默认投递回发起通道**：审批卡、状态、结果、文件都跟发起会话走。
+3. **显式跨通道**：`remind.channel`（已实现）继续有效；新增 `notify`（设计）复用同一套解析——
+   从 `Identity` 的绑定里找目标，找不到就报错，不猜“最近活跃”。
+4. 跨通道发送**必须审批**（`remind` 已经这样）；卡片写清“发给谁 / 哪个通道 / 内容摘要”。
+5. `send_file` 仍只发当前会话；跨通道发文件另立设计，避免变成任意文件出口。
+6. 不做“广播到所有通道”，除非消息里显式列出目标。
+
+**理由**：提醒投错人比提醒发不出去更糟；审批是唯一能让人确认“发给谁”的位置。
+`Identity` 已有绑定表，不需要新数据结构。
+
+**代价**：跨通道发送多一次审批；后台任务没有当前会话时，必须显式给目标。
+
+**反悔成本**：低。`notify` 是新增工具，不改现有路由；默认行为不变。
+
+**实现状态**：绑定与 `remind.channel` 已实现；`notify` 与跨通道 `send_file` 未实现。
+细节见 `docs/EXTENSIONS.md §1.9`。

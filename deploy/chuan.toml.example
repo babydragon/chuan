@@ -11,7 +11,16 @@ timezone = "Asia/Shanghai"
 # 可以同时开多条；同一个会话（通道 + 地址）仍然只跑一个 run。
 # 微信是**对话入口，不是推送通道**：额度按"每条入站 10 条出站"计，不随时间恢复（D25）。
 [channels]
-enabled = ["telegram"]       # 例：["telegram", "weixin"]；第一个是默认通道
+enabled = ["telegram"]       # 例：["telegram", "weixin", "echo"]；第一个是默认通道
+
+# 外部通道适配器（D44）：核心监听 UDS，适配器作为客户端连入。
+# 先把 "echo" 写进 enabled，并让 [[identity.user]].channels 包含 "echo:local"。
+# [[channels.adapter]]
+# id = "echo"
+# socket = "/run/chuan/channels/echo.sock"   # 默认 /run/chuan/channels/<id>.sock
+# uid = "chuan-echo"                          # 生产建议独立用户；不写则 socket 0600 只允许同 uid
+# media_dir = "/var/lib/chuan/echo-media"     # 不写 = 不接受附件
+# max_media_mb = 20
 
 [weixin]
 # 扫码登录写下的凭据（chuan weixin-login）；0600，不进沙盒。
@@ -105,6 +114,7 @@ channels = [
   "telegram:123456789",
   # "telegram:987654321",          # 同一个人的第二个 TG 号
   # "weixin:o9cq...@im.wechat",    # 扫码后 weixin-login 会打印主人的 id
+  # "echo:local",                  # Echo 适配器（D44）；actor 默认 local
 ]
 
 # [[identity.user]]
@@ -182,6 +192,19 @@ net = "host"                 # 共享宿主 netns（systemctl --user / 本机代
 # base = "https://mcp.dida365.com"
 # token_file = "/etc/chuan/secrets/dida_token"
 # tools = ["create_task", "list_undone_tasks_by_time_query"]   # 可选：只暴露这些
+
+# Cloudflare 统一 MCP（D45）：OAuth 或最小权限 API Token 都可以；token 每次请求重读。
+# [services.cloudflare]
+# kind = "mcp"
+# base = "https://mcp.cloudflare.com/mcp"
+# token_file = "/etc/chuan/secrets/cloudflare_mcp"   # 一行 token；OAuth helper 会刷新它
+
+# OAuth 旁路（D45）：helper 自己是一个本地 MCP 服务，暴露 auth_begin/status/refresh。
+# [services.oauth]
+# kind = "mcp"
+# base = "http://127.0.0.1:8790/mcp"
+# token_file = "/var/lib/chuan/oauth/cloudflare-mcp/mcp-token"
+# tools = ["auth_begin", "auth_status", "auth_refresh"]   # auth_revoke 默认不注册
 
 # ---- 命令条目（D31，可选）----
 # 免审批的内网动作放在 <配置目录>/commands.d/<name>.toml（安装脚本会放 4 条默认打印条目：

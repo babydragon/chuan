@@ -759,6 +759,19 @@ Environment=CHUAN_KEY_FILE=%d/zai_key
 
 应用只在启动时读一次并常驻内存；不会写回、不会进日志、不会进沙盒（`--clearenv`）。`chuan backup` 子命令不需要任何密钥。
 
+### 2.5 第三方 OAuth（设计，D45）
+
+- 授权码与 refresh token 由独立 helper 持有：`/var/lib/chuan-oauth/<provider>-<account>/`
+  （`tokens.json` 0600，只有 helper 可读）。内核**不经手**这些机密。
+- 内核只读 helper 产出的 `access_token`（0640 `helper:chuan`），在 `[[service]] token_file` 里指向它；
+  `http` 服务每次请求重读，刷新对内核透明。
+- 刷新：helper 每 10 分钟检查，剩余有效期 <10 分钟就刷新；`invalid_grant` 标记 `expired`，
+  停止重试，等下一次交互提示重新授权。
+- 回调：优先 Cloudflare Worker 中继 + helper 主动轮询（PKCE，中继只见 `code`）；
+  无公网时 `chuan auth finish` 从 stdin 粘贴，**不要粘进聊天**。
+- `chuan backup` **不包含**该目录；恢复后需要重新授权。
+- 提供方限制（测试态 7 天、长期不用、改密撤销、令牌上限）见 `EXTENSIONS.md §2.9` 与附录 A。
+
 ## 3. systemd 单元
 
 ```ini

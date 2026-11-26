@@ -12,6 +12,10 @@
 #   --no-enable   只安装文件，不 systemctl enable/--now
 #   --dry-run     只打印要做什么
 #   --proxy URL   下载走代理（也认 CHUAN_PROXY / https_proxy / http_proxy）
+#   --with-opentunnel   安装可选的 OpenTunnel CLI（默认不装；不装不影响 chuan）
+#   --opentunnel-bin P  使用指定的 opentunnel 二进制（隐含 --with-opentunnel）
+#   --bootstrap-oauth-tunnel  安装后创建 tunnel/证书（隐含 --with-opentunnel；
+#                             需要出网，可能等 1–2 分钟；失败不阻断主安装）
 #
 # 环境变量：
 #   CHUAN_VERSION   指定版本（默认 latest，可写 v0.1.0）
@@ -27,8 +31,12 @@ set -euo pipefail
 
 REPO="${CHUAN_REPO:-babydragon/chuan}"
 VERSION="${CHUAN_VERSION:-latest}"
+BASE="${CHUAN_BASE_URL:-https://github.com}"
 DRY_RUN=0
 ENABLE=1
+WITH_OPENTUNNEL=0
+OPENTUNNEL_BIN_SRC=""
+BOOTSTRAP_OAUTH=0
 PROXY="${CHUAN_PROXY:-${https_proxy:-${http_proxy:-}}}"
 
 while [[ $# -gt 0 ]]; do
@@ -38,9 +46,14 @@ while [[ $# -gt 0 ]]; do
     --proxy)     [[ $# -ge 2 ]] || { echo "--proxy 需要参数" >&2; exit 2; }
                  PROXY="$2"; shift 2 ;;
     --proxy=*)   PROXY="${1#--proxy=}"; shift ;;
+    --with-opentunnel) WITH_OPENTUNNEL=1; shift ;;
+    --opentunnel-bin) [[ $# -ge 2 ]] || { echo "--opentunnel-bin 需要参数" >&2; exit 2; }
+                      OPENTUNNEL_BIN_SRC="$2"; WITH_OPENTUNNEL=1; shift 2 ;;
+    --opentunnel-bin=*) OPENTUNNEL_BIN_SRC="${1#--opentunnel-bin=}"; WITH_OPENTUNNEL=1; shift ;;
+    --bootstrap-oauth-tunnel) BOOTSTRAP_OAUTH=1; WITH_OPENTUNNEL=1; shift ;;
     -h|--help)
-      if [[ -r "$0" ]]; then sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
-      else echo "用法：install.sh [--no-enable] [--dry-run] [--proxy URL]（CHUAN_VERSION=v0.1.0 指定版本）"
+      if [[ -r "$0" ]]; then sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+      else echo "用法：install.sh [--no-enable] [--dry-run] [--proxy URL] [--with-opentunnel] [--opentunnel-bin P] [--bootstrap-oauth-tunnel]（CHUAN_VERSION=v0.1.0 指定版本）"
       fi
       exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
@@ -77,7 +90,6 @@ if [[ -z "${BIN_SRC:-}" || ! -f "${BIN_SRC:-/nonexistent}" ]]; then
       aarch64|arm64)    ARCH=aarch64 ;;
       *) die "不支持的架构 $(uname -m)（可用 release 资产：riscv64 / x86_64）" ;;
     esac
-    BASE="${CHUAN_BASE_URL:-https://github.com}"
     if [[ "$VERSION" == "latest" ]]; then
       REL="$BASE/$REPO/releases/latest/download"
       URL="$REL/chuan-$ARCH-linux-gnu.tar.gz"
@@ -196,6 +208,58 @@ fi
 say "安装 $BIN_SRC → $BIN"
 run install -Dm755 -o root -g root "$BIN_SRC" "$BIN"
 
+# 可选：安装 OpenTunnel CLI。它不是 chuan 的硬依赖；失败只警告，不阻断主安装。
+install_opentunnel() {
+  local dest="$R/usr/local/lib/chuan/opentunnel"
+  local src="" tmp="" file=""
+  if [[ -n "$OPENTUNNEL_BIN_SRC" ]]; then
+    [[ -f "$OPENTUNNEL_BIN_SRC" ]] || { say "找不到 opentunnel：$OPENTUNNEL_BIN_SRC（跳过）"; return 0; }
+    src="$OPENTUNNEL_BIN_SRC"
+  else
+    local arch
+    case "$(uname -m)" in
+      riscv64) arch=riscv64 ;;
+      *) say "没有内置 OpenTunnel 资产（当前 $(uname -m)）；用 --opentunnel-bin 指定，跳过"; return 0 ;;
+    esac
+    local rel
+    if [[ "$VERSION" == "latest" ]]; then
+      rel="$BASE/$REPO/releases/latest/download"
+      file="chuan-opentunnel-riscv64-linux-gnu.tar.gz"
+    else
+      rel="$BASE/$REPO/releases/download/$VERSION"
+      file="chuan-opentunnel-riscv64-linux-gnu.tar.gz"
+    fi
+    command -v curl >/dev/null || { say "需要 curl 下载 OpenTunnel，跳过"; return 0; }
+    command -v tar  >/dev/null || { say "需要 tar 解包 OpenTunnel，跳过"; return 0; }
+    tmp="$(mktemp -d)"
+    local curl_cmd=(curl -fsSL --retry 3)
+    [[ -n "$PROXY" ]] && curl_cmd+=(-x "$PROXY")
+    if ! "${curl_cmd[@]}" -o "$tmp/$file" "$rel/$file"; then
+      say "下载 OpenTunnel 失败（可作为可选组件稍后手工安装）；跳过"
+      rm -rf "$tmp"; return 0
+    fi
+    if "${curl_cmd[@]}" -o "$tmp/SHA256SUMS" "$rel/SHA256SUMS" 2>/dev/null        && grep -q " $file\$" "$tmp/SHA256SUMS"; then
+      ( cd "$tmp" && grep " $file\$" SHA256SUMS | sha256sum -c - )         || { say "OpenTunnel 包校验失败；跳过"; rm -rf "$tmp"; return 0; }
+    else
+      say "取不到 OpenTunnel SHA256SUMS，跳过校验"
+    fi
+    mkdir -p "$tmp/pkg"
+    tar -xzf "$tmp/$file" -C "$tmp/pkg" || { say "OpenTunnel 包解压失败；跳过"; rm -rf "$tmp"; return 0; }
+    src="$tmp/pkg/opentunnel"
+    [[ -f "$src" ]] || { say "OpenTunnel 包里没有 opentunnel；跳过"; rm -rf "$tmp"; return 0; }
+    run install -d -m 0755 -o root -g root "$dest"
+    run install -Dm755 -o root -g root "$src" "$dest/opentunnel"
+    [[ -f "$tmp/pkg/LICENSE-opentunnel" ]] && run install -Dm644 -o root -g root "$tmp/pkg/LICENSE-opentunnel" "$dest/LICENSE-opentunnel"
+    [[ -f "$tmp/pkg/VERSION" ]] && run install -Dm644 -o root -g root "$tmp/pkg/VERSION" "$dest/VERSION"
+    rm -rf "$tmp"
+    say "OpenTunnel 已安装：$dest/opentunnel"
+    return 0
+  fi
+  run install -d -m 0755 -o root -g root "$dest"
+  run install -Dm755 -o root -g root "$src" "$dest/opentunnel"
+  say "OpenTunnel 已安装：$dest/opentunnel"
+}
+
 # 3. 目录（新装建、旧装校正）
 # /etc/chuan 必须与 unit 的 ConfigurationDirectoryMode 一致（0750），组为服务组：
 # 否则 daemon 读不到 0640 的配置，systemd 每次启动还会告警。
@@ -223,6 +287,11 @@ ensure_dir "$STATE/timers" 0750 "$SVC_USER" "$SVC_GROUP"
 for d in workspaces inbox skills media files rt; do
   [[ -d "$STATE/$d" ]] && ensure_dir "$STATE/$d" 0750 "$SVC_USER" "$SVC_GROUP"
 done
+
+if [[ $WITH_OPENTUNNEL -eq 1 ]]; then
+  install_opentunnel
+fi
+ensure_dir "$STATE/oauth" 0750 "$SVC_USER" "$SVC_GROUP"
 
 # 3b. 默认命令条目（只补缺，不覆盖）
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -353,8 +422,24 @@ if [[ -z $R ]]; then
   fi
 fi
 
-cat <<NEXT
+if [[ $BOOTSTRAP_OAUTH -eq 1 ]]; then
+  if [[ -z $R && $DRY_RUN -eq 0 ]]; then
+    boot_script="$(asset bootstrap-oauth-tunnel.sh || true)"
+    if [[ -n "$boot_script" && -x "${R}/usr/local/lib/chuan/opentunnel/opentunnel" ]]; then
+      say "创建 OAuth 回调 tunnel（可选，可能需要 1–2 分钟）"
+      CHUAN_USER="$SVC_USER" CHUAN_GROUP="$SVC_GROUP" \
+      OPENTUNNEL_BIN="${R}/usr/local/lib/chuan/opentunnel/opentunnel" \
+      CHUAN_OAUTH_DIR="$STATE/oauth/opentunnel" \
+      bash "$boot_script" || say "OpenTunnel bootstrap 未完成（不影响 chuan；可稍后重跑该脚本）"
+    else
+      say "没有 opentunnel 或 bootstrap 脚本；跳过 OAuth tunnel 创建"
+    fi
+  else
+    say "[dry-run/临时根] 跳过 OAuth tunnel bootstrap"
+  fi
+fi
 
+cat <<NEXT
 下一步（未自动执行）：
   1) 放密钥（systemd 以 root 读，服务用户看不到）：
        install -m 0400 -o root -g root <token>   /etc/chuan/secrets/telegram_token

@@ -24,6 +24,9 @@ StateDirectory=chuan
 StateDirectoryMode=0750
 ConfigurationDirectory=chuan
 ConfigurationDirectoryMode=0750
+# 外部适配器的 UDS 放在这里（D44）：目录可穿越，socket 本身 0600。
+RuntimeDirectory=chuan
+RuntimeDirectoryMode=0755
 
 # 凭据：root 读取，按 fd 注入，不进 environ（见 docs/OPS.md §2）
 LoadCredential=telegram_token:/etc/chuan/secrets/telegram_token

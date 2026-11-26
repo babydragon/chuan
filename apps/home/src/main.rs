@@ -2,12 +2,14 @@
 //!
 //! 用法：
 //!   chuan [--config <toml>] [--provider <p>] [--model <m>] [--db <path>]
+//!   chuan oauth-mcp <manifest|begin|finish|status|refresh|serve> ...
 //!   chuan backup [...]
 
 mod any_driver;
 mod backup;
 mod command_admin;
 mod config;
+mod oauth_mcp;
 mod model_pick;
 mod model_window;
 mod offsets;
@@ -88,6 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         };
+    }
+
+    if argv.get(1).map(String::as_str) == Some("oauth-mcp") {
+        if let Err(e) = oauth_mcp::run(&argv[2..]).await {
+            eprintln!("oauth-mcp: {e}");
+            std::process::exit(2);
+        }
+        return Ok(());
     }
 
     let cli = match config::Cli::parse(std::env::args()) {
@@ -261,6 +271,16 @@ async fn daemon(cfg: &config::Config) -> Result<(), Box<dyn std::error::Error>> 
 
     let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
     for name in &cfg.enabled_channels {
+        // 外部适配器优先：同名时由 socket 实现接管（D44，便于微信平滑迁移）
+        if let Some(ad) = cfg.channel_adapters.iter().find(|a| &a.id == name) {
+            let ch = harness_channels::socket::SocketChannel::bind(
+                ad.clone(),
+                std::path::PathBuf::from(&cfg.media_dir),
+            )
+            .unwrap_or_else(|e| die_config(format!("适配器 {name}: {e}")));
+            channels.push(Arc::new(ch) as Arc<dyn Channel>);
+            continue;
+        }
         match name.as_str() {
         "weixin" => {
             let book = match Accounts::load(std::path::Path::new(&cfg.weixin_credential)) {

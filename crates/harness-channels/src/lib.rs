@@ -3,6 +3,7 @@
 pub mod html;
 pub mod media;
 pub mod offsets;
+pub mod socket;
 pub mod telegram;
 pub mod view;
 pub mod weixin;

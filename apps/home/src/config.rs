@@ -52,9 +52,10 @@ impl Cli {
 }
 
 fn usage() -> String {
-    "用法: chuan [backup] [weixin-login] [--config <toml>] [--provider <p>] [--model <m>] [--db <path>]\n\
+    "用法: chuan [backup] [weixin-login] [oauth-mcp ...] [--config <toml>] [--provider <p>] [--model <m>] [--db <path>]\n\
      \n\
-     \x20 weixin-login   扫码登录微信（ClawBot/iLink），凭据写入 [weixin] credential_file".into()
+     \x20 weixin-login   扫码登录微信（ClawBot/iLink），凭据写入 [weixin] credential_file\n\
+     \x20 oauth-mcp      OAuth provider manifest / 授权 / 刷新 / 本地 MCP 服务".into()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -390,6 +391,30 @@ pub struct ChannelsFile {
     /// 例如 `["telegram", "weixin"]`；空 = telegram
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// 外部适配器（D44）。`[[channels.adapter]]`
+    #[serde(default)]
+    pub adapter: Vec<AdapterFile>,
+}
+
+/// 一个外部通道适配器（D44）。socket 由核心监听，适配器作为客户端连入。
+#[derive(Clone, Debug, Deserialize)]
+pub struct AdapterFile {
+    pub id: String,
+    /// 默认 `/run/chuan/channels/<id>.sock`
+    #[serde(default)]
+    pub socket: Option<String>,
+    /// 期望的对端 uid（数字或用户名）；不写 = 不校验（socket 仍为 0600）
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// 适配器写附件的目录；不写 = 不接受附件
+    #[serde(default)]
+    pub media_dir: Option<String>,
+    #[serde(default = "default_adapter_media_mb")]
+    pub max_media_mb: u64,
+}
+
+fn default_adapter_media_mb() -> u64 {
+    20
 }
 
 /// `[weixin]`：ClawBot / iLink（docs/WEIXIN.md）
@@ -717,6 +742,8 @@ pub struct Config {
     pub timezone: String,
     /// 启用的通道（按顺序；第一个是默认通道）
     pub enabled_channels: Vec<String>,
+    /// 外部通道适配器（D44）
+    pub channel_adapters: Vec<harness_channels::socket::AdapterConfig>,
     pub weixin_credential: String,
     pub weixin_stale_s: i64,
     pub stale_after_s: i64,
@@ -1029,6 +1056,32 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
         );
     }
 
+    // 外部适配器（D44）：先建配置，再校验 enabled 里引用的 id。
+    let mut channel_adapters = Vec::new();
+    let mut adapter_ids = std::collections::HashSet::new();
+    for a in &file.channels.adapter {
+        let id = a.id.trim().to_lowercase();
+        if id.is_empty() {
+            return Err("[channels.adapter] 里有一条 id 为空".into());
+        }
+        if !adapter_ids.insert(id.clone()) {
+            return Err(format!("[channels.adapter] 里 id 重复：{id}"));
+        }
+        let socket = a
+            .socket
+            .as_deref()
+            .map(expand_tilde)
+            .unwrap_or_else(|| PathBuf::from(format!("/run/chuan/channels/{id}.sock")));
+        let media_dir = a.media_dir.as_deref().map(expand_tilde);
+        channel_adapters.push(harness_channels::socket::AdapterConfig::new(
+            id,
+            socket,
+            a.uid.as_deref(),
+            media_dir,
+            a.max_media_mb,
+        )?);
+    }
+
     // 通道列表：环境变量 CHUAN_CHANNEL 可以临时收成单通道（调试用）
     let mut enabled_channels: Vec<String> = std::env::var("CHUAN_CHANNEL")
         .ok()
@@ -1039,9 +1092,11 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     }
     for c in &mut enabled_channels {
         *c = c.trim().to_lowercase();
-        if !matches!(c.as_str(), "telegram" | "weixin") {
+        if !matches!(c.as_str(), "telegram" | "weixin") && !adapter_ids.contains(c.as_str()) {
+            let known: Vec<&str> = adapter_ids.iter().map(String::as_str).collect();
             return Err(format!(
-                "[channels] enabled 里有不认识的通道 \"{c}\"（可选 telegram / weixin）"
+                "[channels] enabled 里有不认识的通道 \"{c}\"（可选 telegram / weixin / {}）",
+                if known.is_empty() { "（未配置 adapter）".to_owned() } else { known.join(" / ") }
             ));
         }
     }
@@ -1121,6 +1176,7 @@ pub fn load(cli: &Cli) -> Result<Config, String> {
     Ok(Config {
         app_name: file.app.name,
         enabled_channels,
+        channel_adapters,
         weixin_credential: expand_tilde(
             file.weixin
                 .credential_file

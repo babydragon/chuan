@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use crate::ids::{CallId, MsgRef};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Caps {
     pub edit: bool,
     pub buttons: bool,
@@ -11,22 +13,36 @@ pub struct Caps {
 
 impl Default for Caps {
     fn default() -> Self {
-        Self { edit: true, buttons: true, markdown: false, max_text: 4096, min_edit_interval_ms: 1000 }
+        Self {
+            edit: true,
+            buttons: true,
+            markdown: false,
+            max_text: 4096,
+            min_edit_interval_ms: 1000,
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolState {
     Running,
     Ok,
     Failed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Block {
     Paragraph(String),
-    Code { lang: Option<String>, text: String },
-    Image { uri: String, alt: String },
+    Code {
+        lang: Option<String>,
+        text: String,
+    },
+    Image {
+        uri: String,
+        alt: String,
+    },
     Divider,
     ToolCall {
         call: CallId,
@@ -36,7 +52,7 @@ pub enum Block {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Button {
     pub label: String,
     /// <= 64 字节（Telegram 限制）
@@ -44,7 +60,7 @@ pub struct Button {
 }
 
 /// 交互选项：与通道无关。通道决定渲染成按钮、序号还是弹窗。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Choice {
     /// 稳定标识（回调时原样带回）
     pub id: String,
@@ -53,13 +69,13 @@ pub struct Choice {
     pub value: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Prompt {
     pub text: String,
     pub choices: Vec<Choice>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct View {
     pub shard: u16,
     pub is_last: bool,
@@ -121,7 +137,8 @@ pub trait Renderer: Send {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EditOutcome {
     Edited,
     NotModified,

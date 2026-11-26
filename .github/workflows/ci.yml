@@ -93,10 +93,72 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  opentunnel:
+    name: opentunnel (riscv64, optional)
+    # 可选资产：不阻塞 chuan 发布；失败时 release 继续，install.sh --with-opentunnel 会提示缺包。
+    if: startsWith(github.ref, 'refs/tags/v')
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: anomalyco/opentunnel
+          # 固定到 tag；下面再校验它对应的 commit，防止 tag 被移动。
+          # 升级：同时改 ref、expected commit、asset 版本与 install.sh 测试。
+          ref: v0.6.2
+          path: opentunnel
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: opentunnel
+          key: opentunnel-riscv64
+
+      - uses: mlugg/setup-zig@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: 校验 tag 指向的提交
+        run: |
+          set -euo pipefail
+          cd opentunnel
+          test "$(git rev-parse HEAD)" = "1ad859e17924ec3f6741cbc4cdb54ce381c9007c" \
+            || { echo "opentunnel tag v0.6.2 指向了意外提交" >&2; exit 1; }
+
+      - name: 交叉编译 opentunnel
+        run: |
+          set -euo pipefail
+          cd opentunnel
+          cargo zigbuild --release --locked \
+            --target riscv64gc-unknown-linux-gnu.2.28 -p opentunnel-cli
+          BIN="target/riscv64gc-unknown-linux-gnu/release/opentunnel"
+          file "$BIN"
+          readelf -V "$BIN" | grep -o 'GLIBC_2\.[0-9]*' | sort -u | tail -3
+          mkdir -p dist
+          cp "$BIN" dist/opentunnel
+          cp LICENSE dist/LICENSE-opentunnel
+          printf 'opentunnel 0.6.2\ntag v0.6.2\ncommit %s\n' "$(git rev-parse HEAD)" > dist/VERSION
+          chmod +x dist/opentunnel
+          tar -czf chuan-opentunnel-v0.6.2-riscv64-linux-gnu.tar.gz -C dist .
+          cp chuan-opentunnel-v0.6.2-riscv64-linux-gnu.tar.gz \
+             chuan-opentunnel-riscv64-linux-gnu.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chuan-opentunnel-riscv64
+          path: opentunnel/chuan-opentunnel-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: release (${{ github.ref_name }})
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build]
+    needs: [test, build, opentunnel]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,7 +178,8 @@ jobs:
             dist="dist-$arch"
             mkdir -p "$dist"
             cp "artifacts/chuan-$arch/chuan" "$dist/chuan"
-            cp deploy/install.sh deploy/chuan.toml.example \
+            cp deploy/install.sh deploy/bootstrap-oauth-tunnel.sh \
+               deploy/chuan.toml.example \
                deploy/chuan.service deploy/chuan-hostd.service \
                deploy/chuan-backup.service deploy/chuan-backup.timer \
                README.md LICENSE "$dist/"
@@ -129,6 +192,10 @@ jobs:
             # 稳定别名：让 /releases/latest/download/chuan-<arch>-linux-gnu.tar.gz 永远指向最新
             cp "out/chuan-$TAG-$arch-linux-gnu.tar.gz" "out/chuan-$arch-linux-gnu.tar.gz"
           done
+          # 可选 OpenTunnel 资产（job continue-on-error，缺了不影响 chuan 主包）
+          if compgen -G "artifacts/chuan-opentunnel-riscv64/*.tar.gz" >/dev/null; then
+            cp artifacts/chuan-opentunnel-riscv64/*.tar.gz out/
+          fi
           cp deploy/install.sh out/install.sh
           cd out && sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS

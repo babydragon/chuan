@@ -1,6 +1,7 @@
 # 微信通道（ClawBot / iLink）实测事实
 
 > 状态：**调研中**。本文只记录事实，不含取舍与接入方案——结论形成后再开 ADR。
+> 通道适配器化（拆成旁路进程）的方案见 `EXTENSIONS.md §1.8`；本文只记平台事实。
 > 实测时间：2026-10-29。实测机：开发机（x86_64 Linux），**不是目标板**；手机微信 iOS。
 > 连接方式：直连（不走代理）。
 > 来源标注：`〔官方〕` = `github.com/Tencent/openclaw-weixin` 的 `docs/protocol_zh_CN.md`；

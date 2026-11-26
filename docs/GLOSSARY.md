@@ -12,7 +12,7 @@
 | **管家（本系统）** | Harness / `chuan` | 整个可运行实体：通道 + 内核 + 扩展 + 应用配置 | 机器人、框架、平台 |
 | **内核** | Kernel / `harness-kernel` | 编排、状态机、治理接口；不碰 IO、不含业务 | 引擎、runtime |
 | **引擎** | Engine / `harness-engine` | `TurnDriver` 的实现：请求构造、SSE 解析、usage 提取 | 内核、客户端库 |
-| **通道** | Channel | 传输适配器：收消息、发/编辑消息、声明能力 | 网关、适配器、connector |
+| **通道** | Channel | 消息入口的抽象：收消息、发/编辑消息、声明能力 | 网关、connector |
 | **微信通道** | Weixin / ClawBot · iLink | 第二入口（`WeixinChannel`）：长轮询、文本、入站图片/PDF、出站文件、平台自带语音转写；无编辑、无按钮 → 审批回 `1`/`2`（D25–D27） | 公众号、企业微信（均不在范围） |
 | **语音识别** | ASR | 把语音条转成文字。微信侧用平台自带转写（已通，rc.31）；TG 侧尚未接入，方案见 `ASR.md`（本地 sherpa-onnx + SenseVoice，K1 走 RVV） | 语音通道、听写服务 |
 | **状态反应** | Reaction / `react()` | 通道给某条**入站**消息挂表情的能力，用于表示"处理到哪一步"；无此能力的通道静默 no-op（D24） | 已读回执、表情回执 |
@@ -65,6 +65,9 @@
 | **工具包** | Tool Pack | 一组工具的集合（内置 / 技能 / MCP） | 插件包 |
 | **注册表** | Tool Registry | 运行时装配与角色裁剪的中枢 | 工厂、容器 |
 | **MCP** | Model Context Protocol | 外部工具协议；工具名 `mcp__<server>__<tool>` | 插件协议 |
+| **通道适配器** | Channel Adapter | 独立进程实现的通道，经 UDS 与内核通信（D44）；平台代码不进 `crates/` | 插件、连接器 |
+| **OAuth helper** | OAuth Helper | 宿主侧独立进程：授权码、PKCE、refresh token 与刷新（D45） | 授权服务、代理 |
+| **中继** | Relay | 只转发 OAuth 回调 `code` 的一次性公网端点，不持任何密钥（D45） | 回调服务器、代理 |
 
 ## D. 安全与治理
 

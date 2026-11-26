@@ -23,3 +23,7 @@ chuan.toml
 .vscode/
 *.swp
 .DS_Store
+
+# Python (adapters)
+__pycache__/
+*.pyc
